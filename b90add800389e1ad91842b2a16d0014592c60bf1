@@ -1,0 +1,14 @@
+greengate-attest-v2
+tree 9eebf7840bbd5b61a7c687cef8f4bff01b4a6a27
+gates pre-push-branch-protect pre-push-branch-pattern pre-push-secrets pre-push-pull-rebase pre-push-audit-rust pre-push-cargo-test pre-push-adr-lint-candidates pre-push-adr-lint-cli-probe
+platform x86_64-macos
+input pre-push-cargo-test ce2d549b88ff4f502f53669d5f3be1202b28765c
+canon 3bdff0cc242e0eae11508348d272de5cb79ff1e1
+greengate 4.4.0
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg7UOvJ8myo4dhW907VFty7T/bUV
+RFQerK+MWJ4bjChwcAAAAQZ3JlZW5nYXRlLWF0dGVzdAAAAAAAAAAGc2hhNTEyAAAAUwAA
+AAtzc2gtZWQyNTUxOQAAAECaR0vk1AX7HB33nAyF1gf/c9dXNFNg/p06tSTGOmwn4JJgc0
+I4p0EsVLqvtk9h80971sXGsQbWJ3WSA7tgXcoD
+-----END SSH SIGNATURE-----
