@@ -351,20 +351,36 @@ pub fn attest_push_per_tip(
     }
 }
 
-/// Where amont-agent leaves each provenance payload: `<config dir>/amont-agent/
-/// provenance`, the config dir resolved as amont-agent's `settings::config_dir`
+/// greenpiste's data directory under the Claude config dir.
+const PROVENANCE_OWNER: &str = "greenpiste";
+/// Its name before greenpiste 5.0 migrated it.
+// holds-until: the gate-guardrails programme census (ADR-0068) finds no
+// machine still holding the old directory.
+const OLD_PROVENANCE_OWNER: &str = "amont-agent";
+
+/// Where greenpiste leaves each provenance payload: `<config dir>/greenpiste/
+/// provenance`, the config dir resolved as greenpiste's `settings::config_dir`
 /// does (`$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`, else
-/// `%USERPROFILE%\.claude`).
+/// `%USERPROFILE%\.claude`). Before greenpiste 5.0 migrates a machine, the
+/// directory is `<config dir>/amont-agent/provenance`: that one is read only
+/// while the new one does not exist.
 ///
 /// Never a git config key: a key could point amont at a directory nobody
 /// guards, and the payload's `review` line is only as true as the guard on
-/// amont-agent's store. `env` is the lookup, so a test needs no global state.
+/// greenpiste's store. `env` is the lookup, so a test needs no global state.
 fn provenance_dir(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
     let config = match env("CLAUDE_CONFIG_DIR") {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(env("HOME").or_else(|| env("USERPROFILE"))?).join(".claude"),
     };
-    Some(config.join("amont-agent").join("provenance"))
+    let current = config.join(PROVENANCE_OWNER).join("provenance");
+    let old = config.join(OLD_PROVENANCE_OWNER).join("provenance");
+    let exists = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    Some(if !exists(&current) && exists(&old) {
+        old
+    } else {
+        current
+    })
 }
 
 /// The repository's name as amont-agent files it (its `repo_name`): the
@@ -562,10 +578,10 @@ fn canon_refusal(commit: &str, file: &std::path::Path) -> Vec<String> {
             "  provenance for {} not signed: its payload carries a canon line",
             &commit[..commit.len().min(7)]
         ),
-        "    (a pre-release amont-agent wrote it); delete the file".to_string(),
+        "    (a pre-release greenpiste wrote it); delete the file".to_string(),
         format!("    {name} in"),
         format!("    {dir}"),
-        "    and upgrade amont-agent".to_string(),
+        "    and upgrade greenpiste".to_string(),
     ]
 }
 
@@ -1055,7 +1071,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_provenance_dir_is_resolved_like_amont_agents_config_dir() {
+    fn the_new_provenance_dir_wins_and_the_old_is_read_while_it_is_absent() {
+        let config = dir("provenance-names");
+        let env = |k: &str| (k == "CLAUDE_CONFIG_DIR").then(|| config.clone().into_os_string());
+        let new = config.join("greenpiste/provenance");
+        let old = config.join("amont-agent/provenance");
+        assert_eq!(provenance_dir(env), Some(new.clone()), "neither: the new");
+        std::fs::create_dir_all(&old).unwrap();
+        assert_eq!(provenance_dir(env), Some(old.clone()), "old alone");
+        std::fs::create_dir_all(&new).unwrap();
+        assert_eq!(provenance_dir(env), Some(new.clone()), "both: the new");
+        std::fs::remove_dir_all(config.join("amont-agent")).unwrap();
+        assert_eq!(provenance_dir(env), Some(new), "new alone");
+    }
+
+    #[test]
+    fn the_provenance_dir_is_resolved_like_greenpistes_config_dir() {
         use std::ffi::OsString;
         let env = |pairs: &'static [(&'static str, &'static str)]| {
             move |k: &str| {
@@ -1067,15 +1098,15 @@ pub(crate) mod tests {
         };
         assert_eq!(
             provenance_dir(env(&[("CLAUDE_CONFIG_DIR", "/c"), ("HOME", "/h")])),
-            Some(PathBuf::from("/c/amont-agent/provenance"))
+            Some(PathBuf::from("/c/greenpiste/provenance"))
         );
         assert_eq!(
             provenance_dir(env(&[("HOME", "/h"), ("USERPROFILE", "/u")])),
-            Some(PathBuf::from("/h/.claude/amont-agent/provenance"))
+            Some(PathBuf::from("/h/.claude/greenpiste/provenance"))
         );
         assert_eq!(
             provenance_dir(env(&[("USERPROFILE", "/u")])),
-            Some(PathBuf::from("/u/.claude/amont-agent/provenance"))
+            Some(PathBuf::from("/u/.claude/greenpiste/provenance"))
         );
         assert_eq!(provenance_dir(env(&[])), None);
     }
