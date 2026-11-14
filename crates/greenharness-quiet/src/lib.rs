@@ -594,14 +594,14 @@ mod tests {
     fn greenpiste_and_amont_agent_entries_are_one_tool() {
         let dir = scratch("sweep-renamed");
         fs::create_dir_all(&dir).unwrap();
-        let w = |n: &str, body: &str| fs::write(dir.join(n), body).unwrap();
+        let write_entry = |name: &str, body: &str| fs::write(dir.join(name), body).unwrap();
         // pid 0x7fff_fff0 is not a process here.
-        w(
+        write_entry(
             "old-name.json",
             r#"{"tool":"amont-agent","pid":2147483632}"#,
         );
-        w("new-name.json", r#"{"tool":"greenpiste","pid":2147483632}"#);
-        w("other.json", r#"{"tool":"amont","pid":2147483632}"#);
+        write_entry("new-name.json", r#"{"tool":"greenpiste","pid":2147483632}"#);
+        write_entry("other.json", r#"{"tool":"amont","pid":2147483632}"#);
         sweep(&dir, "greenpiste", now_ms());
         let gone = |n: &str| !dir.join(n).exists();
         if cfg!(unix) {
