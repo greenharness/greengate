@@ -1528,7 +1528,7 @@ pub(crate) mod tests {
     }
 
     /// A payload that already states a canonical tree was written by a
-    /// pre-release amont-agent: it is refused, never signed, never removed.
+    /// pre-release greenpiste: it is refused, never signed, never removed.
     #[test]
     fn a_payload_with_a_canon_line_is_refused_and_kept() {
         let (d, work, remote, head, tree, _) = provenance_world("prov-canon");
@@ -1563,15 +1563,15 @@ pub(crate) mod tests {
             "9f1c2ab0d6e4c1b2a3f405e6d7c8b9a0f1e2d3c4".to_string(),
             "e".repeat(64),
         ] {
-            let file = PathBuf::from("/Users/someone/.claude/amont-agent/provenance/amont-agent")
+            let file = PathBuf::from("/Users/someone/.claude/greenpiste/provenance/greengate")
                 .join(&commit);
             let lines = canon_refusal(&commit, &file);
             assert!(lines[0].starts_with("  provenance for "), "{lines:?}");
             assert!(lines[0].contains(&commit[..7]), "{lines:?}");
             let all = lines.join("\n");
-            assert!(all.contains("canon line") && all.contains("pre-release amont-agent"));
+            assert!(all.contains("canon line") && all.contains("pre-release greenpiste"));
             assert!(all.contains(&format!("    {commit} in\n")), "{all}");
-            assert!(all.contains("upgrade amont-agent"), "{all}");
+            assert!(all.contains("upgrade greenpiste"), "{all}");
             for l in &lines {
                 assert!(
                     l.chars().count() <= 80,
