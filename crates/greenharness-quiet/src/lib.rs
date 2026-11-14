@@ -209,14 +209,15 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
 
 /// greenpiste's temp prefix, which replaces [`LEGACY_AMONT_AGENT_TEMP_PREFIX`].
 const GREENPISTE_TEMP_PREFIX: &str = ".greenpiste-tmp-";
-
-/// amont-agent's former temp prefix and `tool` value, read until the
-/// greenpiste rename census finds no program still writing them.
-// holds-until: the gate-guardrails programme census (ADR-0068) finds no
-// program still writing them.
-const LEGACY_AMONT_AGENT_TEMP_PREFIX: &str = ".amont-agent-tmp-";
-const LEGACY_AMONT_AGENT_TOOL: &str = "amont-agent";
+/// greenpiste's `tool` value, which replaces [`LEGACY_AMONT_AGENT_TOOL`].
 const GREENPISTE_TOOL: &str = "greenpiste";
+
+// holds-until: the gate-guardrails programme census (ADR-0068) finds no
+// program still writing these two.
+/// amont-agent's former temp prefix.
+const LEGACY_AMONT_AGENT_TEMP_PREFIX: &str = ".amont-agent-tmp-";
+/// amont-agent's former `tool` value.
+const LEGACY_AMONT_AGENT_TOOL: &str = "amont-agent";
 
 /// Whether the `tool` value an entry carries names the same tool as `wanted`,
 /// greenpiste and its former name amont-agent counting as one.
@@ -226,9 +227,9 @@ fn same_tool(found: Option<&str>, wanted: &str) -> bool {
 }
 
 /// Whether `name` is a temp some writer leaves while it writes: this crate's
-/// `.<id>.json.tmp`, and the two forms writers used before it, amont's
-/// `<id>.json.tmp` and greenpiste's `.greenpiste-tmp-*.json` (amont-agent's
-/// `.amont-agent-tmp-*.json` before its rename).
+/// `.<id>.json.tmp`; amont's `<id>.json.tmp`, which writers used before it;
+/// and greenpiste's `.greenpiste-tmp-*.json` (`.amont-agent-tmp-*.json`
+/// before its rename).
 fn is_temp(name: &str) -> bool {
     name.ends_with(".json.tmp")
         || ((name.starts_with(GREENPISTE_TEMP_PREFIX)
