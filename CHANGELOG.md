@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v4.5.0
+
 ### Changed
 
 - **greengate reads greenpiste's data names first.** Provenance payloads are
