@@ -8,6 +8,16 @@ missing here.
 
 ## Unreleased
 
+### Changed
+
+- **greengate reads greenpiste's data names first.** Provenance payloads are
+  read from `<config>/greenpiste/provenance`, and each one missing there from
+  the old `<config>/amont-agent/provenance` (named once per push);
+  the quiet-run sweep accepts `.greenpiste-tmp-*.json` temps and the `tool`
+  value `greenpiste` beside the old ones, and the unsigned-legacy-payload
+  message says to upgrade greenpiste. The old names go at the programme
+  census.
+
 ## v4.4.0
 
 ### Changed

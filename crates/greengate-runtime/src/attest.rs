@@ -351,20 +351,44 @@ pub fn attest_push_per_tip(
     }
 }
 
-/// Where amont-agent leaves each provenance payload: `<config dir>/amont-agent/
-/// provenance`, the config dir resolved as amont-agent's `settings::config_dir`
-/// does (`$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`, else
-/// `%USERPROFILE%\.claude`).
+/// greenpiste's data directory under the Claude config dir.
+const PROVENANCE_OWNER: &str = "greenpiste";
+/// Its name before greenpiste 5.0 migrated it.
+// holds-until: the gate-guardrails programme census (ADR-0068) finds no
+// machine still holding the old directory.
+const OLD_PROVENANCE_OWNER: &str = "amont-agent";
+
+/// Where greenpiste leaves each provenance payload, newest name first:
+/// `<config dir>/greenpiste/provenance`, then `<config dir>/amont-agent/
+/// provenance`, where payloads stay until greenpiste 5.0 migrates the machine.
+/// The config dir is resolved as greenpiste's `settings::config_dir` does
+/// (`$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`, else `%USERPROFILE%\.claude`).
 ///
 /// Never a git config key: a key could point amont at a directory nobody
 /// guards, and the payload's `review` line is only as true as the guard on
-/// amont-agent's store. `env` is the lookup, so a test needs no global state.
-fn provenance_dir(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+/// greenpiste's store. `env` is the lookup, so a test needs no global state.
+fn provenance_dirs(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<[PathBuf; 2]> {
     let config = match env("CLAUDE_CONFIG_DIR") {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(env("HOME").or_else(|| env("USERPROFILE"))?).join(".claude"),
     };
-    Some(config.join("amont-agent").join("provenance"))
+    Some([PROVENANCE_OWNER, OLD_PROVENANCE_OWNER].map(|o| config.join(o).join("provenance")))
+}
+
+/// The payload file for `commit` and its text: from the first directory that
+/// holds it. Only a missing file falls through to the next directory; any
+/// other read error ends the lookup, so a stale old file never stands in for
+/// an unreadable new one.
+fn read_payload(dirs: &[PathBuf], commit: &str) -> Option<(usize, PathBuf, String)> {
+    for (at, dir) in dirs.iter().enumerate() {
+        let file = dir.join(commit);
+        match std::fs::read_to_string(&file) {
+            Ok(text) => return Some((at, file, text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// The repository's name as amont-agent files it (its `repo_name`): the
@@ -398,23 +422,37 @@ pub fn provenance_push(settings: &crate::config::Settings, remote: &str, refs: &
     if remote.is_empty() || !enabled(settings) {
         return;
     }
-    let (Some(dir), Some(name)) = (provenance_dir(|k| std::env::var_os(k)), repo_name()) else {
+    let (Some(dirs), Some(name)) = (provenance_dirs(|k| std::env::var_os(k)), repo_name()) else {
         return;
     };
-    provenance_push_from(&dir.join(name), remote, refs);
+    provenance_push_from_dirs(&dirs.map(|d| d.join(&name)), remote, refs);
 }
 
 /// [`provenance_push`] reading payloads from `dir`.
+#[cfg(test)]
 fn provenance_push_from(dir: &std::path::Path, remote: &str, refs: &[PushRef]) {
+    provenance_push_from_dirs(&[dir.to_path_buf()], remote, refs);
+}
+
+/// [`provenance_push`] reading each payload from the first of `dirs` that
+/// holds it; a payload found past the first is named once, with its directory.
+fn provenance_push_from_dirs(dirs: &[PathBuf], remote: &str, refs: &[PushRef]) {
     let mut found: Vec<PendingRecord> = Vec::new();
+    let mut named_old = false;
     for r in refs {
         if is_zero(&r.local_oid) {
             continue;
         }
-        let file = dir.join(&r.local_oid);
-        let Ok(payload) = std::fs::read_to_string(&file) else {
+        let Some((at, file, payload)) = read_payload(dirs, &r.local_oid) else {
             continue; // no record for this commit: nothing to say
         };
+        if at > 0 && !named_old {
+            named_old = true;
+            crate::say!(
+                "  provenance read from {} (amont-agent's directory, until greenpiste 5.0 moves it)",
+                dirs[at].display()
+            );
+        }
         let spec = format!("{}^{{tree}}", r.local_oid);
         let Some(tree) = crate::git::stdout(&["rev-parse", &spec]) else {
             continue;
@@ -562,10 +600,10 @@ fn canon_refusal(commit: &str, file: &std::path::Path) -> Vec<String> {
             "  provenance for {} not signed: its payload carries a canon line",
             &commit[..commit.len().min(7)]
         ),
-        "    (a pre-release amont-agent wrote it); delete the file".to_string(),
+        "    (a pre-release greenpiste wrote it); delete the file".to_string(),
         format!("    {name} in"),
         format!("    {dir}"),
-        "    and upgrade amont-agent".to_string(),
+        "    and upgrade greenpiste".to_string(),
     ]
 }
 
@@ -1055,7 +1093,36 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_provenance_dir_is_resolved_like_amont_agents_config_dir() {
+    fn each_payload_is_read_from_the_new_dir_first_then_the_old() {
+        let config = dir("provenance-names");
+        let new = config.join("greenpiste/provenance/r");
+        let old = config.join("amont-agent/provenance/r");
+        let dirs = [new.clone(), old.clone()];
+        assert_eq!(read_payload(&dirs, "c1"), None, "neither holds it");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("c1"), "old").unwrap();
+        assert_eq!(
+            read_payload(&dirs, "c1"),
+            Some((1, old.join("c1"), "old".into())),
+            "old alone"
+        );
+        // The new root exists, but this commit's payload is still in the old.
+        std::fs::create_dir_all(&new).unwrap();
+        assert_eq!(read_payload(&dirs, "c1").map(|(at, ..)| at), Some(1));
+        std::fs::write(new.join("c1"), "new").unwrap();
+        assert_eq!(
+            read_payload(&dirs, "c1"),
+            Some((0, new.join("c1"), "new".into())),
+            "both: the new"
+        );
+        // An unreadable new entry (here a directory) never falls back.
+        std::fs::create_dir_all(new.join("c2")).unwrap();
+        std::fs::write(old.join("c2"), "old").unwrap();
+        assert_eq!(read_payload(&dirs, "c2"), None);
+    }
+
+    #[test]
+    fn the_provenance_dir_is_resolved_like_greenpistes_config_dir() {
         use std::ffi::OsString;
         let env = |pairs: &'static [(&'static str, &'static str)]| {
             move |k: &str| {
@@ -1066,18 +1133,27 @@ pub(crate) mod tests {
             }
         };
         assert_eq!(
-            provenance_dir(env(&[("CLAUDE_CONFIG_DIR", "/c"), ("HOME", "/h")])),
-            Some(PathBuf::from("/c/amont-agent/provenance"))
+            provenance_dirs(env(&[("CLAUDE_CONFIG_DIR", "/c"), ("HOME", "/h")])),
+            Some([
+                PathBuf::from("/c/greenpiste/provenance"),
+                PathBuf::from("/c/amont-agent/provenance")
+            ])
         );
         assert_eq!(
-            provenance_dir(env(&[("HOME", "/h"), ("USERPROFILE", "/u")])),
-            Some(PathBuf::from("/h/.claude/amont-agent/provenance"))
+            provenance_dirs(env(&[("HOME", "/h"), ("USERPROFILE", "/u")])),
+            Some([
+                PathBuf::from("/h/.claude/greenpiste/provenance"),
+                PathBuf::from("/h/.claude/amont-agent/provenance")
+            ])
         );
         assert_eq!(
-            provenance_dir(env(&[("USERPROFILE", "/u")])),
-            Some(PathBuf::from("/u/.claude/amont-agent/provenance"))
+            provenance_dirs(env(&[("USERPROFILE", "/u")])),
+            Some([
+                PathBuf::from("/u/.claude/greenpiste/provenance"),
+                PathBuf::from("/u/.claude/amont-agent/provenance")
+            ])
         );
-        assert_eq!(provenance_dir(env(&[])), None);
+        assert_eq!(provenance_dirs(env(&[])), None);
     }
 
     /// A repository with a bare origin, the toggle on and a key; one commit
@@ -1452,7 +1528,7 @@ pub(crate) mod tests {
     }
 
     /// A payload that already states a canonical tree was written by a
-    /// pre-release amont-agent: it is refused, never signed, never removed.
+    /// pre-release greenpiste: it is refused, never signed, never removed.
     #[test]
     fn a_payload_with_a_canon_line_is_refused_and_kept() {
         let (d, work, remote, head, tree, _) = provenance_world("prov-canon");
@@ -1487,15 +1563,15 @@ pub(crate) mod tests {
             "9f1c2ab0d6e4c1b2a3f405e6d7c8b9a0f1e2d3c4".to_string(),
             "e".repeat(64),
         ] {
-            let file = PathBuf::from("/Users/someone/.claude/amont-agent/provenance/amont-agent")
+            let file = PathBuf::from("/Users/someone/.claude/greenpiste/provenance/greengate")
                 .join(&commit);
             let lines = canon_refusal(&commit, &file);
             assert!(lines[0].starts_with("  provenance for "), "{lines:?}");
             assert!(lines[0].contains(&commit[..7]), "{lines:?}");
             let all = lines.join("\n");
-            assert!(all.contains("canon line") && all.contains("pre-release amont-agent"));
+            assert!(all.contains("canon line") && all.contains("pre-release greenpiste"));
             assert!(all.contains(&format!("    {commit} in\n")), "{all}");
-            assert!(all.contains("upgrade amont-agent"), "{all}");
+            assert!(all.contains("upgrade greenpiste"), "{all}");
             for l in &lines {
                 assert!(
                     l.chars().count() <= 80,

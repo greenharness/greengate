@@ -207,12 +207,34 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     done
 }
 
+/// greenpiste's temp prefix, which replaces [`LEGACY_AMONT_AGENT_TEMP_PREFIX`].
+const GREENPISTE_TEMP_PREFIX: &str = ".greenpiste-tmp-";
+/// greenpiste's `tool` value, which replaces [`LEGACY_AMONT_AGENT_TOOL`].
+const GREENPISTE_TOOL: &str = "greenpiste";
+
+// holds-until: the gate-guardrails programme census (ADR-0068) finds no
+// program still writing these two.
+/// amont-agent's former temp prefix.
+const LEGACY_AMONT_AGENT_TEMP_PREFIX: &str = ".amont-agent-tmp-";
+/// amont-agent's former `tool` value.
+const LEGACY_AMONT_AGENT_TOOL: &str = "amont-agent";
+
+/// Whether the `tool` value an entry carries names the same tool as `wanted`,
+/// greenpiste and its former name amont-agent counting as one.
+fn same_tool(found: Option<&str>, wanted: &str) -> bool {
+    let is_greenpiste = |name: &str| name == GREENPISTE_TOOL || name == LEGACY_AMONT_AGENT_TOOL;
+    found.is_some_and(|f| f == wanted || (is_greenpiste(f) && is_greenpiste(wanted)))
+}
+
 /// Whether `name` is a temp some writer leaves while it writes: this crate's
-/// `.<id>.json.tmp`, and the two forms writers used before it, amont's
-/// `<id>.json.tmp` and amont-agent's `.amont-agent-tmp-*.json`.
+/// `.<id>.json.tmp`; amont's `<id>.json.tmp`, which writers used before it;
+/// and greenpiste's `.greenpiste-tmp-*.json` (`.amont-agent-tmp-*.json`
+/// before its rename).
 fn is_temp(name: &str) -> bool {
     name.ends_with(".json.tmp")
-        || (name.starts_with(".amont-agent-tmp-") && name.ends_with(".json"))
+        || ((name.starts_with(GREENPISTE_TEMP_PREFIX)
+            || name.starts_with(LEGACY_AMONT_AGENT_TEMP_PREFIX))
+            && name.ends_with(".json"))
 }
 
 /// Remove `tool`'s entries whose run is gone without ending, any ended entry
@@ -245,7 +267,7 @@ pub fn sweep(dir: &Path, tool: &str, now_ms: u128) {
         let stale = match field(&text, "ended").and_then(|n| n.parse::<u128>().ok()) {
             Some(ended) => now_ms.saturating_sub(ended) > ENDED_KEEP_MS,
             None => {
-                field(&text, "tool") == Some(tool)
+                same_tool(field(&text, "tool"), tool)
                     && field(&text, "pid")
                         .and_then(|p| p.parse::<i64>().ok())
                         .is_some_and(|pid| !alive(pid))
@@ -530,7 +552,12 @@ mod tests {
             "recent.json",
             &format!(r#"{{"tool":"amont","ended":{}}}"#, now - 1_000),
         );
-        let temps = [".1-0.json.tmp", "1-1.json.tmp", ".amont-agent-tmp-1-2.json"];
+        let temps = [
+            ".1-0.json.tmp",
+            "1-1.json.tmp",
+            ".amont-agent-tmp-1-2.json",
+            ".greenpiste-tmp-1-3.json",
+        ];
         for t in temps {
             w(t, "");
         }
@@ -561,6 +588,31 @@ mod tests {
         for t in temps {
             assert!(gone(t), "a stale temp {t} goes");
         }
+    }
+
+    #[test]
+    fn greenpiste_and_amont_agent_entries_are_one_tool() {
+        let dir = scratch("sweep-renamed");
+        fs::create_dir_all(&dir).unwrap();
+        let write_entry = |name: &str, body: &str| fs::write(dir.join(name), body).unwrap();
+        // pid 0x7fff_fff0 is not a process here.
+        write_entry(
+            "old-name.json",
+            r#"{"tool":"amont-agent","pid":2147483632}"#,
+        );
+        write_entry("new-name.json", r#"{"tool":"greenpiste","pid":2147483632}"#);
+        write_entry("other.json", r#"{"tool":"amont","pid":2147483632}"#);
+        sweep(&dir, "greenpiste", now_ms());
+        let gone = |n: &str| !dir.join(n).exists();
+        if cfg!(unix) {
+            assert!(gone("old-name.json"), "the former name is the same tool");
+            assert!(gone("new-name.json"));
+        }
+        assert!(!gone("other.json"), "another tool's entry is its own");
+        assert!(same_tool(Some("greenpiste"), "amont-agent"));
+        assert!(same_tool(Some("amont"), "amont"));
+        assert!(!same_tool(Some("amont"), "greenpiste"));
+        assert!(!same_tool(None, "greenpiste"));
     }
 
     #[test]
