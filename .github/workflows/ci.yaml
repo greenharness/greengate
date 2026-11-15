@@ -1010,6 +1010,30 @@ jobs:
       - name: Install the tools the hooks drive
         run: npm i -g eslint prettier pyright pnpm
 
+      # snapshotDeps reuse clones node_modules copy-on-write or refuses; it
+      # never falls back to a plain copy (clone_dir). The runner's root is
+      # ext4, which cannot clone, so every test that expects a reuse would see
+      # the refusal instead. TMPDIR is where those tests build the working tree
+      # and its snapshot, so it moves to an XFS image with reflinks, proven
+      # here before any test depends on it. The refusal itself is asserted
+      # separately, on tmpfs (clone_dir_refuses_a_filesystem_without_reflinks).
+      - name: A reflink filesystem for the snapshot tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends xfsprogs
+          img="$RUNNER_TEMP/reflink.img"
+          truncate -s 4G "$img"
+          mkfs.xfs -q -m reflink=1 "$img"
+          sudo mkdir -p /mnt/reflink
+          sudo mount -o loop "$img" /mnt/reflink
+          sudo chown "$(id -u):$(id -g)" /mnt/reflink
+          mkdir /mnt/reflink/probe
+          echo x > /mnt/reflink/probe/a
+          cp --reflink=always /mnt/reflink/probe/a /mnt/reflink/probe/b
+          rm -r /mnt/reflink/probe
+          echo "TMPDIR=/mnt/reflink" >> "$GITHUB_ENV"
+
       # kube-linter and kubeconform are Severity::Block checks that had never
       # RUN their tool in any test environment: every k8s case asserted
       # scoping or the not-opted-in silence, so the two checks that stop

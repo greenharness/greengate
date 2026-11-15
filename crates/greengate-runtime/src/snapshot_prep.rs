@@ -1164,6 +1164,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
     }
 
+    /// tmpfs cannot clone: the refusal names the clone, leaves no destination
+    /// behind and never falls back to a copy. CI's other Linux tests run on an
+    /// XFS image with reflinks (`.github/workflows/ci.yaml`), so this is the
+    /// one that proves the refusal there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_dir_refuses_a_filesystem_without_reflinks() {
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() {
+            eprintln!("no /dev/shm here: the refusal test has no tmpfs to run on");
+            return;
+        }
+        let d = shm.join(format!("clone-tmpfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/f"), "data").unwrap();
+        let err = clone_dir(&d.join("src"), &d.join("dst")).unwrap_err();
+        assert!(err.starts_with("no copy-on-write clone of "), "{err}");
+        assert!(
+            !d.join("dst").exists(),
+            "a refused clone left a destination"
+        );
+        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
+    }
+
     #[test]
     fn lexical_refusals() {
         for bad in [
