@@ -363,7 +363,7 @@ skips when the tool is absent.
 4. Disk: on the real repos, free space on the data volume before and after
    a reused snapshot against a fresh install, per manager, three runs each;
    for npm and yarn the clone's extra bytes are at most 10% of the install's
-   (pnpm is reported only). A stub `cp` cannot test the refusal, since `clone_dir` runs `/bin/cp` by absolute path and macOS no longer uses it: the refusal is covered by a unit test (existing destination: `EEXIST`, nothing created), by the Linux ext4 test (Tests) and by one manual cross-volume run on a scratch APFS image (`hdiutil create -size 64m -fs APFS`), where the unit must install and no bytes may be copied. The pnpm tests that expected a
+   (pnpm is reported only). A stub `cp` cannot test the refusal, since `clone_dir` runs `/bin/cp` by absolute path and macOS no longer uses it: the refusal is covered by a unit test (existing destination: `EEXIST`, nothing created), by the Linux tmpfs tests (Tests) and by one manual cross-volume run on a scratch APFS image (`hdiutil create -size 64m -fs APFS`), where the unit must install and no bytes may be copied. The pnpm tests that expected a
    fallback copy are changed, and the change is named in the PR.
 5. On each real repo, median voucher time against install time over 5 runs, within Phase 0's 50% bar, recorded in the PR description, plus the cost of a refused reuse (clone, refusal, then the full install).
 6. `git config greengate.snapshotDeps reuse` set globally is honoured by a push in a repo that sets nothing itself (the reuse line prints).
