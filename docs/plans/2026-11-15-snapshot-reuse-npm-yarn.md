@@ -116,8 +116,7 @@ What the code does today, read from `snapshot_prep.rs`:
   failure can never delete a path greengate did not create.
   On Linux it runs `cp -R --reflink=always` (per-file, and only CI uses it
   today). On every other platform it refuses, as it does now. A refusal
-  prints `no copy-on-write clone of <src> into <dst> (<os error>); installing
-  instead` and the unit installs, so a gate run never writes a hidden full
+  prints `no copy-on-write clone of <src> (<reason>)` after the caller's `not reusing the working tree's install:` and the unit installs, so a gate run never writes a hidden full
   copy.
 - The snapshot is removed when the push finishes (`pushed_tree.rs:342`); a
   crash or kill leaves it behind. Only one `greengate-push*` leftover exists in
@@ -349,7 +348,7 @@ skips when the tool is absent.
 - Add `real_npm_accepts_a_matching_clone_and_refuses_a_mismatch` and the yarn
   twin next to `real_pnpm_accepts_a_matching_clone_and_refuses_a_mismatch`
   (line 1370).
-- CI: add `yarn@1` to the `npm i -g` line in `.github/workflows/ci.yaml` (~1011); the ubuntu leg of the `test` job loop-mounts a reflink filesystem (xfs with `reflink=1`, or btrfs) and points `TMPDIR` at it, so the pnpm reuse tests (snapshot_deps.rs:741-930, 1370) still clone there; the CI reporter forbids skipped cases (ci.yaml:766-772), so no accept test skips; one test placed outside that mount (ext4) asserts the no-copy-on-write refusal (Disk section's text) and a successful install; the real npm/yarn twins fail instead of skipping when `GREENGATE_REAL_JS=1`, set only in the `test` job that installs them (the `windows` job runs `cargo test` with `CI=true` and has no pnpm, yarn or clone tool).
+- CI: add `yarn@1` to the `npm i -g` line in `.github/workflows/ci.yaml` (~1011); the ubuntu leg of the `test` job loop-mounts a reflink filesystem (xfs with `reflink=1`, or btrfs) and points `TMPDIR` at it, so the pnpm reuse tests (snapshot_deps.rs:741-930, 1370) still clone there; the CI reporter forbids skipped cases (ci.yaml:766-772), so no accept test skips; two tests off that mount (tmpfs, `/dev/shm`) prove the refusal: a unit test (`clone_dir_refuses_a_filesystem_without_reflinks`) and a stubbed-pnpm integration test (`pnpm_reuse_installs_when_the_snapshot_cannot_clone`) that sets the child's TMPDIR to `/dev/shm` and asserts the one-line refusal, the install and no surviving clone; both fail instead of passing silently when `CI` is set and tmpfs is missing; the real npm/yarn twins fail instead of skipping when `GREENGATE_REAL_JS=1`, set only in the `test` job that installs them (the `windows` job runs `cargo test` with `CI=true` and has no pnpm, yarn or clone tool).
 
 ## Verification
 
@@ -403,5 +402,24 @@ reported in words; its vouch and refusals stay as they are.
 - amont: backend, lang:rust, tui, unix
 
 Left out: architect and po (no new module; one new pub fn, `capture_stdout_within`, in the shared runner `hooks/common.rs`, which architect reviewed in rounds 1-3; otherwise a refusal path behind an existing opt-in setting). tui stays: a new `checking node_modules` line, a reworded yarn acceptance line and the `cloned, copy-on-write` wording are person-facing.
+
+## Outcome (Phase 1a)
+
+Phase 0 case (g) and the disk and clone measurements are above. Phase 1a is built on `feat/snapshot-clone-only`; Phases 1b, 2, 3 and 4 are not started.
+
+| check | input | expected | observed |
+|---|---|---|---|
+| clone is copy-on-write, no plain copy | `clone_dir` over happier's `apps/ui/node_modules`, 74k files | extra disk about 2%, not 100% | `clonefile(2)` +27.7 MB of 1.3 GB, 9.8 s; the old `cp -R` fallback +1.3 GB (Phase 0) |
+| another volume refuses | `clonefile` onto a scratch APFS image | `EXDEV`, nothing created | `EXDEV`, no destination (Phase 0) |
+| existing destination | unit test | refused, contents untouched | passes |
+| odd names and symlinks | unit test, macOS | tree intact | passes; APFS refuses non-UTF-8 names, so the run proved a non-ASCII name and prints which branch ran |
+| real pnpm reuse through the new path | `real_pnpm_accepts_a_matching_clone_and_refuses_a_mismatch`, the `snapshot_deps` suite | accepted, reuse line | 36 passed on the relais worker's tree |
+| Linux code compiles and lints | `cargo clippy --target x86_64-unknown-linux-gnu --all-targets -D warnings`, both crates | clean | clean |
+| Windows still builds | `cargo check --target x86_64-pc-windows-gnu` | clean | clean |
+| Linux CI reflink mount and tmpfs refusal | runs only on the pull request | green | not observable locally; read the PR checks |
+
+relais run `run-6604fae1efd53-2c3f` wrote the patch and ended `blocked (env_missing)` because `relais.toml` still names `amont-runtime` and `amont`, retired by the rename (#463), so two of its cargo checks can never pass here; the patch was applied and verified by hand. Fixing `relais.toml` touches a file relais trust covers and is the person's decision.
+
+Changed by the implementation review (all five reviewers approve-with-changes): scratch names `d` renamed; `cp -R -T --reflink=always --preserve=mode,timestamps --no-dereference` on Linux (a late destination fails instead of receiving a nested copy; Linux and macOS clones keep the same mtimes); only a certainly absent destination is cleared, and a failed clear is reported; one-line Linux refusal (first `cp` error plus a count); macOS names the next step for `EXDEV` (set TMPDIR) and `ENOTSUP` (`snapshotDeps install`); the tmpfs unit test and a new stubbed-pnpm integration test fail instead of skipping under `CI`; the CI step updates apt before installing `xfsprogs`.
 
 <!-- panel: repos=amont adds= reviewers=backend,lang:rust,unix,tui,po,architect body-sha=ee6f3bf135f8 -->
