@@ -583,26 +583,34 @@ fn install(settings: &crate::config::Settings, u: &Unit, at: &Path) -> Result<()
 
 /// Clone a directory copy-on-write or refuse. macOS calls `clonefile(2)` with
 /// `CLONE_NOFOLLOW`, so symlinks are cloned as symlinks; Linux runs GNU
-/// `cp -R --reflink=always` by absolute path. There is no plain-copy fallback:
-/// a copy would cost the disk the clone exists to save. An existing
-/// destination is refused and left untouched.
+/// `cp -R -T --reflink=always` by absolute path. There is no plain-copy
+/// fallback: a copy would cost the disk the clone exists to save. An existing
+/// destination is refused and left untouched, and so is one that cannot be
+/// statted: only a path that is certainly absent is ours to clear after a
+/// failed clone.
 fn clone_dir(src: &Path, dst: &Path) -> Result<(), String> {
-    let existed = std::fs::symlink_metadata(dst).is_ok();
-    let outcome = if existed {
-        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
-    } else {
-        clone_tree(src, dst)
+    use std::io::ErrorKind;
+    let (ours, outcome) = match std::fs::symlink_metadata(dst) {
+        Ok(_) => (false, Err(std::io::Error::from(ErrorKind::AlreadyExists))),
+        Err(e) if e.kind() == ErrorKind::NotFound => (true, clone_tree(src, dst)),
+        Err(e) => (false, Err(e)),
     };
     match outcome {
         Ok(()) => Ok(()),
         Err(e) => {
-            if !existed && e.kind() != std::io::ErrorKind::AlreadyExists {
-                let _ = std::fs::remove_dir_all(dst); // best-effort: a partial clone is ours to clear, and the refusal below is the outcome either way
+            let mut why = e.to_string();
+            if ours {
+                if let Err(rm) = std::fs::remove_dir_all(dst) {
+                    if rm.kind() != ErrorKind::NotFound {
+                        why.push_str(&format!(
+                            ", and the partial clone could not be removed: {rm}"
+                        ));
+                    }
+                }
             }
             Err(format!(
-                "no copy-on-write clone of {} into {} ({e}); installing instead",
-                src.display(),
-                dst.display()
+                "no copy-on-write clone of {} ({why})",
+                src.display()
             ))
         }
     }
@@ -614,6 +622,9 @@ fn clone_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
     const CLONE_NOFOLLOW: u32 = 0x0001;
+    // errno values on macOS: another volume, and a filesystem without clones.
+    const EXDEV: i32 = 18;
+    const ENOTSUP: i32 = 45;
     extern "C" {
         fn clonefile(
             src: *const std::os::raw::c_char,
@@ -630,10 +641,20 @@ fn clone_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     // SAFETY: both pointers are NUL-terminated and outlive the call.
     let rc = unsafe { clonefile(from.as_ptr(), to.as_ptr(), CLONE_NOFOLLOW) };
     if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+        return Ok(());
     }
+    let e = std::io::Error::last_os_error();
+    Err(match e.raw_os_error() {
+        Some(EXDEV) => std::io::Error::other(
+            "the snapshot's temp dir is on another volume than the working tree; \
+             set TMPDIR to a directory on that volume",
+        ),
+        Some(ENOTSUP) => std::io::Error::other(
+            "this filesystem cannot clone; \
+             `git config greengate.snapshotDeps install` skips the attempt",
+        ),
+        _ => e,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -642,19 +663,36 @@ fn clone_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         .into_iter()
         .find(|p| Path::new(p).exists())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no cp found"))?;
+    // -T: `dst` is the target itself, so one that appeared after the check
+    // fails the copy instead of receiving a nested one. --preserve keeps the
+    // modes and mtimes `clonefile` keeps, which the install-record scans read.
     let out = Command::new(cp)
-        .args(["-R", "--reflink=always"])
+        .args([
+            "-R",
+            "-T",
+            "--reflink=always",
+            "--preserve=mode,timestamps",
+            "--no-dereference",
+        ])
         .arg(src)
         .arg(dst)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .output()?;
     if out.status.success() {
-        Ok(())
-    } else {
-        let why = String::from_utf8_lossy(&out.stderr);
-        Err(std::io::Error::other(why.trim().to_string()))
+        return Ok(());
     }
+    // `cp` prints one error per file it could not clone: a tree of 74k files
+    // on a filesystem without reflinks would bury the reason, so keep the first.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut lines = stderr.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or("cp failed with no output");
+    let more = lines.count();
+    Err(std::io::Error::other(if more == 0 {
+        first.to_string()
+    } else {
+        format!("{first} (and {more} more)")
+    }))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1127,66 +1165,90 @@ mod tests {
 
     #[test]
     fn clone_dir_refuses_an_existing_destination() {
-        let d = std::env::temp_dir().join(format!("clone-exist-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
-        std::fs::create_dir_all(d.join("src")).unwrap();
-        std::fs::create_dir_all(d.join("dst")).unwrap();
-        std::fs::write(d.join("dst/keep"), "mine").unwrap();
-        let err = clone_dir(&d.join("src"), &d.join("dst")).unwrap_err();
+        let scratch = std::env::temp_dir().join(format!("clone-exist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
+        std::fs::create_dir_all(scratch.join("src")).unwrap();
+        std::fs::create_dir_all(scratch.join("dst")).unwrap();
+        std::fs::write(scratch.join("dst/keep"), "mine").unwrap();
+        let err = clone_dir(&scratch.join("src"), &scratch.join("dst")).unwrap_err();
         assert!(err.starts_with("no copy-on-write clone of "), "{err}");
-        assert_eq!(std::fs::read_to_string(d.join("dst/keep")).unwrap(), "mine");
-        assert_eq!(std::fs::read_dir(d.join("dst")).unwrap().count(), 1);
-        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("dst/keep")).unwrap(),
+            "mine"
+        );
+        assert_eq!(std::fs::read_dir(scratch.join("dst")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn clone_dir_keeps_non_utf8_names_and_relative_symlinks() {
+    fn clone_dir_keeps_odd_names_and_relative_symlinks() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
-        let d = std::env::temp_dir().join(format!("clone-tree-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
-        std::fs::create_dir_all(d.join("src/sub")).unwrap();
-        // Some macOS volumes refuse a name that is not valid UTF-8 (EILSEQ);
-        // there the fixture falls back to a non-ASCII UTF-8 name.
+        // APFS refuses a name that is not valid UTF-8 (EILSEQ, 92), so there
+        // the fixture holds a non-ASCII UTF-8 name instead; the line printed
+        // says which of the two this run proved.
+        const EILSEQ: i32 = 92;
+        let scratch = std::env::temp_dir().join(format!("clone-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
+        std::fs::create_dir_all(scratch.join("src/sub")).unwrap();
         let mut odd = OsStr::from_bytes(b"caf\xe9");
-        if std::fs::write(d.join("src/sub").join(odd), "odd").is_err() {
-            odd = OsStr::new("caf\u{e9}");
-            std::fs::write(d.join("src/sub").join(odd), "odd").unwrap();
+        match std::fs::write(scratch.join("src/sub").join(odd), "odd") {
+            Ok(()) => eprintln!("clone test: a non-UTF-8 file name"),
+            Err(e) if e.raw_os_error() == Some(EILSEQ) => {
+                eprintln!("clone test: this volume refuses non-UTF-8 names; non-ASCII UTF-8 used");
+                odd = OsStr::new("caf\u{e9}");
+                std::fs::write(scratch.join("src/sub").join(odd), "odd").unwrap();
+            }
+            Err(e) => panic!("fixture could not be written: {e}"),
         }
-        std::os::unix::fs::symlink("sub", d.join("src/link")).unwrap();
-        clone_dir(&d.join("src"), &d.join("dst")).unwrap();
-        assert_eq!(std::fs::read(d.join("dst/sub").join(odd)).unwrap(), b"odd");
+        std::os::unix::fs::symlink("sub", scratch.join("src/link")).unwrap();
+        clone_dir(&scratch.join("src"), &scratch.join("dst")).unwrap();
         assert_eq!(
-            std::fs::read_link(d.join("dst/link")).unwrap(),
+            std::fs::read(scratch.join("dst/sub").join(odd)).unwrap(),
+            b"odd"
+        );
+        assert_eq!(
+            std::fs::read_link(scratch.join("dst/link")).unwrap(),
             Path::new("sub")
         );
-        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
     }
 
-    /// tmpfs cannot clone: the refusal names the clone, leaves no destination
-    /// behind and never falls back to a copy. CI's other Linux tests run on an
-    /// XFS image with reflinks (`.github/workflows/ci.yaml`), so this is the
-    /// one that proves the refusal there.
+    /// tmpfs cannot clone: the refusal names the clone in ONE line, leaves no
+    /// destination behind and never falls back to a copy. CI's other Linux
+    /// tests run on an XFS image with reflinks (`.github/workflows/ci.yaml`),
+    /// so this is the one that proves the refusal there; where `CI` is set a
+    /// runner without tmpfs fails it instead of passing without a check.
     #[cfg(target_os = "linux")]
     #[test]
     fn clone_dir_refuses_a_filesystem_without_reflinks() {
         let shm = Path::new("/dev/shm");
         if !shm.is_dir() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "no /dev/shm on a CI runner: the refusal has no tmpfs to be proven on"
+            );
             eprintln!("no /dev/shm here: the refusal test has no tmpfs to run on");
             return;
         }
-        let d = shm.join(format!("clone-tmpfs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
-        std::fs::create_dir_all(d.join("src")).unwrap();
-        std::fs::write(d.join("src/f"), "data").unwrap();
-        let err = clone_dir(&d.join("src"), &d.join("dst")).unwrap_err();
+        let scratch = shm.join(format!("clone-tmpfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
+        std::fs::create_dir_all(scratch.join("src")).unwrap();
+        for i in 0..20 {
+            std::fs::write(scratch.join(format!("src/f{i}")), "data").unwrap();
+        }
+        let err = clone_dir(&scratch.join("src"), &scratch.join("dst")).unwrap_err();
         assert!(err.starts_with("no copy-on-write clone of "), "{err}");
         assert!(
-            !d.join("dst").exists(),
+            !err.contains('\n'),
+            "one line, not cp's whole stderr: {err}"
+        );
+        assert!(
+            !scratch.join("dst").exists(),
             "a refused clone left a destination"
         );
-        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
     }
 
     #[test]

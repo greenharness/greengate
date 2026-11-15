@@ -1021,7 +1021,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          sudo apt-get install -y --no-install-recommends xfsprogs
+          command -v mkfs.xfs >/dev/null || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends xfsprogs
+          }
           img="$RUNNER_TEMP/reflink.img"
           truncate -s 4G "$img"
           mkfs.xfs -q -m reflink=1 "$img"

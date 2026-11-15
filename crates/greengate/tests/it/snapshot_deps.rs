@@ -119,8 +119,14 @@ fn path_with(prefix: Option<&Path>) -> std::ffi::OsString {
 
 /// `amont <args>` in the repo, with the stubs first on PATH when `stubbed`.
 fn amont(r: &Repo, args: &[&str], stubbed: bool) -> (i32, String) {
+    amont_env(r, args, stubbed, &[])
+}
+
+/// `amont`, with extra environment for the child alone.
+fn amont_env(r: &Repo, args: &[&str], stubbed: bool, env: &[(&str, &str)]) -> (i32, String) {
     let mut cmd = crate::common::amont_cmd();
     cmd.args(args).current_dir(&r.dir).stdin(Stdio::null());
+    cmd.envs(env.iter().copied());
     Repo::strip_git_env_impl(&mut cmd);
     cmd.env("GIT_CONFIG_GLOBAL", r.dir.join("fake-gitconfig"));
     let bin = stubs_dir(r).join("bin");
@@ -779,6 +785,43 @@ fn pnpm_reuse_keeps_a_clone_pnpm_accepts() {
         stub_log(&r)
     );
     assert!(note(&r, "HEAD").contains("pre-push-suite"));
+}
+
+/// A snapshot on a filesystem that cannot clone (tmpfs) is refused in one
+/// line and the unit installs, with no clone left under the install. Linux
+/// only: macOS has no such directory to point TMPDIR at, and CI's other tests
+/// run on an XFS image with reflinks. Where `CI` is set, a runner without
+/// tmpfs fails this instead of passing without a check.
+#[cfg(target_os = "linux")]
+#[test]
+fn pnpm_reuse_installs_when_the_snapshot_cannot_clone() {
+    if missing("node") {
+        return;
+    }
+    if !Path::new("/dev/shm").is_dir() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "no /dev/shm on a CI runner: the refusal has no tmpfs to be proven on"
+        );
+        return;
+    }
+    let (r, _) = reuse_repo();
+    let (code, out) = amont_env(&r, &["rehearse", "--wait"], true, &[("TMPDIR", "/dev/shm")]);
+    assert_eq!(code, 0, "{out}\n{}", stub_log(&r));
+    assert!(
+        out.contains("not reusing the working tree's install: no copy-on-write clone of"),
+        "{out}"
+    );
+    assert!(
+        logged(&r, PNPM_INSTALL),
+        "installed instead: {}",
+        stub_log(&r)
+    );
+    assert!(
+        !logged(&r, "STALE"),
+        "no clone survived into the install: {}",
+        stub_log(&r)
+    );
 }
 
 /// Rejected by pnpm: every clone of the unit — root AND member — is removed,
