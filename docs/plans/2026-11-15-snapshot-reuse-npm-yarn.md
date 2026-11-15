@@ -422,4 +422,14 @@ relais run `run-6604fae1efd53-2c3f` wrote the patch and ended `blocked (env_miss
 
 Changed by the implementation review (all five reviewers approve-with-changes): scratch names `d` renamed; `cp -R -T --reflink=always --preserve=mode,timestamps --no-dereference` on Linux (a late destination fails instead of receiving a nested copy; Linux and macOS clones keep the same mtimes); only a certainly absent destination is cleared, and a failed clear is reported; one-line Linux refusal (first `cp` error plus a count); macOS names the next step for `EXDEV` (set TMPDIR) and `ENOTSUP` (`snapshotDeps install`); the tmpfs unit test and a new stubbed-pnpm integration test fail instead of skipping under `CI`; the CI step updates apt before installing `xfsprogs`.
 
+## Implementation review
+
+- implementation-review: approve after one round and three Deltas (65k, 53k, 26k tokens); one blocking naming finding fixed, the candidates ruled; `stubbed: bool` on the pre-existing `amont` test helper kept as `deliberate: pre-existing, about 50 call sites`.
+- backend: approve; the refusal is driven through the real `rehearse` path, a clone that cannot be removed is reported, and the destination is claimed atomically on Linux (27k tokens, 28 s on the last pass).
+- lang:rust: approve; MSRV-safe plain `extern "C"`, paths built from bytes, cleanup only when the destination was ours and the error is not `AlreadyExists` (30k, 20 s).
+- tui: approve; one-line refusal with a next step on both platforms from shared hints, the rollback suffix says what to do (28k, 28 s).
+- unix: approve; `cp -R -T` into a directory we created, modes and mtimes preserved, `LC_ALL=C` so the hint matches under any locale (24k, 30 s).
+
+deliberate: the Linux reflink mount and the two tmpfs tests cannot run on this Mac; they are proven by the pull request's checks, and a failure there is fixed on this branch.
+
 <!-- panel: repos=amont adds= reviewers=backend,lang:rust,unix,tui,po,architect body-sha=ee6f3bf135f8 -->
