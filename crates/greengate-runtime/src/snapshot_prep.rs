@@ -581,13 +581,21 @@ fn install(settings: &crate::config::Settings, u: &Unit, at: &Path) -> Result<()
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const CROSS_VOLUME_HINT: &str = "the snapshot's temp dir is on another volume than the working \
+     tree; set TMPDIR to a directory on that volume (the unit installs instead)";
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const NO_CLONE_HINT: &str = "this filesystem cannot clone; the unit installs instead, and \
+     `git config greengate.snapshotDeps install` skips the attempt";
+
 /// Clone a directory copy-on-write or refuse. macOS calls `clonefile(2)` with
 /// `CLONE_NOFOLLOW`, so symlinks are cloned as symlinks; Linux runs GNU
 /// `cp -R -T --reflink=always` by absolute path. There is no plain-copy
 /// fallback: a copy would cost the disk the clone exists to save. An existing
 /// destination is refused and left untouched, and so is one that cannot be
 /// statted: only a path that is certainly absent is ours to clear after a
-/// failed clone.
+/// failed clone, and never after `AlreadyExists`, which means someone else
+/// made it first.
 fn clone_dir(src: &Path, dst: &Path) -> Result<(), String> {
     use std::io::ErrorKind;
     let (ours, outcome) = match std::fs::symlink_metadata(dst) {
@@ -599,7 +607,7 @@ fn clone_dir(src: &Path, dst: &Path) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(e) => {
             let mut why = e.to_string();
-            if ours {
+            if ours && e.kind() != ErrorKind::AlreadyExists {
                 if let Err(rm) = std::fs::remove_dir_all(dst) {
                     if rm.kind() != ErrorKind::NotFound {
                         why.push_str(&format!(
@@ -643,17 +651,11 @@ fn clone_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     if rc == 0 {
         return Ok(());
     }
-    let e = std::io::Error::last_os_error();
-    Err(match e.raw_os_error() {
-        Some(EXDEV) => std::io::Error::other(
-            "the snapshot's temp dir is on another volume than the working tree; \
-             set TMPDIR to a directory on that volume",
-        ),
-        Some(ENOTSUP) => std::io::Error::other(
-            "this filesystem cannot clone; \
-             `git config greengate.snapshotDeps install` skips the attempt",
-        ),
-        _ => e,
+    let err = std::io::Error::last_os_error();
+    Err(match err.raw_os_error() {
+        Some(EXDEV) => std::io::Error::other(CROSS_VOLUME_HINT),
+        Some(ENOTSUP) => std::io::Error::other(NO_CLONE_HINT),
+        _ => err,
     })
 }
 
@@ -663,9 +665,11 @@ fn clone_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         .into_iter()
         .find(|p| Path::new(p).exists())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no cp found"))?;
-    // -T: `dst` is the target itself, so one that appeared after the check
-    // fails the copy instead of receiving a nested one. --preserve keeps the
+    // `dst` is created here, atomically, so it is ours: a path that appeared
+    // since the caller's stat is `AlreadyExists` and is left alone. -T then
+    // copies INTO it rather than nesting `src` inside. --preserve keeps the
     // modes and mtimes `clonefile` keeps, which the install-record scans read.
+    std::fs::create_dir(dst)?;
     let out = Command::new(cp)
         .args([
             "-R",
@@ -688,7 +692,12 @@ fn clone_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     let mut lines = stderr.lines().map(str::trim).filter(|l| !l.is_empty());
     let first = lines.next().unwrap_or("cp failed with no output");
     let more = lines.count();
-    Err(std::io::Error::other(if more == 0 {
+    let lower = first.to_lowercase();
+    Err(std::io::Error::other(if lower.contains("cross-device") {
+        CROSS_VOLUME_HINT.to_string()
+    } else if lower.contains("not supported") || lower.contains("inappropriate ioctl") {
+        NO_CLONE_HINT.to_string()
+    } else if more == 0 {
         first.to_string()
     } else {
         format!("{first} (and {more} more)")
@@ -939,9 +948,24 @@ fn reuse(
         }
     }
     let mut cloned: Vec<PathBuf> = Vec::new();
-    let rollback = |cloned: &[PathBuf]| {
-        for d in cloned {
-            let _ = std::fs::remove_dir_all(d);
+    // What it could not remove goes into the refusal: an install over a
+    // clone left behind is the one outcome this function must never hide.
+    let rollback = |cloned: &[PathBuf]| -> String {
+        let mut left = Vec::new();
+        for dir in cloned {
+            if let Err(err) = std::fs::remove_dir_all(dir) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    left.push(format!("{}: {err}", dir.display()));
+                }
+            }
+        }
+        if left.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; could not remove the clone, so the install may run over it: {}",
+                left.join(", ")
+            )
         }
     };
     let sources = [
@@ -952,12 +976,15 @@ fn reuse(
         let from = src_dir.join(m).join("node_modules");
         let to = snap_dir.join(m).join("node_modules");
         if std::fs::symlink_metadata(&to).is_ok() {
-            rollback(&cloned);
-            return Err(format!("{} already exists in the snapshot", to.display()));
+            let left = rollback(&cloned);
+            return Err(format!(
+                "{} already exists in the snapshot{left}",
+                to.display()
+            ));
         }
         if let Err(e) = clone_dir(&from, &to) {
-            rollback(&cloned);
-            return Err(e);
+            let left = rollback(&cloned);
+            return Err(format!("{e}{left}"));
         }
         cloned.push(to.clone());
         let problem = match link_into(&to, &sources) {
@@ -969,8 +996,8 @@ fn reuse(
             Err(e) => Some(format!("could not inspect the clone: {e}")),
         };
         if let Some(why) = problem {
-            rollback(&cloned);
-            return Err(why);
+            let left = rollback(&cloned);
+            return Err(format!("{why}{left}"));
         }
     }
     // pnpm records the absolute paths of the tree it installed; the clone
@@ -992,9 +1019,9 @@ fn reuse(
         settings,
         manager_cmd(u, &snap_dir, &["install", "--frozen-lockfile", "--offline"]),
     ) {
-        rollback(&cloned);
+        let left = rollback(&cloned);
         return Err(format!(
-            "pnpm did not accept the clone ({})",
+            "pnpm did not accept the clone ({}){left}",
             last_line(&text)
         ));
     }

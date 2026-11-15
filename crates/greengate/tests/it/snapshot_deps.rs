@@ -118,19 +118,25 @@ fn path_with(prefix: Option<&Path>) -> std::ffi::OsString {
 }
 
 /// `amont <args>` in the repo, with the stubs first on PATH when `stubbed`.
-fn amont(r: &Repo, args: &[&str], stubbed: bool) -> (i32, String) {
-    amont_env(r, args, stubbed, &[])
+fn amont(repo: &Repo, args: &[&str], stubbed: bool) -> (i32, String) {
+    let stub_bin = stubs_dir(repo).join("bin");
+    amont_env(repo, args, stubbed.then_some(stub_bin.as_path()), &[])
 }
 
-/// `amont`, with extra environment for the child alone.
-fn amont_env(r: &Repo, args: &[&str], stubbed: bool, env: &[(&str, &str)]) -> (i32, String) {
+/// `amont`, with `path_prefix` first on PATH and extra environment for the
+/// child alone.
+fn amont_env(
+    repo: &Repo,
+    args: &[&str],
+    path_prefix: Option<&Path>,
+    env: &[(&str, &str)],
+) -> (i32, String) {
     let mut cmd = crate::common::amont_cmd();
-    cmd.args(args).current_dir(&r.dir).stdin(Stdio::null());
+    cmd.args(args).current_dir(&repo.dir).stdin(Stdio::null());
     cmd.envs(env.iter().copied());
     Repo::strip_git_env_impl(&mut cmd);
-    cmd.env("GIT_CONFIG_GLOBAL", r.dir.join("fake-gitconfig"));
-    let bin = stubs_dir(r).join("bin");
-    cmd.env("PATH", path_with(stubbed.then_some(bin.as_path())));
+    cmd.env("GIT_CONFIG_GLOBAL", repo.dir.join("fake-gitconfig"));
+    cmd.env("PATH", path_with(path_prefix));
     let out = cmd.output().expect("run amont");
     (
         out.status.code().unwrap_or(-1),
@@ -796,6 +802,10 @@ fn pnpm_reuse_keeps_a_clone_pnpm_accepts() {
 #[test]
 fn pnpm_reuse_installs_when_the_snapshot_cannot_clone() {
     if missing("node") {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "no node on a CI runner: the refusal cannot be proven"
+        );
         return;
     }
     if !Path::new("/dev/shm").is_dir() {
@@ -806,11 +816,24 @@ fn pnpm_reuse_installs_when_the_snapshot_cannot_clone() {
         return;
     }
     let (r, _) = reuse_repo();
-    let (code, out) = amont_env(&r, &["rehearse", "--wait"], true, &[("TMPDIR", "/dev/shm")]);
+    let stub_bin = stubs_dir(&r).join("bin");
+    let (code, out) = amont_env(
+        &r,
+        &["rehearse", "--wait"],
+        Some(stub_bin.as_path()),
+        &[("TMPDIR", "/dev/shm")],
+    );
     assert_eq!(code, 0, "{out}\n{}", stub_log(&r));
     assert!(
         out.contains("not reusing the working tree's install: no copy-on-write clone of"),
         "{out}"
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains("no copy-on-write clone of"))
+            .count(),
+        1,
+        "the refusal is one line, not cp's whole stderr: {out}"
     );
     assert!(
         logged(&r, PNPM_INSTALL),
