@@ -828,12 +828,23 @@ fn pnpm_reuse_installs_when_the_snapshot_cannot_clone() {
         out.contains("not reusing the working tree's install: no copy-on-write clone of"),
         "{out}"
     );
+    let refusal: Vec<&str> = out
+        .lines()
+        .filter(|line| line.contains("no copy-on-write clone of"))
+        .collect();
     assert_eq!(
-        out.lines()
-            .filter(|line| line.contains("no copy-on-write clone of"))
-            .count(),
+        refusal.len(),
         1,
         "the refusal is one line, not cp's whole stderr: {out}"
+    );
+    // Only the new mapping produces a hint; cp's own wording would not.
+    assert!(
+        refusal[0].contains("set TMPDIR") || refusal[0].contains("snapshotDeps install"),
+        "the refusal names a next step: {out}"
+    );
+    assert!(
+        !out.contains("failed to clone"),
+        "cp's raw stderr leaked into the output: {out}"
     );
     assert!(
         logged(&r, PNPM_INSTALL),

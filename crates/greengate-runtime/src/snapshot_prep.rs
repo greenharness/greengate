@@ -583,9 +583,9 @@ fn install(settings: &crate::config::Settings, u: &Unit, at: &Path) -> Result<()
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const CROSS_VOLUME_HINT: &str = "the snapshot's temp dir is on another volume than the working \
-     tree; set TMPDIR to a directory on that volume (the unit installs instead)";
+     tree; set TMPDIR to a directory on that volume";
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-const NO_CLONE_HINT: &str = "this filesystem cannot clone; the unit installs instead, and \
+const NO_CLONE_HINT: &str = "this filesystem cannot clone; \
      `git config greengate.snapshotDeps install` skips the attempt";
 
 /// Clone a directory copy-on-write or refuse. macOS calls `clonefile(2)` with
@@ -669,7 +669,12 @@ fn clone_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     // since the caller's stat is `AlreadyExists` and is left alone. -T then
     // copies INTO it rather than nesting `src` inside. --preserve keeps the
     // modes and mtimes `clonefile` keeps, which the install-record scans read.
-    std::fs::create_dir(dst)?;
+    std::fs::create_dir(dst).map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!("cannot create {}: {err}", dst.display()),
+        )
+    })?;
     let out = Command::new(cp)
         .args([
             "-R",
@@ -680,6 +685,8 @@ fn clone_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         ])
         .arg(src)
         .arg(dst)
+        // English messages, so the hints below match under any locale.
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .output()?;
@@ -963,7 +970,7 @@ fn reuse(
             String::new()
         } else {
             format!(
-                "; could not remove the clone, so the install may run over it: {}",
+                "; could not remove the clone, so the install may run over it (remove it by hand): {}",
                 left.join(", ")
             )
         }
