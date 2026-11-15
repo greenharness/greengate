@@ -118,13 +118,25 @@ fn path_with(prefix: Option<&Path>) -> std::ffi::OsString {
 }
 
 /// `amont <args>` in the repo, with the stubs first on PATH when `stubbed`.
-fn amont(r: &Repo, args: &[&str], stubbed: bool) -> (i32, String) {
+fn amont(repo: &Repo, args: &[&str], stubbed: bool) -> (i32, String) {
+    let stub_bin = stubs_dir(repo).join("bin");
+    amont_env(repo, args, stubbed.then_some(stub_bin.as_path()), &[])
+}
+
+/// `amont`, with `path_prefix` first on PATH and extra environment for the
+/// child alone.
+fn amont_env(
+    repo: &Repo,
+    args: &[&str],
+    path_prefix: Option<&Path>,
+    env: &[(&str, &str)],
+) -> (i32, String) {
     let mut cmd = crate::common::amont_cmd();
-    cmd.args(args).current_dir(&r.dir).stdin(Stdio::null());
+    cmd.args(args).current_dir(&repo.dir).stdin(Stdio::null());
+    cmd.envs(env.iter().copied());
     Repo::strip_git_env_impl(&mut cmd);
-    cmd.env("GIT_CONFIG_GLOBAL", r.dir.join("fake-gitconfig"));
-    let bin = stubs_dir(r).join("bin");
-    cmd.env("PATH", path_with(stubbed.then_some(bin.as_path())));
+    cmd.env("GIT_CONFIG_GLOBAL", repo.dir.join("fake-gitconfig"));
+    cmd.env("PATH", path_with(path_prefix));
     let out = cmd.output().expect("run amont");
     (
         out.status.code().unwrap_or(-1),
@@ -779,6 +791,71 @@ fn pnpm_reuse_keeps_a_clone_pnpm_accepts() {
         stub_log(&r)
     );
     assert!(note(&r, "HEAD").contains("pre-push-suite"));
+}
+
+/// A snapshot on a filesystem that cannot clone (tmpfs) is refused in one
+/// line and the unit installs, with no clone left under the install. Linux
+/// only: macOS has no such directory to point TMPDIR at, and CI's other tests
+/// run on an XFS image with reflinks. Where `CI` is set, a runner without
+/// tmpfs fails this instead of passing without a check.
+#[cfg(target_os = "linux")]
+#[test]
+fn pnpm_reuse_installs_when_the_snapshot_cannot_clone() {
+    if missing("node") {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "no node on a CI runner: the refusal cannot be proven"
+        );
+        return;
+    }
+    if !Path::new("/dev/shm").is_dir() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "no /dev/shm on a CI runner: the refusal has no tmpfs to be proven on"
+        );
+        return;
+    }
+    let (r, _) = reuse_repo();
+    let stub_bin = stubs_dir(&r).join("bin");
+    let (code, out) = amont_env(
+        &r,
+        &["rehearse", "--wait"],
+        Some(stub_bin.as_path()),
+        &[("TMPDIR", "/dev/shm")],
+    );
+    assert_eq!(code, 0, "{out}\n{}", stub_log(&r));
+    assert!(
+        out.contains("not reusing the working tree's install: no copy-on-write clone of"),
+        "{out}"
+    );
+    let refusal: Vec<&str> = out
+        .lines()
+        .filter(|line| line.contains("no copy-on-write clone of"))
+        .collect();
+    assert_eq!(
+        refusal.len(),
+        1,
+        "the refusal is one line, not cp's whole stderr: {out}"
+    );
+    // Only the new mapping produces a hint; cp's own wording would not.
+    assert!(
+        refusal[0].contains("set TMPDIR") || refusal[0].contains("snapshotDeps install"),
+        "the refusal names a next step: {out}"
+    );
+    assert!(
+        !out.contains("failed to clone"),
+        "cp's raw stderr leaked into the output: {out}"
+    );
+    assert!(
+        logged(&r, PNPM_INSTALL),
+        "installed instead: {}",
+        stub_log(&r)
+    );
+    assert!(
+        !logged(&r, "STALE"),
+        "no clone survived into the install: {}",
+        stub_log(&r)
+    );
 }
 
 /// Rejected by pnpm: every clone of the unit — root AND member — is removed,
