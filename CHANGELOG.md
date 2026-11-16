@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v4.10.0
+
 ### Changed
 
 - **greenpiste is now greenbelay** (ADR-0071). greengate reads greenbelay's
