@@ -1,6 +1,6 @@
 ---
 status: active
-branch: feat/snapshot-clone-only
+branch: feat/snapshot-reuse-npm
 repos: [amont]
 adrs: []
 ---
@@ -362,7 +362,7 @@ Rewrite the `reuse` bullet in
 "Neither is yarn", add per-manager vouch, the yarn timestamp limit, berry and
 bun exclusions); `docs/custom-checks.md:342` mentions reuse; CHANGELOG entry;
 rustdoc at the top of `snapshot_prep.rs` and on `reuse`. Release greengate
-4.6.0 (4.5.0 is already out; new capability, minor) through the `tag-release` skill after the PR
+4.7.0 (4.6.0 shipped Phase 1a on 2026-11-16; new capability, minor) through the `tag-release` skill after the PR
 merges.
 
 ## Tests
@@ -437,7 +437,7 @@ Left out: architect and po (no new module; one new pub fn, `capture_stdout_withi
 
 ## Outcome (Phase 1a)
 
-Phase 0 case (g) and the disk and clone measurements are above. Phase 1a is built on `feat/snapshot-clone-only`; Phases 1b, 2, 3 and 4 are not started.
+Phase 0 case (g) and the disk and clone measurements are above. Phase 1a is built on `feat/snapshot-clone-only` (#481) and released as greengate 4.6.0; Phases 1b, 2 and 4 are built on `feat/snapshot-reuse-npm` (Outcome, Phases 1b, 2 and 4, below); Phase 3 is not built.
 
 | check | input | expected | observed |
 |---|---|---|---|
@@ -453,6 +453,33 @@ Phase 0 case (g) and the disk and clone measurements are above. Phase 1a is buil
 relais run `run-6604fae1efd53-2c3f` wrote the patch and ended `blocked (env_missing)` because `relais.toml` still names `amont-runtime` and `amont`, retired by the rename (#463), so two of its cargo checks can never pass here; the patch was applied and verified by hand. Fixing `relais.toml` touches a file relais trust covers and is the person's decision.
 
 Changed by the implementation review (all five reviewers approve-with-changes): scratch names `d` renamed; `cp -R -T --reflink=always --preserve=mode,timestamps --no-dereference` on Linux (a late destination fails instead of receiving a nested copy; Linux and macOS clones keep the same mtimes); only a certainly absent destination is cleared, and a failed clear is reported; one-line Linux refusal (first `cp` error plus a count); macOS names the next step for `EXDEV` (set TMPDIR) and `ENOTSUP` (`snapshotDeps install`); the tmpfs unit test and a new stubbed-pnpm integration test fail instead of skipping under `CI`; the CI step updates apt before installing `xfsprogs`.
+
+## Outcome (Phases 1b, 2 and 4)
+
+Built on `feat/snapshot-reuse-npm`. Phase 3 (yarn) is not built: yarn 1 failed its Phase 0 gate (Phase 0 results), so its rows are not applicable.
+
+| check | input | expected | observed |
+|---|---|---|---|
+| fmt, clippy -D warnings | macOS, `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-gnu`, all targets | clean | clean on all three |
+| `snapshot_deps` suite | stubbed and real-tool cases | all pass | 52 passed |
+| npm accepts a faithful clone | `npm_reuse_keeps_a_clone_npm_accepts`, `real_npm_accepts_a_matching_clone_and_refuses_a_mismatch` | kept, nothing installed | pass |
+| npm refuses, real npm 11.9 | version raised in place with every mtime set back and the hidden lockfile newest; a package deleted; a stray directory; a manifest the lockfile does not satisfy | refused, `npm ci` runs | pass, each |
+| npm refuses, stubbed | a reported change, empty stdout on exit 0, unparseable output, a non-zero exit, a rewritten lockfile, a file edited after the install, a link outside the snapshot, no `node` on PATH | refused in one line naming npm, rolled back, `npm ci` runs | pass, each |
+| npm units | a differing working-tree lockfile, a nested npm lockfile, an untouched npm unit | install / own unit / not prepared | pass |
+| stdout and stderr apart | `capture_stdout_within` unit tests | stderr never in stdout, real exit status, stderr-only gives empty stdout | pass |
+| progress line | npm accept test; pnpm tests | printed for npm, not for pnpm | pass |
+| yarn stays install-only | `yarn_reuse_always_installs` | installs, with the measured reason | pass |
+| no new dependency | `scripts/check-no-deps.sh` | pass | pass |
+| relais profile | relais verify run `run-6606671c9e99e-77a3` | all checks exit 0 | 8 of 8 exit 0 |
+| Linux CI reflink and tmpfs tests; the yarn real-repo timing | runs only on the pull request; `web`'s install failed on the network | green / measured | not observable locally; yarn timing moot after the gate |
+
+## Decision log
+
+- 2026-11-16: yarn 1 STOP, npm GO, by the plan's own Phase 0 gate (Phase 0 results). happier, the person's largest tree, is yarn 1 and keeps installing.
+- 2026-11-16: `relais.toml` renamed `amont-runtime` and `amont` to `greengate-runtime` and `greengate` (retired by #463). It is outside every phase; it was needed because two of its checks could never pass and every relais run here ended `env_missing`. Both commands were run and pass (7 and 13 tests). The plan had left the edit to the person because relais trust covers the file; relais warned that the commands changed and did not block. The person asked to continue the plan with this pending and did not object.
+- 2026-11-16: the implementation review (backend, high) held that npm trusts its hidden lockfile when it is newest and then never reads the tree. Measured on npm 11.9.0 with the hidden lockfile made newest: an in-place version bump, a deletion and a stray were all still reported. The clone's `.package-lock.json` is removed before the dry-run anyway, at no cost, for other npm versions.
+- 2026-11-16: the review (lang:rust, blocking) found that greengate restores SIGPIPE's default action, so writing to `node`'s stdin could kill the process. `node` now reads a temp file named in its argv; nothing is written to a child's stdin.
+- 2026-11-16: an earlier wording in the CHANGELOG and docs said npm catches "a package changed in place even with its timestamps set back". Phase 0 proved that only for a VERSION change; a file edited in place without a version change is not caught, as with pnpm. Corrected before the release.
 
 ## Implementation review
 
