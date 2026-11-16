@@ -14,7 +14,9 @@ missing here.
   tree is cloned copy-on-write and kept only when `npm install --dry-run
   --offline` would add, remove and change nothing and leaves
   `package-lock.json` untouched; npm reads the installed tree, so a package
-  changed in place is caught even with its timestamps set back. Any
+  whose version was raised in place is caught even with its timestamps set
+  back (a file edited in place without a version change is not, as with
+  pnpm). Any
   refusal installs, as before. Measured on a 25,143-file tree: 43% of `npm
   ci`'s time and 2.5% of its disk. A link in the clone that points outside
   the snapshot now refuses too. yarn stays install-only: its own checks

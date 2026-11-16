@@ -598,15 +598,18 @@ like a broken branch rather than a missing install.
     relative workspace links stay). The vouch is `npm install --dry-run
     --offline --ignore-scripts`: the clone is kept only when it exits 0, would
     add, remove and change nothing, and leaves `package-lock.json`
-    byte-identical. npm reads the installed tree, not its record, so a
-    package changed in place is caught even with its timestamps set back. The
+    byte-identical. npm reads the installed tree, not its record (the
+    clone's `.package-lock.json` is removed before the dry-run), so a package
+    whose version was raised in place is caught even with its timestamps set
+    back; a file edited in place without a version change is not, as with
+    pnpm. The
     JSON is read by a short `node` script; without `node` on PATH the unit
     installs and says so. Measured on a 25,143-file tree: the clone and the
     vouch take 43% of `npm ci`'s time and 2.5% of its disk.
-  - **yarn is never reused:** with the timestamp scan and the link check
-    around them, yarn 1's own `yarn check --integrity` and `--verify-tree`
-    still accept a tree with a package missing, so nothing yarn offers can
-    vouch for a clone; a yarn unit installs under `reuse` too, saying so.
+  - **yarn is never reused:** even with the timestamp scan and the link
+    check, yarn 1's `yarn check --integrity` and `--verify-tree` accept a
+    tree with a package missing, so nothing yarn offers can vouch for a
+    clone; a yarn unit installs under `reuse` too, saying so.
     Yarn 2+ and bun are not reused either.
 - **`off`** prepares nothing.
 

@@ -24,10 +24,11 @@
 //! the clone only when the manager vouches for it: pnpm by its isolated layout
 //! and a frozen offline install, npm by a dry-run install that would add,
 //! remove and change nothing. Both catch a missing or wrong-version package, a
-//! stray directory, and a manifest the lockfile does not satisfy; pnpm does
-//! NOT catch a package whose files were edited in place without a version
-//! change, and the mtime scan covers that for both only while the edit is
-//! newer than the install. That limit is why reuse is opt-in.
+//! stray directory, and a manifest the lockfile does not satisfy; npm also
+//! catches a version raised in place with its timestamps set back. NEITHER
+//! catches a file edited in place without a version change: the mtime scan
+//! covers that only while the edit is newer than the install. That limit is
+//! why reuse is opt-in.
 //!
 //! Every question about a manifest goes to the package manager, through exit
 //! codes and parseable output: this crate is dependency-free and has no JSON
