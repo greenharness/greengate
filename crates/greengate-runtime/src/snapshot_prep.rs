@@ -888,11 +888,29 @@ impl Voucher {
 
     /// Files an install writes after the record (see [`skipped_file`]). npm's
     /// hidden lockfile is skipped in the root `node_modules` only.
-    fn skip_files(self, is_root: bool) -> &'static [&'static str] {
-        match (self, is_root) {
+    fn skip_files(self, scope: Scope) -> &'static [&'static str] {
+        match (self, scope) {
             (Voucher::Pnpm, _) => &[".modules.yaml", ".pnpm-workspace-state*", ".pnpm/lock.yaml"],
-            (Voucher::Npm, true) => &["./.package-lock.json"],
-            (Voucher::Npm, false) => &[],
+            (Voucher::Npm, Scope::Root) => &["./.package-lock.json"],
+            (Voucher::Npm, Scope::Member) => &[],
+        }
+    }
+}
+
+/// Which `node_modules` of a unit: its root's, or a workspace member's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Root,
+    Member,
+}
+
+impl Scope {
+    /// `m` is a member's path relative to the unit, `""` for the root.
+    fn of(m: &str) -> Scope {
+        if m.is_empty() {
+            Scope::Root
+        } else {
+            Scope::Member
         }
     }
 }
@@ -938,37 +956,34 @@ fn capture_apart(
     }
 }
 
-/// A file in the temp dir holding `text`, removed on drop. Never inside the
-/// snapshot, whose tree the stamp covers.
-struct TempText {
-    path: PathBuf,
-}
-
-impl TempText {
-    fn write(text: &str) -> std::io::Result<TempText> {
-        use std::io::Write;
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let unique = format!(
-            "greengate-npm-{}-{}.json",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        let path = std::env::temp_dir().join(unique);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        let guard = TempText { path };
-        file.write_all(text.as_bytes())?;
-        Ok(guard)
-    }
-}
-
-impl Drop for TempText {
-    fn drop(&mut self) {
-        // a file already gone is the goal; nothing else can act on a failure here
-        let _ = std::fs::remove_file(&self.path);
-    }
+/// `text` in an open, already-deleted file, rewound to its start: node reads
+/// it as its stdin. Nothing is written to a pipe, so an early node exit cannot
+/// raise SIGPIPE (greengate restores its default action), and nothing is left
+/// on disk after any kill. The name holds the pid, a counter and the time, so a
+/// file a killed run left behind under the same pid cannot collide; it is
+/// created owner-only, never inside the snapshot, whose tree the stamp covers.
+fn unlinked_file(text: &str) -> std::io::Result<std::fs::File> {
+    use std::io::{Seek, Write};
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "greengate-npm-{}-{}-{nanos}.json",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&path)?;
+    let written = file.write_all(text.as_bytes()).and_then(|()| file.rewind());
+    let removed = std::fs::remove_file(&path);
+    written?;
+    removed?;
+    Ok(file)
 }
 
 /// The `counts=` line of the dry-run helper: exactly one line holding exactly
@@ -987,7 +1002,7 @@ fn parse_counts(text: &str) -> Option<[usize; 3]> {
 }
 
 /// Reduce JSON the manager printed to plain lines with `node -e script`, the
-/// JSON in a temp file whose path is node's argv: this crate has no JSON
+/// JSON on node's stdin from an already-deleted file: this crate has no JSON
 /// parser, and the answer is npm's own. node's exit status decides; a missing
 /// node is a refusal that says so.
 fn node_reads(
@@ -997,15 +1012,14 @@ fn node_reads(
     script: &str,
 ) -> Result<String, String> {
     let tool = u.manager.tool();
-    let file = TempText::write(json)
+    let file = unlinked_file(json)
         .map_err(|e| format!("could not write {tool}'s output for node: {e}"))?;
     let mut cmd = Command::new(crate::hooks::common::program("node"));
     cmd.arg("-e")
         .arg(script)
-        .arg(&file.path)
         .current_dir(std::env::temp_dir())
         .env_remove("NODE_OPTIONS")
-        .stdin(Stdio::null());
+        .stdin(Stdio::from(file));
     crate::hooks::common::strip_git_env(&mut cmd);
     let out = match capture_apart(settings, &mut cmd) {
         Ok(out) => out,
@@ -1023,9 +1037,12 @@ fn node_reads(
         }
     };
     if !out.status.success() {
+        let exited = out
+            .status
+            .code()
+            .map_or_else(|| "on a signal".to_string(), |c| c.to_string());
         return Err(format!(
-            "could not read {tool}'s output ({}): {}",
-            out.status,
+            "could not read {tool}'s output (node exited {exited}): {}",
             last_line(&out.stderr)
         ));
     }
@@ -1034,7 +1051,7 @@ fn node_reads(
 
 /// `npm query .workspace`: the `location` of each workspace, one per line.
 const NPM_QUERY_SCRIPT: &str = r#"
-const text = require('fs').readFileSync(process.argv[1], 'utf8');
+const text = require('fs').readFileSync(0, 'utf8');
 const start = text.indexOf('[');
 if (start < 0) throw new Error('no JSON array in npm query output');
 const found = JSON.parse(text.slice(start));
@@ -1046,7 +1063,7 @@ for (const workspace of found) console.log(String(workspace.location));
 /// so parsing starts at the first `{`. Prints `error=<summary>`, or
 /// `counts=<add> <remove> <change>` and `first=<name@version>`.
 const NPM_DRY_RUN_SCRIPT: &str = r#"
-const text = require('fs').readFileSync(process.argv[1], 'utf8');
+const text = require('fs').readFileSync(0, 'utf8');
 const start = text.indexOf('{');
 if (start < 0) throw new Error('no JSON object in npm output');
 const report = JSON.parse(text.slice(start));
@@ -1341,7 +1358,7 @@ fn reuse(
         match newer_than(
             &src_dir.join(m).join("node_modules"),
             record,
-            voucher.skip_files(m.is_empty()),
+            voucher.skip_files(Scope::of(m)),
         ) {
             Ok(None) => {}
             Ok(Some(f)) => {
@@ -1959,7 +1976,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let record = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         std::fs::write(scratch.join(".package-lock.json"), "new").unwrap();
-        let skips = Voucher::Npm.skip_files(true);
+        let skips = Voucher::Npm.skip_files(Scope::Root);
         assert_eq!(newer_than(&scratch, record, skips).unwrap(), None);
         std::fs::write(nested.join(".package-lock.json"), "new").unwrap();
         assert_eq!(
