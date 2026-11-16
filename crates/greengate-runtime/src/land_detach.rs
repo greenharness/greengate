@@ -164,21 +164,18 @@ fn skeleton(options: &Options) -> Report {
 
 /// A launch that does not start a worker: the reason on stderr, and under
 /// `--json` the refused document on stdout, as every other land prints one.
-fn refused_launch(json: bool, why: &str) -> i32 {
+fn refused_launch(options: &Options, why: &str) -> i32 {
     eprintln!("{BIN}: land: {why}");
-    finish(&Report::new(Status::Refused), json)
+    finish(&Report::new(Status::Refused), options.json)
 }
 
 /// `land --detach`: judge, record, start the worker, print where to wait.
 pub(crate) fn launch(options: &Options) -> i32 {
     let Some(dir) = receipt_dir() else {
-        return refused_launch(options.json, "could not find the git directory");
+        return refused_launch(options, "could not find the git directory");
     };
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        return refused_launch(
-            options.json,
-            &format!("could not create {}: {e}", dir.display()),
-        );
+        return refused_launch(options, &format!("could not create {}: {e}", dir.display()));
     }
     // The check for a live worker, the receipt and the spawn are one step:
     // two launches that pass the check together would both start.
@@ -189,15 +186,10 @@ pub(crate) fn launch(options: &Options) -> i32 {
         .open(dir.join("land.lock"))
     {
         Ok(file) => file,
-        Err(e) => {
-            return refused_launch(
-                options.json,
-                &format!("could not open the launch lock: {e}"),
-            )
-        }
+        Err(e) => return refused_launch(options, &format!("could not open the launch lock: {e}")),
     };
     if !crate::fdlock::exclusive_within(&launch_lock, LAUNCH_LOCK_BUDGET) {
-        return refused_launch(options.json, "another launch is in progress; try again");
+        return refused_launch(options, "another launch is in progress; try again");
     }
     if let Some(live) = live_receipt(&dir) {
         let why = format!(
@@ -205,7 +197,7 @@ pub(crate) fn launch(options: &Options) -> i32 {
             live.display(),
             wait_command(&live)
         );
-        return refused_launch(options.json, &why);
+        return refused_launch(options, &why);
     }
     crate::land::prune_receipts(&dir);
 
@@ -215,7 +207,7 @@ pub(crate) fn launch(options: &Options) -> i32 {
             .as_deref()
             .map_or_else(|| "HEAD".to_string(), |name| format!("the tag {name}"));
         return refused_launch(
-            options.json,
+            options,
             &format!("no commit to judge: git cannot resolve {what}"),
         );
     };
@@ -229,15 +221,10 @@ pub(crate) fn launch(options: &Options) -> i32 {
         .open(lock_path(&receipt))
     {
         Ok(file) => file,
-        Err(e) => {
-            return refused_launch(
-                options.json,
-                &format!("could not open the receipt lock: {e}"),
-            )
-        }
+        Err(e) => return refused_launch(options, &format!("could not open the receipt lock: {e}")),
     };
     if !crate::fdlock::try_exclusive(&lock) {
-        return refused_launch(options.json, "the receipt lock is already held");
+        return refused_launch(options, "the receipt lock is already held");
     }
     let report = skeleton(options);
     let meta = Meta {
@@ -249,7 +236,7 @@ pub(crate) fn launch(options: &Options) -> i32 {
     let body = receipt_body(&report, "running", None, (started, None), Some(&meta));
     if let Err(e) = write_atomic(&receipt, &body) {
         return refused_launch(
-            options.json,
+            options,
             &format!("could not write the receipt {}: {e}", receipt.display()),
         );
     }
@@ -278,7 +265,7 @@ pub(crate) fn launch(options: &Options) -> i32 {
         if let Err(write_error) = write_atomic(&receipt, &body) {
             eprintln!("{BIN}: land: could not finalize the receipt: {write_error}");
         }
-        return refused_launch(options.json, &format!("could not start the worker: {e}"));
+        return refused_launch(options, &format!("could not start the worker: {e}"));
     }
     drop(launch_lock);
 
