@@ -57,6 +57,7 @@ mod js_tool_source;
 mod json_contract;
 mod k8s;
 mod land;
+mod land_detach;
 mod large_files;
 mod linters;
 mod load_sites;
