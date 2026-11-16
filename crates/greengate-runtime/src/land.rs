@@ -304,7 +304,9 @@ impl Options {
         }
     }
 
-    /// The flags a rerun of this land keeps, as typed.
+    /// The flags a rerun of this land keeps, as typed. Only the unix-only
+    /// detached land reruns a land, so other targets do not build it.
+    #[cfg(unix)]
     pub(crate) fn rerun_flags(&self) -> Vec<String> {
         let mut flags = Vec::new();
         if self.force {
