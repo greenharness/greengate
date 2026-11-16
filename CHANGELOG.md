@@ -8,6 +8,10 @@ missing here.
 
 ## Unreleased
 
+## v4.7.0
+
+### Changed
+
 - `pre-push-branch-pattern` allows `prog/<slug>/<id>`, the branch the programme skill names for a programme ticket: `prog` is the one prefix that takes two names, each `[[:alnum:]_-]+`. Every other prefix is unchanged, and the generated AGENTS.md block and `branch_style.prefixes` do not list it, so no repository's block drifts on upgrade; `branch_style.pattern` and the rejection message show it.
 
 ## v4.6.0
