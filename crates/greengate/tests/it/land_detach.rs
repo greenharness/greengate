@@ -445,6 +445,45 @@ fn a_refused_launch_under_json_still_prints_json() {
 }
 
 #[test]
+fn a_missing_tag_is_refused_at_launch_with_no_receipt() {
+    let fx = ahead();
+    // `ahead` lands once in the foreground, which leaves its own receipt.
+    let before = crate::land::receipts(&fx).len();
+    let ran = run(&fx, &["--detach", "--tag", "nosuch"], None);
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(
+        crate::land::receipts(&fx).len(),
+        before,
+        "no receipt for a launch with nothing to judge"
+    );
+}
+
+#[test]
+fn a_worker_with_an_unusable_lock_finalizes_its_receipt_refused() {
+    let fx = ahead();
+    let launched = run(&fx, &["--detach", "--json"], None);
+    assert_eq!(launched.code, 0, "{}", launched.stderr);
+    let receipt = receipt_of(&launched);
+    assert_eq!(wait_for(&fx, &receipt).code, 0);
+    // Hand the receipt back to `running`, then start a worker whose lock
+    // descriptor is stdout: it must refuse, never take fd 1.
+    let body = receipt_text(&receipt).replace("\"status\":\"landed\"", "\"status\":\"running\"");
+    std::fs::write(&receipt, body).expect("write");
+    let ran = run(
+        &fx,
+        &["--worker", "--receipt", &receipt, "--lock-fd", "1"],
+        None,
+    );
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    let after = receipt_text(&receipt);
+    assert_eq!(receipt_field(&after, "status"), "refused", "{after}");
+    assert!(
+        !receipt_field(&after, "log").is_empty(),
+        "the log is kept: {after}"
+    );
+}
+
+#[test]
 fn the_foreground_json_keeps_its_keys() {
     let fx = ahead();
     let ran = run(&fx, &["--json"], None);

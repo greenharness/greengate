@@ -310,10 +310,12 @@ struct Finalizer {
 }
 
 impl Finalizer {
-    fn write(&self, report: &Report) {
+    /// Writes the final receipt once. Returns whether this call wrote it:
+    /// `false` when an earlier call already finalized the receipt.
+    fn write(&self, report: &Report) -> bool {
         let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
         if *done {
-            return;
+            return false;
         }
         *done = true;
         let mut report = report.clone();
@@ -334,6 +336,7 @@ impl Finalizer {
                 self.path.display()
             );
         }
+        true
     }
 }
 
@@ -386,12 +389,21 @@ fn finalize_on_signals(fin: Arc<Finalizer>) {
         let sig = PENDING_SIGNAL.load(Ordering::SeqCst);
         let mut report = fin.skeleton.clone();
         report.status = Status::Interrupted(sig);
-        fin.write(&report);
+        if !fin.write(&report) {
+            // The land had already finalized its receipt: the signal came
+            // after the result, so it changes neither the receipt nor the
+            // exit code. The main thread finishes as usual.
+            return;
+        }
         // A push may already have left: the remote state is unknown.
-        eprintln!(
-            "{BIN}: land: interrupted by signal {sig}; the remote state is unknown: check git ls-remote <remote> {}",
-            fin.skeleton.dst
-        );
+        if fin.skeleton.dst.is_empty() {
+            eprintln!("{BIN}: land: interrupted by signal {sig}; the remote state is unknown");
+        } else {
+            eprintln!(
+                "{BIN}: land: interrupted by signal {sig}; the remote state is unknown: check git ls-remote <remote> {}",
+                fin.skeleton.dst
+            );
+        }
         crate::fdlock::kill_group(std::process::id() as i32, SIGTERM);
         std::process::exit(128 + sig);
     });
@@ -415,14 +427,14 @@ pub(crate) fn worker(options: &Options) -> i32 {
     // descriptor at 0-2 is stdio, never the lock; refuse rather than take it.
     if lock_fd <= 2 || !crate::fdlock::set_cloexec(lock_fd) {
         eprintln!("{BIN}: land: the lock descriptor {lock_fd} is not usable");
-        return finalize_refused(&path);
+        return finalize_refused(&path, read_view(&path).as_ref());
     }
     // SAFETY: the launcher passed this descriptor (checked above to be no
     // stdio descriptor), an open lock file nothing else in this process owns.
     let _lock = unsafe { File::from_raw_fd(lock_fd) };
     let Some(view) = read_view(&path) else {
         eprintln!("{BIN}: land: cannot read the receipt {receipt}");
-        return finalize_refused(&path);
+        return finalize_refused(&path, None);
     };
     let mut skeleton = Report::new(Status::Refused);
     skeleton.branch = view.branch.clone();
@@ -441,7 +453,11 @@ pub(crate) fn worker(options: &Options) -> i32 {
         Some(&meta),
     );
     if let Err(e) = write_atomic(&path, &body) {
-        eprintln!("{BIN}: land: could not take over the receipt {receipt}: {e}");
+        // Nothing may be pushed that the receipt cannot record.
+        eprintln!(
+            "{BIN}: land: could not take over the receipt {receipt}: {e}; nothing was pushed"
+        );
+        return finalize_refused(&path, Some(&view));
     }
     let fin = Arc::new(Finalizer {
         path,
@@ -456,21 +472,33 @@ pub(crate) fn worker(options: &Options) -> i32 {
         Some(name) => crate::land::land_tag(name, Some(&view.judged)),
         None => crate::land::land(options.mode(), Some(&view.judged)),
     };
-    fin.write(&report);
+    let _ = fin.write(&report); // the signal watcher may have finalized it first; either way it is final
     finish(&report, options.json)
 }
 
 /// A worker that cannot take its receipt over still finalizes it, so no
-/// `--wait` reads a dead `running` receipt.
-fn finalize_refused(path: &Path) -> i32 {
-    let report = Report::new(Status::Refused);
+/// `--wait` reads a dead `running` receipt. What the launcher recorded (the
+/// ref, the judged sha, the log, the flags) is kept when it can be read.
+fn finalize_refused(path: &Path, view: Option<&View>) -> i32 {
+    let mut report = Report::new(Status::Refused);
     let now = now_nanos();
+    let meta = view.map(|v| {
+        report.branch = v.branch.clone();
+        report.dst = v.dst.clone();
+        Meta {
+            judged: v.judged.clone(),
+            log: v.log.clone(),
+            worker_pid: Some(std::process::id()),
+            flags: v.flags.clone(),
+        }
+    });
+    let started = view.map_or(now, |v| v.started);
     let body = receipt_body(
         &report,
         report.status.as_str(),
         Some(report.status.code()),
-        (now, Some(now)),
-        None,
+        (started, Some(now)),
+        meta.as_ref(),
     );
     if let Err(e) = write_atomic(path, &body) {
         eprintln!(
