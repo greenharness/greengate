@@ -8,6 +8,18 @@ missing here.
 
 ## Unreleased
 
+### Added
+
+- **`snapshotDeps reuse` now reuses npm's `node_modules`.** An npm unit's
+  tree is cloned copy-on-write and kept only when `npm install --dry-run
+  --offline` would add, remove and change nothing and leaves
+  `package-lock.json` untouched; npm reads the installed tree, so a package
+  changed in place is caught even with its timestamps set back. Any
+  refusal installs, as before. Measured on a 25,143-file tree: 43% of `npm
+  ci`'s time and 2.5% of its disk. A link in the clone that points outside
+  the snapshot now refuses too. yarn stays install-only: its own checks
+  accept a tree with a package missing.
+
 ## v4.7.0
 
 ### Changed

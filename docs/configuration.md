@@ -567,35 +567,47 @@ like a broken branch rather than a missing install.
   and each flavour gets the spelling it accepts without a warning). Exact,
   and it refuses a `package.json` its lockfile does not satisfy — so does
   the snapshot.
-- **`reuse`** (pnpm only) clones the working tree's `node_modules`
+- **`reuse`** (pnpm and npm) clones the working tree's `node_modules`
   copy-on-write — `clonefile(2)` on macOS, `cp --reflink=always` on Linux
   (btrfs, XFS with reflinks), about 2% of the tree's size in metadata — and
   never falls back to a plain copy: on another volume or a filesystem that
   cannot clone, it refuses in one line that names the fix (`TMPDIR` on the
-  working tree's volume, or `snapshotDeps install`) and installs instead —
-  the root's
-  and each workspace member's, as `pnpm ls -r` lists them — and keeps the
-  clone only when it is laid out the way pnpm's isolated linker leaves it
-  (every package a link; a stray directory is refused, since pnpm's own
-  check ignores it and a suite could import it) and `pnpm install
-  --frozen-lockfile --offline` accepts it — which also refuses a manifest
-  the lockfile does not satisfy, and relinks small drift from the store. A
-  lockfile that differs from the commit's, a link that resolves back into
-  the working tree, or any refusal removes every directory cloned for that
-  unit, says why, and installs instead. So does a file edited in place:
-  pnpm does not check installed content, so greengate refuses a tree holding
-  any file newer than pnpm's install record (`node_modules/.modules.yaml`,
-  rewritten as every install finishes), naming it — `.bin/`, `.cache/` and
-  `.vite*/` aside, which installs and tools write afterwards. That rests on
-  file timestamps, not content, which is why `reuse` is still not the
-  default. **npm is never reused:** `npm ls` answers whether the dependency
-  graph is valid, not whether the tree is the one the lockfile describes,
-  and a real graph with peer-range conflicts `npm ci` installs happily
-  fails it on a fresh install — so it can vouch for nothing, and an npm
-  unit installs under `reuse` too, saying so. **Neither is yarn:** a
-  frozen install checks the lockfile against the manifests, not the
-  installed tree, and `yarn check` is gone from both flavours, so a yarn
-  unit installs under `reuse` too.
+  working tree's volume, or `snapshotDeps install`) and installs instead.
+  A clone is kept only when the package manager vouches for it against the
+  snapshot's committed manifests and lockfile; any refusal removes every
+  directory cloned for that unit, says why, and installs instead. Before any
+  copy, a lockfile that differs from the commit's refuses, and so does any
+  file in the working tree's `node_modules` newer than the manager's install
+  record — an edit made after the install, which no manager checks
+  (`.bin/`, `.cache/` and `.vite*/` aside, which installs and tools write
+  afterwards). That rests on timestamps, not content, which is why `reuse` is
+  not the default. After the copy, a link that resolves back into the working
+  tree refuses.
+  - **pnpm:** the root's and each workspace member's `node_modules`, as
+    `pnpm ls -r` lists them; the record is `node_modules/.modules.yaml`. The
+    clone must be laid out the way pnpm's isolated linker leaves it (every
+    package a link; a stray directory is refused, since pnpm's own check
+    ignores it and a suite could import it), and `pnpm install
+    --frozen-lockfile --offline` must accept it — which also refuses a
+    manifest the lockfile does not satisfy, and relinks small drift from the
+    store.
+  - **npm:** the root's `node_modules`, and a member's when it has one, as
+    `npm query .workspace` lists them; the record is
+    `node_modules/.package-lock.json`. Any link in the clone that resolves
+    outside the snapshot refuses (`npm link`, an absolute link; npm's own
+    relative workspace links stay). The vouch is `npm install --dry-run
+    --offline --ignore-scripts`: the clone is kept only when it exits 0, would
+    add, remove and change nothing, and leaves `package-lock.json`
+    byte-identical. npm reads the installed tree, not its record, so a
+    package changed in place is caught even with its timestamps set back. The
+    JSON is read by a short `node` script; without `node` on PATH the unit
+    installs and says so. Measured on a 25,143-file tree: the clone and the
+    vouch take 43% of `npm ci`'s time and 2.5% of its disk.
+  - **yarn is never reused:** with the timestamp scan and the link check
+    around them, yarn 1's own `yarn check --integrity` and `--verify-tree`
+    still accept a tree with a package missing, so nothing yarn offers can
+    vouch for a clone; a yarn unit installs under `reuse` too, saying so.
+    Yarn 2+ and bun are not reused either.
 - **`off`** prepares nothing.
 
 Only the units the push touches are prepared: the root one, and each unit
