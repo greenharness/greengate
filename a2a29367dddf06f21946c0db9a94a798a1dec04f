@@ -1,0 +1,20 @@
+greengate-provenance-v1
+commit 99fad0ef525076e22c0d5adbb8dc695b7528f82a
+tree a2a29367dddf06f21946c0db9a94a798a1dec04f
+canon 9efd8d60c1660573a52b2ab82fe8ddc6dfe73f5e
+patch e1679b089b1e3ee69d822dd16051d767f0f2912a
+plan docs/plans/2026-11-15-snapshot-reuse-npm-yarn.md 4893d0b5806949b8d279ff1dca3fd3786a03bb9263922f24901759e07b61448d
+review reviewed 2e0b0568305db931b7e4ecbc8f378be1c41a1ba3a752bc5258ad2f1c7ec72a33
+code-review backend carried 01d328a6f8bfc63a29009167b7d16c01d68ac98d60492449b8cbd8b8461044fe
+code-review lang:rust reviewed 2e0b0568305db931b7e4ecbc8f378be1c41a1ba3a752bc5258ad2f1c7ec72a33
+code-review tui carried 01d328a6f8bfc63a29009167b7d16c01d68ac98d60492449b8cbd8b8461044fe
+code-review unix reviewed 2e0b0568305db931b7e4ecbc8f378be1c41a1ba3a752bc5258ad2f1c7ec72a33
+preview not-required
+producer greenpiste 5.1.0
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg7UOvJ8myo4dhW907VFty7T/bUV
+RFQerK+MWJ4bjChwcAAAAUZ3JlZW5nYXRlLXByb3ZlbmFuY2UAAAAAAAAABnNoYTUxMgAA
+AFMAAAALc3NoLWVkMjU1MTkAAABAEJWD1C+wLIabCsOYjc0GRUvzP6dk03EpZdFZ3TMqry
+0X3roSh6jBdb2uQ3WawWeyqTT54HnHSt6xV01VHQ/8BA==
+-----END SSH SIGNATURE-----
