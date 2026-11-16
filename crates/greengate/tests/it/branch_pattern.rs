@@ -102,11 +102,20 @@ fn each_new_branch_name_is_judged_by_the_rules() {
         "add/t",
         "remove/s",
         "chore/duro-1.50.50",
+        // A programme ticket's branch: `prog` alone takes two names.
+        "prog/gate-guardrails/t12-grh-fleet-view",
     ] {
         let (ok, out) = new_branch(&r, b);
         assert!(ok, "{b}: {out}");
     }
-    for b in ["off-pattern", "feat/duro-1.50.50", "duro-1.50.50"] {
+    for b in [
+        "off-pattern",
+        "feat/duro-1.50.50",
+        "duro-1.50.50",
+        "feat/gate-guardrails/t12",
+        "prog/gate-guardrails",
+        "prog/a/b/c",
+    ] {
         let (ok, out) = new_branch(&r, b);
         assert!(!ok, "{b} was accepted: {out}");
         assert!(out.contains(b), "{b} was not named: {out}");

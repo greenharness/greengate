@@ -69,9 +69,14 @@ pub const COMMIT_TYPES: &[CommitType] = &[
     },
 ];
 
-/// A branch prefix, and whether dots are allowed after it.
+/// A branch prefix, and what may follow it.
 pub struct BranchPrefix {
     pub name: &'static str,
+    /// One more name after the first (`prog/<slug>/<id>`): a programme ticket's
+    /// branch is named by the programme and the ticket, and the programme
+    /// skill's scanner finds in-flight tickets by that shape. Every other
+    /// prefix takes a single name.
+    pub nested: bool,
     /// Dots suit version-bump branches (`chore/duro-1.50.50`) and would only be
     /// noise elsewhere. Git already rejects the dangerous forms (`..`, trailing
     /// `.lock`).
@@ -82,58 +87,77 @@ pub const BRANCH_PREFIXES: &[BranchPrefix] = &[
     BranchPrefix {
         name: "add",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "automation",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "build",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "chore",
         dots: true,
+        nested: false,
     },
     BranchPrefix {
         name: "docs",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "feat",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "fix",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "hotfix",
         dots: false,
+        nested: false,
+    },
+    BranchPrefix {
+        name: "prog",
+        dots: false,
+        nested: true,
     },
     BranchPrefix {
         name: "perf",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "refactor",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "remove",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "revert",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "style",
         dots: false,
+        nested: false,
     },
     BranchPrefix {
         name: "test",
         dots: false,
+        nested: false,
     },
 ];
 
@@ -154,6 +178,10 @@ pub const BRANCH_ONLY: &[(&str, &str)] = &[
     (
         "automation",
         "bot-authored branches; their commits carry their own types",
+    ),
+    (
+        "prog",
+        "a programme ticket's branch, prog/<slug>/<id>; its commits carry their own types",
     ),
 ];
 
@@ -185,21 +213,35 @@ pub fn type_for_emoji(emoji: &str) -> Option<&'static str> {
 /// The branch contract, rendered for the rejection message so what a user is
 /// told always matches what is enforced.
 pub fn branch_contract() -> String {
-    let plain: Vec<&str> = BRANCH_PREFIXES
-        .iter()
-        .filter(|p| !p.dots)
-        .map(|p| p.name)
-        .collect();
-    let dotted: Vec<&str> = BRANCH_PREFIXES
-        .iter()
-        .filter(|p| p.dots)
-        .map(|p| p.name)
-        .collect();
+    let names = |keep: &dyn Fn(&BranchPrefix) -> bool| -> String {
+        BRANCH_PREFIXES
+            .iter()
+            .filter(|p| keep(p))
+            .map(|p| p.name)
+            .collect::<Vec<_>>()
+            .join("|")
+    };
     format!(
-        "^(({})/[[:alnum:]_-]+|({})/[[:alnum:]_.-]+)$",
-        plain.join("|"),
-        dotted.join("|")
+        "^(({})/[[:alnum:]_-]+|({})/[[:alnum:]_.-]+|({})/[[:alnum:]_-]+/[[:alnum:]_-]+)$",
+        names(&|p| !p.dots && !p.nested),
+        names(&|p| p.dots),
+        names(&|p| p.nested),
     )
+}
+
+/// The prefixes as a sentence lists them: a nested one shows its shape.
+pub fn branch_prefix_list() -> String {
+    BRANCH_PREFIXES
+        .iter()
+        .map(|p| {
+            if p.nested {
+                format!("{0} ({0}/<slug>/<id>)", p.name)
+            } else {
+                p.name.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
