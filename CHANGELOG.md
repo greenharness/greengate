@@ -8,6 +8,14 @@ missing here.
 
 ## Unreleased
 
+## v4.9.0
+
+### Added
+
+- **`greengate land --detach`** returns in seconds and lands in the background. It records the sha it judged (`HEAD`, or the tag object, as `land` pushes it), writes a `running` receipt, starts a worker that pushes only that sha and never takes the retry after a pre-push hook that moved `HEAD` (it ends `refused` and names the new `HEAD`), and prints the `greengate land --wait '<receipt>'` command (`--json`: `{"status":"detached","receipt","log","wait"}`). `--force`, `--tag` and `--json` combine as in the foreground; `--dry-run` and a non-unix host are usage errors (exit 2). A second launch while a worker lives is refused (exit 1) and names the running receipt. The worker's output goes to a log beside the receipt.
+- **`greengate land --wait <receipt>`** polls every 2 s, prints the verdict line and exits with the land's exit code. A worker that died leaves a `running` receipt with a free lock: `--wait` prints `worker <pid> died`, the log and a rerun command with the original flags, and exits 1; a missing receipt exits 2. It takes no other land flag.
+- Every landing receipt, foreground or detached, also carries `remote_before`, `remote_after`, `gates` and `exit`, and is written by rename so a reader never sees half a file. Pruning an old receipt also removes its `.log`, `.lock` and `.json.tmp`, and never prunes one whose worker still holds the lock.
+
 ## v4.8.0
 
 ### Added
@@ -23,9 +31,6 @@ missing here.
   ci`'s time and 2.5% of its disk. A link in the clone that points outside
   the snapshot now refuses too. yarn stays install-only: its own checks
   accept a tree with a package missing.
-- **`greengate land --detach`** returns in seconds and lands in the background. It records the sha it judged (`HEAD`, or the tag object, as `land` pushes it), writes a `running` receipt, starts a worker that pushes only that sha and never takes the retry after a pre-push hook that moved `HEAD` (it ends `refused` and names the new `HEAD`), and prints the `greengate land --wait '<receipt>'` command (`--json`: `{"status":"detached","receipt","log","wait"}`). `--force`, `--tag` and `--json` combine as in the foreground; `--dry-run` and a non-unix host are usage errors (exit 2). A second launch while a worker lives is refused (exit 1) and names the running receipt. The worker's output goes to a log beside the receipt.
-- **`greengate land --wait <receipt>`** polls every 2 s, prints the verdict line and exits with the land's exit code. A worker that died leaves a `running` receipt with a free lock: `--wait` prints `worker <pid> died`, the log and a rerun command with the original flags, and exits 1; a missing receipt exits 2. It takes no other land flag.
-- Every landing receipt, foreground or detached, also carries `remote_before`, `remote_after`, `gates` and `exit`, and is written by rename so a reader never sees half a file. Pruning an old receipt also removes its `.log`, `.lock` and `.json.tmp`, and never prunes one whose worker still holds the lock.
 
 ## v4.7.0
 
