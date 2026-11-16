@@ -152,8 +152,8 @@ pub const PACK_FILE: &str = "greengate.pack";
 pub const AGENTS_START: &str = "<!-- greengate:start -->";
 pub const AGENTS_END: &str = "<!-- greengate:end -->";
 
-/// The `list --json` envelope. greenbelay and relais read it and the old
-/// `amont-list-v1` alike, from the hook's 3.30.0 and relais 0.54.0.
+/// The `list --json` envelope. Every greenbelay release and relais from
+/// 0.54.0 read it and the old `amont-list-v1` alike.
 pub const LIST_FORMAT: &str = "greengate-list-v1";
 
 /// The migration's lock and its done-marker, in the common dir.

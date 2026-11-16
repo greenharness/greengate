@@ -56,13 +56,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The quiet excerpt is duplicated in amont-agent (a shared crate for one
+      # The quiet excerpt is duplicated in greenbelay (a shared crate for one
       # function would couple more than it saves), so the two copies are held
-      # together by their golden fixtures. amont-agent owns them; this is the
+      # together by their golden fixtures. greenbelay owns them; this is the
       # follower, so the check lives here and merge order cannot deadlock it.
       # A fetch that fails fails the step: a cross-check that could not look
       # has checked nothing.
-      - name: Compare MANIFEST.sha256 with amont-agent's
+      - name: Compare MANIFEST.sha256 with greenbelay's
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -76,16 +76,16 @@ jobs:
             timeout 30 gh api "$path?ref=main" -H 'Accept: application/vnd.github.raw' > /tmp/theirs.sha256 || rc=$?
             [ "$rc" = 0 ] && break
             if [ "$attempt" = 3 ]; then
-              echo "::error::could not fetch amont-agent's MANIFEST.sha256 ($path, exit $rc; 124 = timed out after 30 s)"
+              echo "::error::could not fetch greenbelay's MANIFEST.sha256 ($path, exit $rc; 124 = timed out after 30 s)"
               exit 1
             fi
             sleep $((attempt * 5))
           done
           if ! diff -u /tmp/theirs.sha256 "$ours"; then
-            echo "::error::the excerpt fixtures differ from amont-agent's; copy tests/fixtures/excerpt/ from amont-agent and update the pin in crates/greengate/tests/it/excerpt_golden.rs"
+            echo "::error::the excerpt fixtures differ from greenbelay's; copy tests/fixtures/excerpt/ from greenbelay and update the pin in crates/greengate/tests/it/excerpt_golden.rs"
             exit 1
           fi
-          echo "excerpt fixtures match amont-agent's"
+          echo "excerpt fixtures match greenbelay's"
 
   adr:
     name: architecture decisions resolve

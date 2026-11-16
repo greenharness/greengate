@@ -3,8 +3,8 @@
 //! lands one such commit per repository).
 //!
 //! Never part of the automatic first run: a tracked rename is a change to
-//! the repository, and greengate 3.x, greenbelay and relais before 0.54
-//! read only `amont.conf`, so it happens when someone asks for it.
+//! the repository, and greengate 3.x, the hook before its 3.30.0 and relais
+//! before 0.54 read only `amont.conf`, so it happens when someone asks for it.
 //!
 //! What it does, each step skipped when there is nothing to do:
 //!

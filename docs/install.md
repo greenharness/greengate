@@ -449,13 +449,14 @@ greengate-fleet fix --apply --root ~/Developer
 ### Upgrading from 3.x to 4.0
 
 4.0 reads only greengate's names (see the CHANGELOG), so upgrade in this
-order. The host-slot names switch once, so greengate, relais and greenbelay
-are installed together while no slot is held; installing one alone leaves two
+order. The host-slot names switch once, so greengate, relais and greenpiste
+(now greenbelay) are installed together while no slot is held; installing one alone leaves two
 slot queues on one machine.
 
 1. Wait for the slot directory to be empty (`greengate slots` lists who holds
    one) and for no `amont` process to be running.
-2. Install greengate 4.0, the matching relais and the matching greenbelay.
+2. Install greengate 4.0, the matching relais and the matching greenpiste
+   (now greenbelay).
 3. Run any `greengate` command in a repository. The first one moves what 3.x
    left there (state in `.git`, the local `amont.*` keys) and then does what
    you asked. A 3.x store of parked changes (`.git/amont-held`) stops it:
