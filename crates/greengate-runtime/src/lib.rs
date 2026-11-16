@@ -786,6 +786,9 @@ fn bypasses_json(l: &bypass::Ledger) -> String {
 fn branch_style_json() -> String {
     let prefixes: Vec<String> = vocabulary::BRANCH_PREFIXES
         .iter()
+        // The programme skill's `prog/<slug>/<id>` is in `pattern`, not offered
+        // as a prefix for ordinary work.
+        .filter(|p| !p.nested)
         .map(|p| p.name.to_string())
         .collect();
     json::object(&[

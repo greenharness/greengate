@@ -51,11 +51,7 @@ pub fn early(settings: &crate::config::Settings) -> Outcome {
     {
         return Outcome::Passed;
     }
-    let prefixes = vocabulary::BRANCH_PREFIXES
-        .iter()
-        .map(|p| p.name)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let prefixes = vocabulary::branch_prefix_list();
     crate::say!(
         "{} Branch {} will be refused at push time — it does not match
     {}.
@@ -87,8 +83,19 @@ pub fn conforms(branch: &str) -> bool {
     let Some(p) = vocabulary::branch_prefix(prefix) else {
         return false;
     };
-    rest.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (p.dots && c == '.'))
+    let name = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (p.dots && c == '.'))
+    };
+    if p.nested {
+        // Exactly two names: `prog/<slug>/<id>`.
+        return rest
+            .split_once('/')
+            .is_some_and(|(a, b)| name(a) && name(b));
+    }
+    name(rest)
 }
 
 /// A delete pushes no name to validate. Same rule as `branch_protect::is_delete`
@@ -285,8 +292,25 @@ mod tests {
     #[test]
     fn accepts_every_declared_prefix() {
         for p in crate::vocabulary::BRANCH_PREFIXES {
-            assert!(conforms(&format!("{}/some-work", p.name)), "{}", p.name);
+            let name = if p.nested {
+                format!("{}/some-programme/t01-some-work", p.name)
+            } else {
+                format!("{}/some-work", p.name)
+            };
+            assert!(conforms(&name), "{}", p.name);
         }
+    }
+
+    /// A programme ticket's branch has two names, and only `prog` may.
+    #[test]
+    fn prog_takes_exactly_two_names() {
+        assert!(conforms("prog/gate-guardrails/t12-grh-fleet-view"));
+        assert!(!conforms("prog/gate-guardrails"));
+        assert!(!conforms("prog/a/b/c"));
+        assert!(!conforms("prog//t12"));
+        assert!(!conforms("prog/a/"));
+        assert!(!conforms("prog/a.b/c"));
+        assert!(!conforms("feat/gate-guardrails/t12-grh-fleet-view"));
     }
 
     /// The divergence this module exists to end: these were all REJECTED as

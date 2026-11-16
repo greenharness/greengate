@@ -42,8 +42,12 @@ pub fn generate_block(settings: &crate::config::Settings) -> String {
     };
     let idle = clocks(crate::hooks::common::idle_timeout(settings));
     let ceiling = clocks(crate::hooks::common::check_timeout(settings));
+    // A nested prefix (`prog/<slug>/<id>`) is the programme skill's own shape,
+    // not one an agent picks for ordinary work: leaving it out keeps this block
+    // the same in every repository until a repository's own text changes.
     let prefixes = crate::vocabulary::BRANCH_PREFIXES
         .iter()
+        .filter(|p| !p.nested)
         .map(|p| p.name)
         .collect::<Vec<_>>()
         .join(", ");
