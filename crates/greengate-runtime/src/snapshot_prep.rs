@@ -19,15 +19,15 @@
 //! `--immutable` (berry, told apart by the lockfile's `__metadata:` block).
 //! A bun lockfile is recognised and refused with the fix named, never
 //! installed: a gate run over no dependencies fails every workspace at once
-//! and reads like a broken branch. `reuse` (pnpm only; see `reuse` for why
-//! npm and yarn are not reusable) clones the working tree's `node_modules`
-//! and keeps the clone
-//! only when it has pnpm's isolated layout and a frozen offline install
-//! accepts it against the snapshot's manifests and lockfile — which catches
-//! a missing or wrong-version package, a stray directory, and a manifest the
-//! lockfile does not satisfy, and does NOT catch a package whose files were
-//! edited in place without a version change. That limit is why reuse is
-//! opt-in.
+//! and reads like a broken branch. `reuse` (pnpm and npm; yarn and bun always
+//! install, see `voucher`) clones the working tree's `node_modules` and keeps
+//! the clone only when the manager vouches for it: pnpm by its isolated layout
+//! and a frozen offline install, npm by a dry-run install that would add,
+//! remove and change nothing. Both catch a missing or wrong-version package, a
+//! stray directory, and a manifest the lockfile does not satisfy; pnpm does
+//! NOT catch a package whose files were edited in place without a version
+//! change, and the mtime scan covers that for both only while the edit is
+//! newer than the install. That limit is why reuse is opt-in.
 //!
 //! Every question about a manifest goes to the package manager, through exit
 //! codes and parseable output: this crate is dependency-free and has no JSON
@@ -731,10 +731,10 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-/// The first symlink under `dir` that resolves into `source` — a clone
-/// still reading the developer's tree through a link is not isolated,
-/// whatever else it preserved.
-fn link_into(dir: &Path, sources: &[PathBuf]) -> std::io::Result<Option<PathBuf>> {
+/// The first symlink under `dir` for which `bad(link, resolved)` holds,
+/// where `resolved` is its target folded lexically (relative targets against
+/// the directory holding the link). Nothing is followed.
+fn first_link(dir: &Path, bad: &dyn Fn(&Path, &Path) -> bool) -> std::io::Result<Option<PathBuf>> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
         for entry in std::fs::read_dir(&at)? {
@@ -748,13 +748,7 @@ fn link_into(dir: &Path, sources: &[PathBuf]) -> std::io::Result<Option<PathBuf>
                 } else {
                     normalize(&at.join(target))
                 };
-                // Lexically AND through every link: `/var` is itself a
-                // symlink on macOS, so the two spellings of one directory
-                // must both be caught.
-                let real = path.canonicalize().ok();
-                if sources.iter().any(|s| {
-                    resolved.starts_with(s) || real.as_ref().is_some_and(|r| r.starts_with(s))
-                }) {
+                if bad(&path, &resolved) {
                     return Ok(Some(path));
                 }
             } else if kind.is_dir() {
@@ -765,15 +759,57 @@ fn link_into(dir: &Path, sources: &[PathBuf]) -> std::io::Result<Option<PathBuf>
     Ok(None)
 }
 
-/// The first regular file under `nm` modified after `record`, pnpm's
-/// install record (`.modules.yaml`, rewritten as an install finishes).
+/// The first symlink under `dir` that resolves into `source` — a clone
+/// still reading the developer's tree through a link is not isolated,
+/// whatever else it preserved.
+fn link_into(dir: &Path, sources: &[PathBuf]) -> std::io::Result<Option<PathBuf>> {
+    first_link(dir, &|path, resolved| {
+        // Lexically AND through every link: `/var` is itself a symlink on
+        // macOS, so the two spellings of one directory must both be caught.
+        let real = path.canonicalize().ok();
+        sources
+            .iter()
+            .any(|s| resolved.starts_with(s) || real.as_ref().is_some_and(|r| r.starts_with(s)))
+    })
+}
+
+/// The first symlink under `dir` that resolves outside every one of `roots`
+/// (the snapshot, spelled each way it can be): `npm link`, an absolute link,
+/// a `.bin` entry pointing elsewhere. A relative workspace link such as
+/// `../packages/a`, which stays inside the snapshot, is accepted.
+fn link_outside(dir: &Path, roots: &[PathBuf]) -> std::io::Result<Option<PathBuf>> {
+    first_link(dir, &|_, resolved| {
+        !roots.iter().any(|root| resolved.starts_with(root))
+    })
+}
+
+/// Does `skip` name this file? A pattern ending in `*` is a name prefix, one
+/// holding a `/` is `<parent dir>/<name>`, any other is a name.
+fn skipped_file(skip: &[&str], parent: &Path, name: &str) -> bool {
+    skip.iter().any(|pattern| {
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            name.starts_with(prefix)
+        } else if let Some((dir, file)) = pattern.split_once('/') {
+            name == file && parent.file_name().is_some_and(|d| d == dir)
+        } else {
+            name == *pattern
+        }
+    })
+}
+
+/// The first regular file under `nm` modified after `record`, the manager's
+/// install record, rewritten as an install finishes.
 ///
 /// Skipped, because an install or the tools legitimately write them after
-/// the record: every `.bin/` (pnpm relinks it last), `.cache/` and
-/// `.vite*/` (tool caches), and pnpm's own `.pnpm/lock.yaml`,
-/// `.pnpm-workspace-state*` and `.modules.yaml`. Symlinks are not followed —
-/// a top-level package is a link into `.pnpm`, which is walked itself.
-fn newer_than(nm: &Path, record: std::time::SystemTime) -> std::io::Result<Option<PathBuf>> {
+/// the record: every `.bin/` (relinked last), `.cache/` and `.vite*/` (tool
+/// caches), and the files in `skip_files` (the voucher's own bookkeeping,
+/// the record included). Symlinks are not followed — under pnpm a top-level
+/// package is a link into `.pnpm`, which is walked itself.
+fn newer_than(
+    nm: &Path,
+    record: std::time::SystemTime,
+    skip_files: &[&str],
+) -> std::io::Result<Option<PathBuf>> {
     if !nm.is_dir() {
         return Ok(None);
     }
@@ -790,10 +826,7 @@ fn newer_than(nm: &Path, record: std::time::SystemTime) -> std::io::Result<Optio
                 }
                 stack.push(entry.path());
             } else if kind.is_file() {
-                if name == ".modules.yaml"
-                    || name.starts_with(".pnpm-workspace-state")
-                    || (name == "lock.yaml" && at.file_name().is_some_and(|d| d == ".pnpm"))
-                {
+                if skipped_file(skip_files, &at, &name) {
                     continue;
                 }
                 if entry.metadata()?.modified()? > record {
@@ -805,31 +838,238 @@ fn newer_than(nm: &Path, record: std::time::SystemTime) -> std::io::Result<Optio
     Ok(None)
 }
 
-/// Workspace members of a pnpm unit, as pnpm lists them, relative to the
-/// unit dir. Asked in the SNAPSHOT: the committed manifests decide.
-fn members(settings: &crate::config::Settings, u: &Unit, at: &Path) -> Result<Vec<String>, String> {
-    if u.standalone {
-        return Ok(Vec::new());
+/// How a manager lists the workspace members of a unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberSource {
+    PnpmList,
+    NpmQuery,
+}
+
+/// What vouches that a clone is the tree the lockfile describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Vouch {
+    /// pnpm's isolated-layout check, then a frozen offline install.
+    PnpmFrozenOffline,
+    /// npm's dry-run install, which reads the tree and the lockfile.
+    NpmDryRun,
+}
+
+/// What `reuse` needs from a package manager; the rest of it is shared.
+struct Voucher {
+    /// The name every refusal carries.
+    tool: &'static str,
+    /// The install record, under `node_modules`, whose mtime marks the end of
+    /// the install.
+    record: &'static str,
+    /// Files an install writes after the record (see [`skipped_file`]).
+    skip_files: &'static [&'static str],
+    members: MemberSource,
+    vouch: Vouch,
+}
+
+/// The voucher of a unit's manager, or why that manager always installs.
+fn voucher(u: &Unit) -> Result<Voucher, String> {
+    match u.manager {
+        Manager::Pnpm => Ok(Voucher {
+            tool: "pnpm",
+            record: ".modules.yaml",
+            skip_files: &[".modules.yaml", ".pnpm-workspace-state*", ".pnpm/lock.yaml"],
+            members: MemberSource::PnpmList,
+            vouch: Vouch::PnpmFrozenOffline,
+        }),
+        Manager::Npm => Ok(Voucher {
+            tool: "npm",
+            record: ".package-lock.json",
+            skip_files: &[".package-lock.json"],
+            members: MemberSource::NpmQuery,
+            vouch: Vouch::NpmDryRun,
+        }),
+        Manager::Yarn if u.berry => Err("yarn cannot check an installed tree against its \
+             lockfile, so yarn snapshots always install"
+            .to_string()),
+        Manager::Yarn => Err(
+            "yarn's own checks accept a tree with a package missing, so \
+             yarn snapshots always install"
+                .to_string(),
+        ),
+        Manager::Bun => Err(bun_refusal(u)),
     }
-    let text = quiet(
+}
+
+/// A command run to the end with stdout and stderr apart.
+struct Captured {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+/// Run `cmd` under the deadline and the host slots, keeping the streams
+/// apart. `Err(reason)` when it cannot start or is killed by a clock; a
+/// non-zero exit is the caller's to read.
+fn capture_apart(
+    settings: &crate::config::Settings,
+    cmd: &mut Command,
+    input: Option<Vec<u8>>,
+    what: &str,
+) -> Result<Captured, String> {
+    match crate::hooks::common::capture_stdout_within(settings, cmd, input) {
+        Some((crate::hooks::common::Ran::Status(status), stdout, stderr)) => Ok(Captured {
+            status,
+            stdout,
+            stderr,
+        }),
+        Some((crate::hooks::common::Ran::TimedOut(_), _, _)) => Err(format!("{what} timed out")),
+        None => Err(format!("{what} could not start")),
+    }
+}
+
+/// Reduce JSON the manager printed to plain lines with `node -e script`, the
+/// JSON on node's own stdin: this crate has no JSON parser, and the answer
+/// is npm's own. node's exit status decides; a missing node is a refusal that
+/// says so.
+fn node_reads(
+    settings: &crate::config::Settings,
+    u: &Unit,
+    json: &str,
+    script: &str,
+) -> Result<String, String> {
+    let tool = u.manager.tool();
+    let mut cmd = Command::new(crate::hooks::common::program("node"));
+    cmd.args(["-e", script]);
+    crate::hooks::common::strip_git_env(&mut cmd);
+    let node = match crate::hooks::common::capture_stdout_within(
         settings,
-        manager_cmd(u, at, &["ls", "-r", "--depth", "-1", "--parseable"]),
-    )
-    .map_err(|t| format!("pnpm could not list the workspace: {}", last_line(&t)))?;
-    let root = normalize(at);
-    let canon = at.canonicalize().unwrap_or_else(|_| root.clone());
-    Ok(text
-        .lines()
-        .filter_map(|l| {
-            let p = PathBuf::from(l.trim());
-            let rel = p
-                .strip_prefix(&root)
-                .or_else(|_| p.strip_prefix(&canon))
-                .ok()?;
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            (!rel.is_empty()).then_some(rel)
-        })
-        .collect())
+        &mut cmd,
+        Some(json.as_bytes().to_vec()),
+    ) {
+        Some((crate::hooks::common::Ran::Status(status), stdout, stderr)) => {
+            if !status.success() {
+                return Err(format!(
+                    "could not read {tool}'s output ({status}): {}",
+                    last_line(&stderr)
+                ));
+            }
+            stdout
+        }
+        Some((crate::hooks::common::Ran::TimedOut(_), _, _)) => {
+            return Err(format!("node timed out reading {tool}'s output"))
+        }
+        None => {
+            return Err(format!(
+            "node not found on PATH (needed to read {tool}'s output); running {tool} {} instead",
+            install_verb(u)
+        ))
+        }
+    };
+    Ok(node)
+}
+
+/// `npm query .workspace`: the `location` of each workspace, one per line.
+const NPM_QUERY_SCRIPT: &str = r#"
+const text = require('fs').readFileSync(0, 'utf8');
+const start = text.indexOf('[');
+if (start < 0) throw new Error('no JSON array in npm query output');
+const found = JSON.parse(text.slice(start));
+if (!Array.isArray(found)) throw new Error('npm query did not print an array');
+for (const workspace of found) console.log(String(workspace.location));
+"#;
+
+/// `npm install --dry-run --json`: its plain-text lines come BEFORE the JSON,
+/// so parsing starts at the first `{`. Prints `error=<summary>`, or
+/// `counts=<add> <remove> <change>` and `first=<name@version>`.
+const NPM_DRY_RUN_SCRIPT: &str = r#"
+const text = require('fs').readFileSync(0, 'utf8');
+const start = text.indexOf('{');
+if (start < 0) throw new Error('no JSON object in npm output');
+const report = JSON.parse(text.slice(start));
+if (report.error) {
+  const why = report.error.summary || report.error.code || 'unknown error';
+  console.log('error=' + String(why).replace(/\s+/g, ' '));
+} else {
+  for (const key of ['add', 'remove', 'change']) {
+    if (!Array.isArray(report[key])) throw new Error('npm printed no ' + key + ' list');
+  }
+  const named = (entry) => {
+    const pkg = (entry && (entry.to || entry.from || entry)) || {};
+    return (pkg.name || '?') + '@' + (pkg.version || '?');
+  };
+  console.log('counts=' + report.add.length + ' ' + report.remove.length + ' ' + report.change.length);
+  const first = [...report.add, ...report.remove, ...report.change][0];
+  if (first) console.log('first=' + named(first));
+}
+"#;
+
+/// Workspace members of a unit, as its manager lists them, relative to the
+/// unit dir. Asked in the SNAPSHOT: the committed manifests decide.
+fn members(
+    settings: &crate::config::Settings,
+    u: &Unit,
+    at: &Path,
+    voucher: &Voucher,
+) -> Result<Vec<String>, String> {
+    match voucher.members {
+        MemberSource::PnpmList => {
+            if u.standalone {
+                return Ok(Vec::new());
+            }
+            let text = quiet(
+                settings,
+                manager_cmd(u, at, &["ls", "-r", "--depth", "-1", "--parseable"]),
+            )
+            .map_err(|t| format!("pnpm could not list the workspace: {}", last_line(&t)))?;
+            let root = normalize(at);
+            let canon = at.canonicalize().unwrap_or_else(|_| root.clone());
+            Ok(text
+                .lines()
+                .filter_map(|l| {
+                    let p = PathBuf::from(l.trim());
+                    let rel = p
+                        .strip_prefix(&root)
+                        .or_else(|_| p.strip_prefix(&canon))
+                        .ok()?;
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    (!rel.is_empty()).then_some(rel)
+                })
+                .collect())
+        }
+        MemberSource::NpmQuery => {
+            let what = "npm query .workspace";
+            let out = capture_apart(
+                settings,
+                &mut manager_cmd(u, at, &["query", ".workspace"]),
+                None,
+                what,
+            )?;
+            if !out.status.success() {
+                return Err(format!(
+                    "npm could not list the workspace ({}): {}",
+                    out.status,
+                    last_line(&out.stderr)
+                ));
+            }
+            if out.stdout.trim().is_empty() {
+                return Err(format!(
+                    "npm could not list the workspace: {what} printed nothing ({})",
+                    last_line(&out.stderr)
+                ));
+            }
+            let lines = node_reads(settings, u, &out.stdout, NPM_QUERY_SCRIPT)?;
+            let mut found = Vec::new();
+            for line in lines.lines().map(|l| l.trim().replace('\\', "/")) {
+                let outside = Path::new(&line).is_absolute()
+                    || Path::new(&line)
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir));
+                if outside {
+                    return Err(format!("npm listed a workspace outside the unit: {line}"));
+                }
+                if !line.is_empty() && line != "." {
+                    found.push(line);
+                }
+            }
+            Ok(found)
+        }
+    }
 }
 
 /// Is `nm` laid out the way pnpm's default (`isolated`) linker lays it out —
@@ -872,21 +1112,111 @@ fn pnpm_layout_problem(nm: &Path, is_root: bool) -> Option<String> {
     None
 }
 
+/// Ask npm whether the clone in `snap_dir` is what the lockfile describes: a
+/// dry-run install that must add, remove and change nothing and leave
+/// `package-lock.json` byte-identical. Exit 0 alone decides nothing (npm
+/// exits 0 for a tree it would change), so the JSON does; a non-zero exit,
+/// empty or unparseable output is a refusal, never "no changes".
+fn npm_vouch(settings: &crate::config::Settings, u: &Unit, snap_dir: &Path) -> Result<(), String> {
+    let lock_path = snap_dir.join(u.lockfile);
+    let before = std::fs::read(&lock_path).map_err(|e| format!("{}: {e}", u.lockfile))?;
+    let what = "npm install --dry-run";
+    let mut cmd = manager_cmd(
+        u,
+        snap_dir,
+        &[
+            "install",
+            "--dry-run",
+            "--offline",
+            "--ignore-scripts",
+            "--json",
+            "--no-audit",
+            "--no-fund",
+        ],
+    );
+    let out = capture_apart(settings, &mut cmd, None, what)?;
+    let verdict = npm_verdict(settings, u, &out, what);
+    // A dry-run must not write; if it did, put the committed bytes back
+    // before anything installs over them.
+    let mut restored = String::new();
+    if std::fs::read(&lock_path).ok().as_deref() != Some(before.as_slice()) {
+        if let Err(e) = std::fs::write(&lock_path, &before) {
+            restored = format!(" (and {} could not be restored: {e})", u.lockfile);
+        }
+        return Err(format!("{} would change{restored}", u.lockfile));
+    }
+    verdict
+}
+
+/// What npm's dry-run said, as `Ok` for "nothing to do" and otherwise the
+/// reason, read from the parsed JSON and never from its last line.
+fn npm_verdict(
+    settings: &crate::config::Settings,
+    u: &Unit,
+    out: &Captured,
+    what: &str,
+) -> Result<(), String> {
+    let read = |json: &str| node_reads(settings, u, json, NPM_DRY_RUN_SCRIPT);
+    if !out.status.success() {
+        // npm prints `{"error": {...}}` on stdout for a manifest it cannot
+        // satisfy; quote its summary when there is one.
+        if out.stdout.contains('{') {
+            if let Ok(text) = read(&out.stdout) {
+                if let Some(summary) = text.lines().find_map(|l| l.strip_prefix("error=")) {
+                    return Err(format!("npm failed: {summary}"));
+                }
+            }
+        }
+        return Err(format!(
+            "{what} exited with {}: {}",
+            out.status,
+            last_line(&out.stderr)
+        ));
+    }
+    if out.stdout.trim().is_empty() {
+        return Err(format!(
+            "{what} printed nothing on stdout ({})",
+            last_line(&out.stderr)
+        ));
+    }
+    let text = read(&out.stdout)?;
+    if let Some(summary) = text.lines().find_map(|l| l.strip_prefix("error=")) {
+        return Err(format!("npm failed: {summary}"));
+    }
+    let counts: Vec<usize> = text
+        .lines()
+        .find_map(|l| l.strip_prefix("counts="))
+        .map(|c| {
+            c.split_whitespace()
+                .filter_map(|n| n.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let [add, remove, change] = counts[..] else {
+        return Err(format!("{what} printed output npm's report does not match"));
+    };
+    if add + remove + change > 0 {
+        let first = text
+            .lines()
+            .find_map(|l| l.strip_prefix("first="))
+            .unwrap_or("?");
+        return Err(format!(
+            "npm would add {add}, remove {remove}, change {change}: {first}"
+        ));
+    }
+    Ok(())
+}
+
 /// Try to reuse the working tree's install for one unit. `Ok(())` when the
-/// clone is in place and pnpm accepted it; `Err(reason)` — with the snapshot
-/// left exactly as it was — when it cannot be.
+/// clone is in place and its manager vouched for it; `Err(reason)` — with the
+/// snapshot left exactly as it was — when it cannot be.
 ///
-/// npm is never reused. `npm ls` answers "is this dependency graph valid",
-/// not "is this the tree the lockfile describes": a real repository with
-/// peer-range conflicts `npm ci` installs without complaint fails `npm ls`
-/// on a fresh install (application-landscape: 182 findings), so it can
-/// neither accept a correct clone nor be trusted to reject a wrong one.
-///
-/// yarn is never reused either: `yarn check` is gone from yarn 1 and berry
-/// alike, a frozen install checks the lockfile against the manifests and
-/// not the installed tree, and yarn 1's `--frozen-lockfile` is known to let
-/// some drift through (yarnpkg/yarn#5840) — so nothing yarn offers can
-/// vouch for a clone.
+/// Each manager supplies a [`Voucher`]: pnpm's is a layout check and a frozen
+/// offline install; npm's is a dry-run install, which reads the installed
+/// tree itself (`npm ls` cannot do that: it fails on peer-range conflicts
+/// `npm ci` accepts). yarn 1 is never reused: its checks accept a tree with
+/// a package missing (a deletion leaves no newer file for the timestamp scan
+/// either), and yarn berry and bun have no voucher.
 fn reuse(
     settings: &crate::config::Settings,
     u: &Unit,
@@ -894,24 +1224,8 @@ fn reuse(
     snapshot: &Path,
     unit_dirs: &[String],
 ) -> Result<(), String> {
-    match u.manager {
-        Manager::Npm => {
-            return Err(
-                "npm cannot check an installed tree against its lockfile, so npm \
-                 snapshots always install"
-                    .to_string(),
-            )
-        }
-        Manager::Yarn => {
-            return Err(
-                "yarn cannot check an installed tree against its lockfile, so yarn \
-                 snapshots always install"
-                    .to_string(),
-            )
-        }
-        Manager::Bun => return Err(bun_refusal(u)),
-        Manager::Pnpm => {}
-    }
+    let voucher = voucher(u)?;
+    let tool = voucher.tool;
     let src_dir = source.join(&u.dir);
     let snap_dir = snapshot.join(&u.dir);
     let lock = u.lockfile;
@@ -925,7 +1239,7 @@ fn reuse(
         return Err("nothing installed in the working tree".to_string());
     }
     let mut set = vec![String::new()];
-    for m in members(settings, u, &snap_dir)? {
+    for m in members(settings, u, &snap_dir, &voucher)? {
         let repo_rel = join_rel(&u.dir, &m);
         // A member with a lockfile of its own is its own unit.
         if unit_dirs.contains(&repo_rel) {
@@ -936,18 +1250,23 @@ fn reuse(
         }
     }
     // Checked on the SOURCE, before anything is copied: a file changed
-    // since pnpm finished installing is an edit pnpm's own check will not
+    // since the manager finished installing is an edit its own check may not
     // see, and a clone would carry it into a stamped snapshot.
-    let record = std::fs::metadata(src_dir.join("node_modules/.modules.yaml"))
+    let record_path = format!("node_modules/{}", voucher.record);
+    let record = std::fs::metadata(src_dir.join(&record_path))
         .and_then(|m| m.modified())
-        .map_err(|_| "no pnpm install record (node_modules/.modules.yaml)".to_string())?;
+        .map_err(|_| format!("no {tool} install record ({record_path})"))?;
     for m in &set {
-        match newer_than(&src_dir.join(m).join("node_modules"), record) {
+        match newer_than(
+            &src_dir.join(m).join("node_modules"),
+            record,
+            voucher.skip_files,
+        ) {
             Ok(None) => {}
             Ok(Some(f)) => {
                 let shown = f.strip_prefix(source).unwrap_or(&f);
                 return Err(format!(
-                    "{} changed after the install — an in-place edit pnpm does not check",
+                    "{} changed after the install — an in-place edit {tool} does not check",
                     shown.display()
                 ));
             }
@@ -979,6 +1298,12 @@ fn reuse(
         normalize(source),
         source.canonicalize().unwrap_or_else(|_| normalize(source)),
     ];
+    let roots = [
+        normalize(snapshot),
+        snapshot
+            .canonicalize()
+            .unwrap_or_else(|_| normalize(snapshot)),
+    ];
     for m in &set {
         let from = src_dir.join(m).join("node_modules");
         let to = snap_dir.join(m).join("node_modules");
@@ -999,7 +1324,16 @@ fn reuse(
                 "{} links back into the working tree",
                 link.display()
             )),
-            Ok(None) => pnpm_layout_problem(&to, m.is_empty()),
+            Ok(None) => match voucher.vouch {
+                Vouch::PnpmFrozenOffline => pnpm_layout_problem(&to, m.is_empty()),
+                Vouch::NpmDryRun => match link_outside(&to, &roots) {
+                    Ok(Some(link)) => {
+                        Some(format!("{} links outside the snapshot", link.display()))
+                    }
+                    Ok(None) => None,
+                    Err(e) => Some(format!("could not inspect the clone: {e}")),
+                },
+            },
             Err(e) => Some(format!("could not inspect the clone: {e}")),
         };
         if let Some(why) = problem {
@@ -1007,8 +1341,23 @@ fn reuse(
             return Err(format!("{why}{left}"));
         }
     }
-    // pnpm records the absolute paths of the tree it installed; the clone
-    // must not carry the source's.
+    let vouched = match voucher.vouch {
+        Vouch::PnpmFrozenOffline => pnpm_vouch(settings, u, &snap_dir),
+        Vouch::NpmDryRun => npm_vouch(settings, u, &snap_dir),
+    };
+    if let Err(why) = vouched {
+        let left = rollback(&cloned);
+        return Err(format!("{why}{left}"));
+    }
+    Ok(())
+}
+
+/// pnpm records the absolute paths of the tree it installed; the clone must
+/// not carry the source's. Then a frozen OFFLINE install is both the check
+/// and the repair: it fails on a manifest the lockfile does not satisfy,
+/// relinks drift from the store, and says "Already up to date" for a
+/// faithful clone.
+fn pnpm_vouch(settings: &crate::config::Settings, u: &Unit, snap_dir: &Path) -> Result<(), String> {
     if let Ok(rd) = std::fs::read_dir(snap_dir.join("node_modules")) {
         for e in rd.flatten() {
             if e.file_name()
@@ -1019,20 +1368,12 @@ fn reuse(
             }
         }
     }
-    // A frozen OFFLINE install is both the check and the repair: it fails on
-    // a manifest the lockfile does not satisfy, relinks drift from the
-    // store, and says "Already up to date" for a faithful clone.
-    if let Err(text) = quiet(
+    quiet(
         settings,
-        manager_cmd(u, &snap_dir, &["install", "--frozen-lockfile", "--offline"]),
-    ) {
-        let left = rollback(&cloned);
-        return Err(format!(
-            "pnpm did not accept the clone ({}){left}",
-            last_line(&text)
-        ));
-    }
-    Ok(())
+        manager_cmd(u, snap_dir, &["install", "--frozen-lockfile", "--offline"]),
+    )
+    .map(|_| ())
+    .map_err(|text| format!("pnpm did not accept the clone ({})", last_line(&text)))
 }
 
 /// The files `tip` changes relative to where it forked from its upstream —
@@ -1463,6 +1804,8 @@ mod tests {
         assert_eq!(kept[0].dir, "web/nested");
     }
 
+    const PNPM_SKIPS: &[&str] = &[".modules.yaml", ".pnpm-workspace-state*", ".pnpm/lock.yaml"];
+
     #[test]
     fn a_file_newer_than_the_install_record_is_found() {
         let d = std::env::temp_dir().join(format!("newer-{}", std::process::id()));
@@ -1478,13 +1821,46 @@ mod tests {
             std::fs::write(d.join(skipped), "new").unwrap();
         }
         assert_eq!(
-            newer_than(&d, record).unwrap(),
+            newer_than(&d, record, PNPM_SKIPS).unwrap(),
             None,
             "the install's own writes"
         );
         std::fs::write(pkg.join("index.js"), "edited").unwrap();
-        assert_eq!(newer_than(&d, record).unwrap(), Some(pkg.join("index.js")));
+        assert_eq!(
+            newer_than(&d, record, PNPM_SKIPS).unwrap(),
+            Some(pkg.join("index.js"))
+        );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_outside_the_snapshot_is_refused_and_a_workspace_link_is_not() {
+        let d = std::env::temp_dir().join(format!("outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
+        let snapshot = d.join("snap");
+        let nm = snapshot.join("node_modules");
+        std::fs::create_dir_all(snapshot.join("packages/a")).unwrap();
+        std::fs::create_dir_all(nm.join(".bin")).unwrap();
+        std::fs::create_dir_all(nm.join("typescript/bin")).unwrap();
+        let roots = [normalize(&snapshot)];
+        std::os::unix::fs::symlink("../packages/a", nm.join("a")).unwrap();
+        std::os::unix::fs::symlink("../typescript/bin/tsc", nm.join(".bin/tsc")).unwrap();
+        assert_eq!(
+            link_outside(&nm, &roots).unwrap(),
+            None,
+            "relative links that stay inside the snapshot"
+        );
+        std::os::unix::fs::symlink("/usr/bin/env", nm.join(".bin/evil")).unwrap();
+        assert_eq!(
+            link_outside(&nm, &roots).unwrap(),
+            Some(nm.join(".bin/evil")),
+            "an absolute link out, .bin included"
+        );
+        std::fs::remove_file(nm.join(".bin/evil")).unwrap();
+        std::os::unix::fs::symlink("../../outside", nm.join("up")).unwrap();
+        assert_eq!(link_outside(&nm, &roots).unwrap(), Some(nm.join("up")));
+        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
     }
 
     #[test]
