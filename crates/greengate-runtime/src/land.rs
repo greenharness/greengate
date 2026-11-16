@@ -25,6 +25,12 @@
 //! |      | / `unverified` | accepted but could not be checked                    |
 //! | 4    | `not-observed` | accepted, but the expected tip was not observed      |
 //! | 128+n| `interrupted`  | killed by signal n                                   |
+//! | 0    | `detached`     | `--detach`: a worker was started; the receipt says  |
+//! |      |                | how it ended (`--wait` reads it)                     |
+//!
+//! `--wait <receipt>` exits with the code of the status the receipt ended in,
+//! and with 1 (a refusal; its `worker <pid> died` lines tell it apart) when
+//! the worker died without finalizing it.
 //!
 //! `4` is deliberately worded as "not observed". Equality proves the tip was
 //! seen; inequality does not prove an update was lost, because another writer
@@ -163,7 +169,7 @@ impl PrestageState {
 }
 
 impl Report {
-    fn new(status: Status) -> Self {
+    pub(crate) fn new(status: Status) -> Self {
         Report {
             branch: String::new(),
             remote: String::new(),
@@ -180,7 +186,7 @@ impl Report {
         }
     }
 
-    fn json(&self) -> String {
+    pub(crate) fn json(&self) -> String {
         json::object(&[
             json::string_field("branch", &self.branch),
             json::string_field("remote", &self.remote),
@@ -224,7 +230,7 @@ pub fn truncate_middle(s: &str, max: usize) -> String {
     format!("{front}…{back}")
 }
 
-fn short(sha: &str) -> String {
+pub(crate) fn short(sha: &str) -> String {
     if sha.is_empty() {
         "-------".to_string()
     } else {
@@ -239,7 +245,7 @@ pub fn verdict(status: Status, before: &str, after: &str, branch: &str) -> Strin
     verdict_word(status.as_str(), before, after, branch)
 }
 
-fn verdict_word(word: &str, before: &str, after: &str, branch: &str) -> String {
+pub(crate) fn verdict_word(word: &str, before: &str, after: &str, branch: &str) -> String {
     let head = format!("{word} {}..{}", short(before), short(after));
     let room = VERDICT_WIDTH.saturating_sub(head.chars().count() + 1);
     if branch.is_empty() || room == 0 {
@@ -276,48 +282,159 @@ fn read_ref(url: &str, refname: &str, budget: u64) -> Seen {
     }
 }
 
-/// `amont land [--force] [--json] [--dry-run]`, or
-/// `amont land --tag <name> [--json] [--dry-run]`.
-pub fn command(args: &[OsString]) -> i32 {
-    let json_out = args.iter().any(|a| a == "--json");
-    let dry_run = args.iter().any(|a| a == "--dry-run");
-    let mode = if args.iter().any(|a| a == "--force") {
-        Mode::Force
-    } else {
-        Mode::Plain
-    };
-    let mut tag: Option<String> = None;
+/// What the command line of `land` said.
+#[derive(Default)]
+pub(crate) struct Options {
+    pub(crate) force: bool,
+    pub(crate) json: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) detach: bool,
+    pub(crate) worker: bool,
+    pub(crate) tag: Option<String>,
+    pub(crate) receipt: Option<String>,
+    pub(crate) lock_fd: Option<i32>,
+    pub(crate) wait: Option<String>,
+}
+
+impl Options {
+    pub(crate) fn mode(&self) -> Mode {
+        if self.force {
+            Mode::Force
+        } else {
+            Mode::Plain
+        }
+    }
+
+    /// The flags a rerun of this land keeps, as typed. Only the unix-only
+    /// detached land reruns a land, so other targets do not build it.
+    #[cfg(unix)]
+    pub(crate) fn rerun_flags(&self) -> Vec<String> {
+        let mut flags = Vec::new();
+        if self.force {
+            flags.push("--force".to_string());
+        }
+        if self.json {
+            flags.push("--json".to_string());
+        }
+        if let Some(tag) = &self.tag {
+            flags.push("--tag".to_string());
+            flags.push(tag.clone());
+        }
+        flags
+    }
+}
+
+fn parse_options(args: &[OsString]) -> Result<Options, String> {
+    let mut options = Options::default();
     let mut it = args.iter().map(|a| a.to_string_lossy().into_owned());
+    let tag_needs_name = || "--tag needs a tag name".to_string();
+    let value_of = |flag: &str, it: &mut dyn Iterator<Item = String>| match it.next() {
+        Some(v) if !v.is_empty() && !v.starts_with('-') => Ok(v),
+        _ => Err(format!("{flag} needs a value")),
+    };
+    let mut others = 0usize;
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--force" | "--json" | "--dry-run" => {}
-            "--tag" => match it.next() {
-                Some(name) if !name.is_empty() && !name.starts_with('-') => tag = Some(name),
-                _ => {
-                    eprintln!("{BIN}: land: --tag needs a tag name");
-                    return finish(&Report::new(Status::Usage), json_out);
+            "--force" => {
+                options.force = true;
+                others += 1;
+            }
+            "--json" => {
+                options.json = true;
+                others += 1;
+            }
+            "--dry-run" => {
+                options.dry_run = true;
+                others += 1;
+            }
+            "--detach" => {
+                options.detach = true;
+                others += 1;
+            }
+            "--worker" => {
+                options.worker = true;
+                others += 1;
+            }
+            "--tag" => {
+                match it.next() {
+                    Some(name) if !name.is_empty() && !name.starts_with('-') => {
+                        options.tag = Some(name)
+                    }
+                    _ => return Err(tag_needs_name()),
                 }
-            },
-            other if other.starts_with("--tag=") => match &other["--tag=".len()..] {
-                "" => {
-                    eprintln!("{BIN}: land: --tag needs a tag name");
-                    return finish(&Report::new(Status::Usage), json_out);
-                }
-                name => tag = Some(name.to_string()),
-            },
-            _ => {
-                eprintln!(
-                    "{BIN}: land: takes no arguments, only [--force] [--json] [--dry-run] [--tag <name>]"
+                others += 1;
+            }
+            "--receipt" => {
+                options.receipt = Some(value_of("--receipt", &mut it)?);
+                others += 1;
+            }
+            "--lock-fd" => {
+                let raw = value_of("--lock-fd", &mut it)?;
+                options.lock_fd = Some(
+                    raw.parse::<i32>()
+                        .map_err(|_| "--lock-fd needs a descriptor number".to_string())?,
                 );
-                return finish(&Report::new(Status::Usage), json_out);
+                others += 1;
+            }
+            "--wait" => options.wait = Some(value_of("--wait", &mut it)?),
+            other if other.starts_with("--tag=") => match &other["--tag=".len()..] {
+                "" => return Err(tag_needs_name()),
+                name => {
+                    options.tag = Some(name.to_string());
+                    others += 1;
+                }
+            },
+            other if other.starts_with("--wait=") => match &other["--wait=".len()..] {
+                "" => return Err("--wait needs a receipt path".to_string()),
+                path => options.wait = Some(path.to_string()),
+            },
+            other => {
+                return Err(format!(
+                    "unknown argument `{other}`; takes only [--force] [--json] [--dry-run] \
+                     [--tag <name>] [--detach], or --wait <receipt> alone"
+                ))
             }
         }
     }
-    if let Some(name) = tag {
-        if mode == Mode::Force {
-            eprintln!("{BIN}: land: a tag is never forced; --tag takes no --force");
+    if options.wait.is_some() && others > 0 {
+        return Err("--wait takes a receipt and no other flag".to_string());
+    }
+    if options.detach && options.dry_run {
+        return Err("--detach cannot be combined with --dry-run".to_string());
+    }
+    if options.tag.is_some() && options.mode() == Mode::Force {
+        return Err("a tag is never forced; --tag takes no --force".to_string());
+    }
+    if options.worker && (options.receipt.is_none() || options.lock_fd.is_none()) {
+        return Err("--worker is internal: it needs --receipt and --lock-fd".to_string());
+    }
+    Ok(options)
+}
+
+/// `amont land [--force] [--json] [--dry-run] [--detach]`,
+/// `amont land --tag <name> [--json] [--dry-run] [--detach]`, or
+/// `amont land --wait <receipt>`.
+pub fn command(args: &[OsString]) -> i32 {
+    let json_out = args.iter().any(|a| a == "--json");
+    let options = match parse_options(args) {
+        Ok(options) => options,
+        Err(why) => {
+            eprintln!("{BIN}: land: {why}");
             return finish(&Report::new(Status::Usage), json_out);
         }
+    };
+    let (dry_run, mode) = (options.dry_run, options.mode());
+    if let Some(receipt) = &options.wait {
+        return wait_on(receipt);
+    }
+    if options.worker {
+        return worker_of(&options);
+    }
+    if options.detach {
+        return launch_of(&options);
+    }
+    if let Some(name) = options.tag.clone() {
+        // `parse_options` already refused --tag with --force (usage, exit 2).
         if dry_run {
             let (report, verdict) = dry_run_tag(&name);
             say_dry_run(&report, verdict);
@@ -327,7 +444,7 @@ pub fn command(args: &[OsString]) -> i32 {
             return i32::from(verdict != "would-land");
         }
         let started = now_nanos();
-        let report = land_tag(&name);
+        let report = land_tag(&name, None);
         write_receipt(&report, started, now_nanos());
         return finish(&report, json_out);
     }
@@ -340,9 +457,42 @@ pub fn command(args: &[OsString]) -> i32 {
         return i32::from(verdict != "would-land");
     }
     let started = now_nanos();
-    let report = land(mode);
+    let report = land(mode, None);
     write_receipt(&report, started, now_nanos());
     finish(&report, json_out)
+}
+
+#[cfg(unix)]
+fn launch_of(options: &Options) -> i32 {
+    crate::land_detach::launch(options)
+}
+
+#[cfg(not(unix))]
+fn launch_of(options: &Options) -> i32 {
+    eprintln!("{BIN}: land: --detach needs a unix host");
+    finish(&Report::new(Status::Usage), options.json)
+}
+
+#[cfg(unix)]
+fn worker_of(options: &Options) -> i32 {
+    crate::land_detach::worker(options)
+}
+
+#[cfg(not(unix))]
+fn worker_of(options: &Options) -> i32 {
+    eprintln!("{BIN}: land: --worker needs a unix host");
+    finish(&Report::new(Status::Usage), options.json)
+}
+
+#[cfg(unix)]
+fn wait_on(receipt: &str) -> i32 {
+    crate::land_detach::wait(receipt)
+}
+
+#[cfg(not(unix))]
+fn wait_on(_receipt: &str) -> i32 {
+    eprintln!("{BIN}: land: --wait needs a unix host");
+    finish(&Report::new(Status::Usage), false)
 }
 
 /// The JSON document a usage error prints under `--json`, so a script that
@@ -351,7 +501,7 @@ pub fn usage_json() -> String {
     Report::new(Status::Usage).json()
 }
 
-fn finish(report: &Report, json_out: bool) -> i32 {
+pub(crate) fn finish(report: &Report, json_out: bool) -> i32 {
     for line in &report.next {
         eprintln!("    {line}");
     }
@@ -372,7 +522,7 @@ fn finish(report: &Report, json_out: bool) -> i32 {
 
 /// What the verdict line names: the branch, or for a tag land (which has none)
 /// the tag.
-fn shown_ref(report: &Report) -> &str {
+pub(crate) fn shown_ref(report: &Report) -> &str {
     if report.branch.is_empty() {
         report.dst.strip_prefix("refs/tags/").unwrap_or(&report.dst)
     } else {
@@ -380,7 +530,7 @@ fn shown_ref(report: &Report) -> &str {
     }
 }
 
-fn refuse(mut report: Report, why: &str, next: &[&str]) -> Report {
+pub(crate) fn refuse(mut report: Report, why: &str, next: &[&str]) -> Report {
     eprintln!("{BIN}: land: {why}");
     report.status = Status::Refused;
     report.next = next.iter().map(|s| s.to_string()).collect();
@@ -388,7 +538,7 @@ fn refuse(mut report: Report, why: &str, next: &[&str]) -> Report {
 }
 
 /// What steps 1 and 2 learned: where the push goes and what it is called there.
-struct Resolved {
+pub(crate) struct Resolved {
     remote: String,
     rb: String,
     url: String,
@@ -446,7 +596,7 @@ fn redact_url(url: &str) -> String {
 /// Steps 1 and 2: the branch, its upstream, the refusals, and the one push
 /// URL. Reads local git state only: no network, nothing written. `Err` is the
 /// refused report, already explained on stderr.
-fn resolve() -> Result<(Resolved, Report), Box<Report>> {
+pub(crate) fn resolve() -> Result<(Resolved, Report), Box<Report>> {
     let mut report = Report::new(Status::Refused);
 
     // 1. What are we pushing, and where to.
@@ -517,7 +667,9 @@ fn resolve() -> Result<(Resolved, Report), Box<Report>> {
     ))
 }
 
-fn land(mode: Mode) -> Report {
+/// `pin` is the sha a detached land judged at launch: it pushes that sha and
+/// nothing else, and never takes the retry after a hook that moved HEAD.
+pub(crate) fn land(mode: Mode, pin: Option<&str>) -> Report {
     let settings = crate::config::Settings::default();
     let budget = crate::hooks::common::network_probe_budget(&settings);
     let (
@@ -551,6 +703,11 @@ fn land(mode: Mode) -> Report {
         let Some(sha) = git::stdout(&["rev-parse", "HEAD"]) else {
             return refuse(report, "cannot resolve HEAD", &[]);
         };
+        if let Some(judged) = pin {
+            if let Some(refusal) = head_moved(&report, judged, &sha) {
+                return refusal;
+            }
+        }
         report.pushed = sha.clone();
         let lease = match mode {
             Mode::Force => Some(expected_old.as_str()),
@@ -567,6 +724,12 @@ fn land(mode: Mode) -> Report {
             ControlFlow::Continue(report) => report,
             ControlFlow::Break(stopped) => return *stopped,
         };
+        if let Some(judged) = pin {
+            let now = git::stdout(&["rev-parse", "HEAD"]).unwrap_or_default();
+            if let Some(refusal) = head_moved(&report, judged, &now) {
+                return refusal;
+            }
+        }
         let land_env = format!("{sha} {}", or_zeros(&expected_old));
         let run = push(&url, &sha, &dst, lease, &land_env);
         match run.outcome {
@@ -582,6 +745,17 @@ fn land(mode: Mode) -> Report {
             && head_now != sha
             && (expected_old.is_empty()
                 || git::succeeds(&["merge-base", "--is-ancestor", &expected_old, &head_now]));
+        if pin.is_some() && hook_moved_head {
+            eprintln!(
+                "{BIN}: land: the pre-push hook moved HEAD {} -> {}; a detached land never \
+                 pushes a sha it did not judge",
+                short(&sha),
+                short(&head_now)
+            );
+            report.status = Status::Refused;
+            report.next = vec![format!("{BIN} land --detach")];
+            return report;
+        }
         if attempt == 0 && hook_moved_head {
             attempt = 1;
             report.retried = true;
@@ -656,6 +830,22 @@ fn land(mode: Mode) -> Report {
         }
     }
     report
+}
+
+/// The refusal of a detached land whose HEAD is no longer the sha it judged.
+fn head_moved(report: &Report, judged: &str, now: &str) -> Option<Report> {
+    if now == judged {
+        return None;
+    }
+    Some(refuse(
+        report.clone(),
+        &format!(
+            "HEAD moved from {} to {} since the launch; nothing was pushed",
+            short(judged),
+            short(now)
+        ),
+        &[&format!("{BIN} land --detach")],
+    ))
 }
 
 /// An absent remote tip, as git's ref lines spell it.
@@ -917,7 +1107,7 @@ fn has_commit(oid: &str) -> bool {
 /// a tag is never moved.
 /// Steps 1 and 2 of a tag land: the local tag and the one push URL. The
 /// report so far, the URL and the tag's oid, or the finished refusal.
-fn resolve_tag(name: &str) -> Result<(Report, String, String), Box<Report>> {
+pub(crate) fn resolve_tag(name: &str) -> Result<(Report, String, String), Box<Report>> {
     let mut report = Report::new(Status::Refused);
     let dst = format!("refs/tags/{name}");
     report.dst = dst.clone();
@@ -947,7 +1137,7 @@ fn dry_run_tag(name: &str) -> (Report, &'static str) {
     }
 }
 
-fn land_tag(name: &str) -> Report {
+pub(crate) fn land_tag(name: &str, pin: Option<&str>) -> Report {
     let settings = crate::config::Settings::default();
     let budget = crate::hooks::common::network_probe_budget(&settings);
     let (mut report, url, oid) = match resolve_tag(name) {
@@ -955,6 +1145,11 @@ fn land_tag(name: &str) -> Report {
         Err(refused) => return *refused,
     };
     let (dst, remote) = (report.dst.clone(), report.remote.clone());
+    if let Some(judged) = pin {
+        if let Some(refusal) = head_moved(&report, judged, &oid) {
+            return refusal;
+        }
+    }
     match read_ref(&url, &dst, budget) {
         Seen::Tip(t) if t.is_empty() => {}
         Seen::Tip(t) => {
@@ -1064,7 +1259,7 @@ fn dry_run_json(report: &Report, verdict: &str, mode: Mode) -> String {
     ])
 }
 
-fn now_nanos() -> i64 {
+pub(crate) fn now_nanos() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -1073,9 +1268,74 @@ fn now_nanos() -> i64 {
 }
 
 /// `<git-dir>/amont/land`, absolute and per worktree.
-fn receipt_dir() -> Option<PathBuf> {
+pub(crate) fn receipt_dir() -> Option<PathBuf> {
     git::stdout(&["rev-parse", "--absolute-git-dir"])
         .map(|d| PathBuf::from(d).join(crate::names::STATE_DIR).join("land"))
+}
+
+/// What a detached land adds to its receipt.
+#[derive(Debug, Clone)]
+pub(crate) struct Meta {
+    /// The sha the launcher judged, the only one the worker pushes.
+    pub(crate) judged: String,
+    pub(crate) log: String,
+    pub(crate) worker_pid: Option<u32>,
+    /// The flags the land was launched with, for a rerun.
+    pub(crate) flags: Vec<String>,
+}
+
+/// The receipt's JSON: `word` is its status (`running` while a worker has it).
+pub(crate) fn receipt_body(
+    report: &Report,
+    word: &str,
+    exit: Option<i32>,
+    (started, ended): (i64, Option<i64>),
+    meta: Option<&Meta>,
+) -> String {
+    let mut fields = vec![json::int_field("started", started)];
+    if let Some(ended) = ended {
+        fields.push(json::int_field("ended", ended));
+    }
+    fields.extend([
+        json::string_field("branch", &report.branch),
+        json::string_field("remote", &report.remote),
+        json::string_field("push_url", &report.push_url),
+        json::string_field("dst", &report.dst),
+        json::string_field("pushed", &report.pushed),
+        json::bool_field("retried", report.retried),
+        json::string_field("status", word),
+        json::string_field("remote_before", &report.remote_before),
+        json::string_field("remote_after", &report.remote_after),
+        format!(
+            "\"gates\":{}",
+            json::object(&[
+                json::string_array_field("owed", &report.gates_owed),
+                json::string_field("prestage", report.prestage.as_str()),
+            ])
+        ),
+    ]);
+    if let Some(code) = exit {
+        fields.push(json::int_field("exit", i64::from(code)));
+    }
+    if let Some(meta) = meta {
+        fields.push(json::string_field("judged", &meta.judged));
+        fields.push(json::string_field("log", &meta.log));
+        if let Some(pid) = meta.worker_pid {
+            fields.push(json::int_field("worker_pid", i64::from(pid)));
+        }
+        fields.push(json::string_array_field("flags", &meta.flags));
+    }
+    json::object(&fields)
+}
+
+/// Write `body` to `<path>.tmp`, then rename it over `path`: a reader sees the
+/// old receipt or the new one, never half of either.
+pub(crate) fn write_atomic(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, format!("{body}\n"))?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The receipt is the evidence of what a land pushed, independent of the
@@ -1099,18 +1359,14 @@ fn write_receipt(report: &Report, started: i64, ended: i64) {
     }
     prune_receipts(&dir);
     let path = dir.join(format!("{started}-{}.json", std::process::id()));
-    let body = json::object(&[
-        json::int_field("started", started),
-        json::int_field("ended", ended),
-        json::string_field("branch", &report.branch),
-        json::string_field("remote", &report.remote),
-        json::string_field("push_url", &report.push_url),
-        json::string_field("dst", &report.dst),
-        json::string_field("pushed", &report.pushed),
-        json::bool_field("retried", report.retried),
-        json::string_field("status", report.status.as_str()),
-    ]);
-    if let Err(e) = std::fs::write(&path, format!("{body}\n")) {
+    let body = receipt_body(
+        report,
+        report.status.as_str(),
+        Some(report.status.code()),
+        (started, Some(ended)),
+        None,
+    );
+    if let Err(e) = write_atomic(&path, &body) {
         eprintln!(
             "{BIN}: land: could not write the landing receipt {}: {e}",
             path.display()
@@ -1118,8 +1374,28 @@ fn write_receipt(report: &Report, started: i64, ended: i64) {
     }
 }
 
-/// Deletes receipts older than [`RECEIPT_KEEP`].
-fn prune_receipts(dir: &std::path::Path) {
+/// Whether a worker still holds `receipt`'s lock.
+pub(crate) fn lock_held(receipt: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        let mut lock = receipt.as_os_str().to_owned();
+        lock.push(".lock");
+        match std::fs::File::open(&lock) {
+            Ok(file) => !crate::fdlock::try_exclusive(&file),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = receipt;
+        false
+    }
+}
+
+/// Deletes receipts older than [`RECEIPT_KEEP`], each with its log, lock and
+/// leftover temp file. A receipt whose lock is held belongs to a live worker
+/// and is never pruned.
+pub(crate) fn prune_receipts(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1134,12 +1410,26 @@ fn prune_receipts(dir: &std::path::Path) {
             .ok()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age > RECEIPT_KEEP);
-        if old {
-            if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!(
-                    "{BIN}: land: could not delete the old receipt {}: {e}",
-                    path.display()
-                );
+        if !old || lock_held(&path) {
+            continue;
+        }
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        for doomed in [
+            path.clone(),
+            path.with_extension("log"),
+            PathBuf::from(lock),
+            PathBuf::from(tmp),
+        ] {
+            match std::fs::remove_file(&doomed) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!(
+                    "{BIN}: land: could not delete the old receipt file {}: {e}",
+                    doomed.display()
+                ),
             }
         }
     }

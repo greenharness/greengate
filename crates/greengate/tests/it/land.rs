@@ -501,6 +501,7 @@ pub(crate) fn receipts(fx: &Fx) -> Vec<String> {
         return Vec::new();
     };
     read.flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .map(|e| std::fs::read_to_string(e.path()).expect("receipt"))
         .collect()
 }

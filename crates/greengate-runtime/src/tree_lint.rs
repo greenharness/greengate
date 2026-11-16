@@ -538,7 +538,7 @@ fn warm_later(cold: &[String]) {
     #[cfg(unix)]
     {
         let Some(log) = warm_log() else { return };
-        match crate::rehearsal::spawn_amont(&["warm", "--worker"], &log) {
+        match crate::rehearsal::spawn_amont(&["warm", "--worker"], &log, None) {
             Ok(_) => say(&fit_line(
                 "  tree lint cold: ",
                 &cold.join(" "),

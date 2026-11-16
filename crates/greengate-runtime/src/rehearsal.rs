@@ -658,15 +658,21 @@ pub fn spawn_detached() -> Result<u32, String> {
 #[cfg(unix)]
 pub fn spawn_detached() -> Result<u32, String> {
     let log = log_path().ok_or("not inside a git repository")?;
-    spawn_amont(&["rehearse", "--worker"], &log)
+    spawn_amont(&["rehearse", "--worker"], &log, None)
 }
 
 /// Start `amont <args…>` in the background: its own process group, stdin
 /// closed, stdout and stderr on `log` (truncated). Every detached worker —
 /// the rehearsal, the tree-gate warm-up — goes through here, each with its
-/// OWN log, so one never truncates another's.
+/// OWN log, so one never truncates another's. `inherit` is a descriptor the
+/// child keeps open across `exec` (its `FD_CLOEXEC` is cleared in the child
+/// alone, so no other spawn of this process inherits it).
 #[cfg(unix)]
-pub fn spawn_amont(args: &[&str], log: &std::path::Path) -> Result<u32, String> {
+pub fn spawn_amont(
+    args: &[&str],
+    log: &std::path::Path,
+    inherit: Option<i32>,
+) -> Result<u32, String> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate {BIN}: {e}"))?;
     let file =
@@ -681,6 +687,19 @@ pub fn spawn_amont(args: &[&str], log: &std::path::Path) -> Result<u32, String> 
         .stderr(Stdio::from(err));
     strip_repo_env(&mut cmd);
     cmd.process_group(0);
+    if let Some(fd) = inherit {
+        // SAFETY: the closure runs between fork and exec and calls only
+        // fcntl, which is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(move || {
+                if crate::fdlock::clear_cloexec(fd) {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
     let child = cmd
         .spawn()
         .map_err(|e| format!("cannot start {BIN} {}: {e}", args.join(" ")))?;

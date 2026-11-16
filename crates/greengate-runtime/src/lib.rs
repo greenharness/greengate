@@ -53,6 +53,8 @@ pub mod content;
 pub mod dispatch;
 pub mod downgrade;
 pub mod excerpt;
+#[cfg(unix)]
+pub(crate) mod fdlock;
 pub mod finding;
 pub mod gate_evidence;
 pub mod gate_identity;
@@ -65,6 +67,8 @@ pub mod install;
 pub mod json;
 pub mod json_read;
 pub mod land;
+#[cfg(unix)]
+pub(crate) mod land_detach;
 pub mod live;
 pub mod load;
 pub mod manifest;
