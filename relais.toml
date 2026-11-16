@@ -77,11 +77,11 @@ argv = ["./scripts/check-no-deps.sh"]
 timeout_seconds = 300
 
 [[verification.profiles.default.commands]]
-argv = ["cargo", "test", "-p", "amont-runtime", "--lib", "--features", "test-hooks", "--", "capture::"]
+argv = ["cargo", "test", "-p", "greengate-runtime", "--lib", "--features", "test-hooks", "--", "capture::"]
 timeout_seconds = 3600
 
 [[verification.profiles.default.commands]]
-argv = ["cargo", "test", "-p", "amont", "--features", "test-hooks", "--test", "it", "--", "quiet_run::"]
+argv = ["cargo", "test", "-p", "greengate", "--features", "test-hooks", "--test", "it", "--", "quiet_run::"]
 timeout_seconds = 3600
 
 [[verification.profiles.default.commands]]

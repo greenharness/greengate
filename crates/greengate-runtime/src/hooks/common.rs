@@ -1396,6 +1396,27 @@ fn run_observed(
     on_output: impl Fn(&[u8]) + Send + Sync + 'static,
     ceiling_left: Option<u64>,
 ) -> std::io::Result<Ran> {
+    let shared = std::sync::Arc::new(on_output);
+    let for_stdout = std::sync::Arc::clone(&shared);
+    run_observed_split(
+        settings,
+        cmd,
+        move |bytes| for_stdout(bytes),
+        move |bytes| shared(bytes),
+        ceiling_left,
+    )
+}
+
+type OnBytes = std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+/// [`run_observed`] with a callback per stream.
+fn run_observed_split(
+    settings: &crate::config::Settings,
+    cmd: &mut Command,
+    on_stdout: impl Fn(&[u8]) + Send + Sync + 'static,
+    on_stderr: impl Fn(&[u8]) + Send + Sync + 'static,
+    ceiling_left: Option<u64>,
+) -> std::io::Result<Ran> {
     // A heavy check's first tool waits here for a host slot (ADR-0009);
     // its clocks start at the spawn below, after the wait.
     if crate::host_slots::before_spawn(settings)? {
@@ -1404,7 +1425,8 @@ fn run_observed(
     crate::host_slots::bound(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let activity = Activity::new();
-    let on_output = std::sync::Arc::new(on_output);
+    let on_stdout: OnBytes = std::sync::Arc::new(on_stdout);
+    let on_stderr: OnBytes = std::sync::Arc::new(on_stderr);
     let mut child = cmd.spawn()?;
     // The silence is the CHILD's, so its clock starts when the child does:
     // a spawn that itself took a second on a loaded machine is not a
@@ -1422,6 +1444,7 @@ fn run_observed(
                 .take()
                 .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
             false,
+            on_stdout,
         ),
         (
             child
@@ -1429,12 +1452,12 @@ fn run_observed(
                 .take()
                 .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
             true,
+            on_stderr,
         ),
     ];
-    for (pipe, is_stderr) in pipes {
+    for (pipe, is_stderr, on_output) in pipes {
         let Some(pipe) = pipe else { continue };
         let activity = std::sync::Arc::clone(&activity);
-        let on_output = std::sync::Arc::clone(&on_output);
         readers.push(std::thread::spawn(move || {
             let mut pipe = pipe;
             let mut chunk = [0u8; 4096];
@@ -1487,6 +1510,7 @@ fn run_observed(
         s.stop();
     }
     for r in readers {
+        // a reader thread only ends by panicking; the bytes it had are still taken
         let _ = r.join();
     }
     // A check that passed after sitting on a lock says so once: the
@@ -1792,6 +1816,53 @@ pub fn capture_within(
         .map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner()))
         .unwrap_or_default();
     Some((ran, text))
+}
+
+/// How a command run by [`capture_stdout_within`] ended, with its two streams.
+pub struct CapturedOutput {
+    pub ran: Ran,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// As [`capture_within`], but stdout and stderr are kept APART: a caller that
+/// parses stdout (npm's JSON) must not see npm's `warn` lines, and quotes
+/// stderr only in a reason. The child's stdin is whatever `cmd` set (inherited
+/// by default); nothing is written to it from here. `Err` when the child
+/// cannot be spawned (`ErrorKind::NotFound` when the program is missing).
+pub fn capture_stdout_within(
+    settings: &crate::config::Settings,
+    cmd: &mut Command,
+) -> std::io::Result<CapturedOutput> {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let err = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let (out_sink, err_sink) = (std::sync::Arc::clone(&out), std::sync::Arc::clone(&err));
+    let ran = run_observed_split(
+        settings,
+        cmd,
+        move |bytes| {
+            out_sink
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .extend_from_slice(bytes);
+        },
+        move |bytes| {
+            err_sink
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .extend_from_slice(bytes);
+        },
+        None,
+    )?;
+    let take = |sink: std::sync::Arc<std::sync::Mutex<Vec<u8>>>| {
+        let bytes = std::mem::take(&mut *sink.lock().unwrap_or_else(|p| p.into_inner()));
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    Ok(CapturedOutput {
+        ran,
+        stdout: take(out),
+        stderr: take(err),
+    })
 }
 
 /// The wait over an already-spawned child — shared by every runner. The
@@ -2230,6 +2301,45 @@ pub fn hl(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// npm writes its JSON to stdout and its `warn` lines to stderr: the two
+    /// must come back apart, with the child's real exit status, or a warning
+    /// would land inside the JSON a voucher parses.
+    #[cfg(unix)]
+    #[test]
+    fn capture_stdout_within_keeps_the_streams_apart() {
+        let settings = crate::config::Settings::default();
+        let mut cmd = std::process::Command::new(super::program("sh"));
+        cmd.args([
+            "-c",
+            "printf '{\"a\":1}'; printf 'npm warn x\\n' >&2; exit 3",
+        ]);
+        let captured = super::capture_stdout_within(&settings, &mut cmd).expect("sh runs");
+        assert_eq!(captured.stdout, "{\"a\":1}", "stdout alone");
+        assert_eq!(captured.stderr, "npm warn x\n", "stderr alone");
+        match captured.ran {
+            super::Ran::Status(s) => assert_eq!(s.code(), Some(3), "the real exit status"),
+            super::Ran::TimedOut(_) => panic!("a one-line child timed out"),
+        }
+    }
+
+    /// A child that writes only to stderr and exits 0 yields EMPTY stdout:
+    /// the voucher reads that as a refusal, never as "no changes".
+    #[cfg(unix)]
+    #[test]
+    fn stderr_only_output_leaves_stdout_empty() {
+        let settings = crate::config::Settings::default();
+        let mut cmd = std::process::Command::new(super::program("sh"));
+        cmd.args(["-c", "printf 'only a warning\\n' >&2"]);
+        let captured = super::capture_stdout_within(&settings, &mut cmd).expect("sh runs");
+        assert!(
+            captured.stdout.is_empty(),
+            "stdout must be empty, got {:?}",
+            captured.stdout
+        );
+        assert_eq!(captured.stderr, "only a warning\n");
+        assert!(matches!(captured.ran, super::Ran::Status(s) if s.success()));
+    }
 
     /// Git ends a path with one `\n`; a `\r` before it is part of the name.
     #[test]

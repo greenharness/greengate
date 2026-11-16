@@ -1,6 +1,6 @@
 ---
 status: active
-branch: feat/snapshot-clone-only
+branch: feat/snapshot-reuse-npm
 repos: [amont]
 adrs: []
 ---
@@ -196,9 +196,41 @@ hook would cost a `du` per push.
   files): the kernel finishes the call, so a kill never leaves a partial
   tree, only a whole clone in the temp snapshot, the kill-leftover class that
   already exists. Cloning onto that leftover returns `EEXIST`.
-- Not measured: npm's trust of its hidden lockfile after a clone (e), workspace
-  discovery (c), and a real npm repo with an installed tree (application-landscape
-  moved to pnpm; fredericrous.com has no `node_modules`).
+- **npm, measured 2026-11-16** on activity-vision (`be20275`, 560 lockfile
+  packages, 25,143 files in `node_modules`), each tree on a private APFS
+  image: a fresh `npm ci --prefer-offline` takes 12.9 s and adds 368 MB
+  (median of 3); `clonefile(2)` plus the `npm install --dry-run --offline
+  --ignore-scripts --json` vouch takes 5.6 s (43% of the install) and adds
+  9.3 MB (2.5%). The faithful clone was accepted 3 times of 3, with
+  `package-lock.json` byte-identical after the dry-run. (e): the hidden
+  lockfile is OLDER than the newest directory of the clone, so npm distrusts
+  it and reads the tree. (f): a package version raised in place with its
+  file and directory mtimes set back before the record was still reported
+  (`changed=1`): npm vouches for the tree, not its record, which is stronger
+  than pnpm. (c): `npm query .workspace` lists `packages/a` and `packages/b`
+  as JSON `location`s (two `npm warn` lines go to stderr); members hold no
+  `node_modules` of their own, and the root's workspace links are relative
+  (`../packages/a`), inside the snapshot; the workspace clone was accepted.
+- **yarn 1, measured 2026-11-16** with the WHOLE voucher (the mtime scan
+  against `.yarn-integrity`, the outside-link refusal, then `yarn check
+  --integrity` and `--verify-tree`) on a workspace fixture: accepted the
+  faithful clone; refused fresh-mtime drift, out-of-range versions (also with
+  an old mtime), a fresh stray, a link outside the snapshot and a member
+  manifest the lockfile does not satisfy. It ACCEPTED five bad trees: a
+  missing package (`is-odd`, a member's dependency: a deletion leaves no
+  newer file, and `--verify-tree` did not notice), in-range drift with an old
+  mtime, a stray with an old mtime, nested drift in a member's
+  `node_modules` with an old mtime, and an in-place edit with an old mtime
+  (the last is pnpm's documented limit too). The real-repo timing on `web`
+  did not run: its `yarn install` failed on the network.
+
+**Gate decision (2026-11-16): npm GO, yarn 1 STOP.** npm meets the bar on
+both parts (zero false accepts beyond the shared in-place-edit limit, 43% of
+the install's time, 2.5% of its disk). yarn 1 fails safety on a missing
+package, which no timestamp can catch, so Phase 3 is not built: yarn units
+keep installing under `reuse`, and the docs and the refusal say why. Phase
+1b builds only what npm needs; the voucher seam stays a `match` so a later
+yarn or berry voucher is one more arm.
 
 Consequences for the phases: Phase 1a becomes `clonefile(2)` on macOS (an
 `extern "C"` declaration, no new crate) with the existing `cp` path only for
@@ -310,7 +342,7 @@ Files: `crates/greengate-runtime/src/snapshot_prep.rs`, `crates/greengate/tests/
 Per the table, plus the outside-the-snapshot symlink refusal, using Phase 1's
 `capture_stdout_within` and helper. Replace the `Manager::Npm` early return. The refusal reason comes from the parsed dry-run JSON (`npm would add N, remove N, change N: <first name@version>` or `package-lock.json would change`), never from `last_line` of the JSON.
 
-### Phase 3 — yarn 1 voucher (`crates/greengate-runtime/src/snapshot_prep.rs`, `crates/greengate/tests/it/snapshot_deps.rs`, `.github/workflows/ci.yaml`)
+### Phase 3 — yarn 1 voucher (`crates/greengate-runtime/src/snapshot_prep.rs`, `crates/greengate/tests/it/snapshot_deps.rs`, `.github/workflows/ci.yaml`) — NOT BUILT: yarn failed its Phase 0 gate (a missing package is accepted; Phase 0 results)
 
 Files: `crates/greengate-runtime/src/snapshot_prep.rs`, `crates/greengate/tests/it/snapshot_deps.rs`, `.github/workflows/ci.yaml`
 
@@ -330,7 +362,7 @@ Rewrite the `reuse` bullet in
 "Neither is yarn", add per-manager vouch, the yarn timestamp limit, berry and
 bun exclusions); `docs/custom-checks.md:342` mentions reuse; CHANGELOG entry;
 rustdoc at the top of `snapshot_prep.rs` and on `reuse`. Release greengate
-4.6.0 (4.5.0 is already out; new capability, minor) through the `tag-release` skill after the PR
+4.8.0 (4.6.0 shipped Phase 1a; 4.7.0 was cut by another session for #483 on 2026-11-16; new capability, minor) through the `tag-release` skill after the PR
 merges.
 
 ## Tests
@@ -405,7 +437,7 @@ Left out: architect and po (no new module; one new pub fn, `capture_stdout_withi
 
 ## Outcome (Phase 1a)
 
-Phase 0 case (g) and the disk and clone measurements are above. Phase 1a is built on `feat/snapshot-clone-only`; Phases 1b, 2, 3 and 4 are not started.
+Phase 0 case (g) and the disk and clone measurements are above. Phase 1a is built on `feat/snapshot-clone-only` (#481) and released as greengate 4.6.0; Phases 1b, 2 and 4 are built on `feat/snapshot-reuse-npm` (Outcome, Phases 1b, 2 and 4, below); Phase 3 is not built.
 
 | check | input | expected | observed |
 |---|---|---|---|
@@ -422,6 +454,33 @@ relais run `run-6604fae1efd53-2c3f` wrote the patch and ended `blocked (env_miss
 
 Changed by the implementation review (all five reviewers approve-with-changes): scratch names `d` renamed; `cp -R -T --reflink=always --preserve=mode,timestamps --no-dereference` on Linux (a late destination fails instead of receiving a nested copy; Linux and macOS clones keep the same mtimes); only a certainly absent destination is cleared, and a failed clear is reported; one-line Linux refusal (first `cp` error plus a count); macOS names the next step for `EXDEV` (set TMPDIR) and `ENOTSUP` (`snapshotDeps install`); the tmpfs unit test and a new stubbed-pnpm integration test fail instead of skipping under `CI`; the CI step updates apt before installing `xfsprogs`.
 
+## Outcome (Phases 1b, 2 and 4)
+
+Built on `feat/snapshot-reuse-npm`. Phase 3 (yarn) is not built: yarn 1 failed its Phase 0 gate (Phase 0 results), so its rows are not applicable.
+
+| check | input | expected | observed |
+|---|---|---|---|
+| fmt, clippy -D warnings | macOS, `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-gnu`, all targets | clean | clean on all three |
+| `snapshot_deps` suite | stubbed and real-tool cases | all pass | 52 passed |
+| npm accepts a faithful clone | `npm_reuse_keeps_a_clone_npm_accepts`, `real_npm_accepts_a_matching_clone_and_refuses_a_mismatch` | kept, nothing installed | pass |
+| npm refuses, real npm 11.9 | version raised in place with every mtime set back and the hidden lockfile newest; a package deleted; a stray directory; a manifest the lockfile does not satisfy | refused, `npm ci` runs | pass, each |
+| npm refuses, stubbed | a reported change, empty stdout on exit 0, unparseable output, a non-zero exit, a rewritten lockfile, a file edited after the install, a link outside the snapshot, no `node` on PATH | refused in one line naming npm, rolled back, `npm ci` runs | pass, each |
+| npm units | a differing working-tree lockfile, a nested npm lockfile, an untouched npm unit | install / own unit / not prepared | pass |
+| stdout and stderr apart | `capture_stdout_within` unit tests | stderr never in stdout, real exit status, stderr-only gives empty stdout | pass |
+| progress line | npm accept test; pnpm tests | printed for npm, not for pnpm | pass |
+| yarn stays install-only | `yarn_reuse_always_installs` | installs, with the measured reason | pass |
+| no new dependency | `scripts/check-no-deps.sh` | pass | pass |
+| relais profile | relais verify run `run-6606671c9e99e-77a3` | all checks exit 0 | 8 of 8 exit 0 |
+| Linux CI reflink and tmpfs tests; the yarn real-repo timing | runs only on the pull request; `web`'s install failed on the network | green / measured | not observable locally; yarn timing moot after the gate |
+
+## Decision log
+
+- 2026-11-16: yarn 1 STOP, npm GO, by the plan's own Phase 0 gate (Phase 0 results). happier, the person's largest tree, is yarn 1 and keeps installing.
+- 2026-11-16: `relais.toml` renamed `amont-runtime` and `amont` to `greengate-runtime` and `greengate` (retired by #463). It is outside every phase; it was needed because two of its checks could never pass and every relais run here ended `env_missing`. Both commands were run and pass (7 and 13 tests). The plan had left the edit to the person because relais trust covers the file; relais warned that the commands changed and did not block. The person asked to continue the plan with this pending and did not object.
+- 2026-11-16: the implementation review (backend, high) held that npm trusts its hidden lockfile when it is newest and then never reads the tree. Measured on npm 11.9.0 with the hidden lockfile made newest: an in-place version bump, a deletion and a stray were all still reported. The clone's `.package-lock.json` is removed before the dry-run anyway, at no cost, for other npm versions.
+- 2026-11-16: the review (lang:rust, blocking) found that greengate restores SIGPIPE's default action, so writing to `node`'s stdin could kill the process. `node` now reads a temp file named in its argv; nothing is written to a child's stdin.
+- 2026-11-16: an earlier wording in the CHANGELOG and docs said npm catches "a package changed in place even with its timestamps set back". Phase 0 proved that only for a VERSION change; a file edited in place without a version change is not caught, as with pnpm. Corrected before the release.
+
 ## Implementation review
 
 - implementation-review: approve after one round and three Deltas (65k, 53k, 26k tokens); one blocking naming finding fixed, the candidates ruled; `stubbed: bool` on the pre-existing `amont` test helper kept as `deliberate: pre-existing, about 50 call sites`.
@@ -431,5 +490,15 @@ Changed by the implementation review (all five reviewers approve-with-changes): 
 - unix: approve; `cp -R -T` into a directory we created, modes and mtimes preserved, `LC_ALL=C` so the hint matches under any locale (24k, 30 s).
 
 deliberate: the Linux reflink mount and the two tmpfs tests cannot run on this Mac; they are proven by the pull request's checks, and a failure there is fixed on this branch.
+
+## Implementation review (Phases 1b, 2 and 4)
+
+- implementation-review: approve after round 1 and two Deltas (102k, 53k, 51k tokens); the blocking findings (no outcome record, discarded errors, a `d` name, a bool flag on `skip_files`) fixed; candidates ruled.
+- backend: approve; the hidden-lockfile concern measured not to reproduce on npm 11.9.0, the clone's `.package-lock.json` removed anyway; lockfile restored before an error; real-npm refusals added (45k tokens, 32 s on the last pass).
+- lang:rust: approve; the SIGPIPE blocker removed by giving node an unlinked file as stdin, never a pipe; one `Voucher` enum; typed spawn errors; strict counts (27k, 44 s).
+- tui: approve; the docs and CHANGELOG no longer claim npm catches a file edited in place; the checking line added; the wording fixes (43k, 24 s).
+- unix: approve; `--offline --no-update-notifier`, no `NODE_OPTIONS`, an owner-only temp file deleted as soon as it is written (26k, 38 s).
+
+deliberate: the `snapshot:` progress lines stay on stdout, like every other line in the file; moving them is its own change. The Windows npm path is not run (clone_dir refuses off macOS and Linux, so it is never reached). Next: release greengate 4.8.0 (rebased onto 4.7.0; the patch is unchanged but for CHANGELOG context, per range-diff).
 
 <!-- panel: repos=amont adds= reviewers=backend,lang:rust,unix,tui,po,architect body-sha=ee6f3bf135f8 -->
