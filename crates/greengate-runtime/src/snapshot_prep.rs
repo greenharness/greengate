@@ -783,11 +783,14 @@ fn link_outside(dir: &Path, roots: &[PathBuf]) -> std::io::Result<Option<PathBuf
     })
 }
 
-/// Does `skip` name this file? A pattern ending in `*` is a name prefix, one
-/// holding a `/` is `<parent dir>/<name>`, any other is a name.
-fn skipped_file(skip: &[&str], parent: &Path, name: &str) -> bool {
+/// Does `skip` name this file? A pattern starting with `./` is a name directly
+/// under `root` (the `node_modules` being scanned), one ending in `*` is a name
+/// prefix, one holding a `/` is `<parent dir>/<name>`, any other is a name.
+fn skipped_file(skip: &[&str], root: &Path, parent: &Path, name: &str) -> bool {
     skip.iter().any(|pattern| {
-        if let Some(prefix) = pattern.strip_suffix('*') {
+        if let Some(top) = pattern.strip_prefix("./") {
+            parent == root && name == top
+        } else if let Some(prefix) = pattern.strip_suffix('*') {
             name.starts_with(prefix)
         } else if let Some((dir, file)) = pattern.split_once('/') {
             name == file && parent.file_name().is_some_and(|d| d == dir)
@@ -826,7 +829,7 @@ fn newer_than(
                 }
                 stack.push(entry.path());
             } else if kind.is_file() {
-                if skipped_file(skip_files, &at, &name) {
+                if skipped_file(skip_files, nm, &at, &name) {
                     continue;
                 }
                 if entry.metadata()?.modified()? > record {
@@ -838,61 +841,58 @@ fn newer_than(
     Ok(None)
 }
 
-/// How a manager lists the workspace members of a unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MemberSource {
-    PnpmList,
-    NpmQuery,
-}
-
-/// What vouches that a clone is the tree the lockfile describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Vouch {
-    /// pnpm's isolated-layout check, then a frozen offline install.
-    PnpmFrozenOffline,
-    /// npm's dry-run install, which reads the tree and the lockfile.
-    NpmDryRun,
-}
-
 /// What `reuse` needs from a package manager; the rest of it is shared.
-struct Voucher {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Voucher {
+    /// A layout check, then a frozen offline install.
+    Pnpm,
+    /// A dry-run install, which reads the tree and the lockfile.
+    Npm,
+}
+
+impl Voucher {
+    /// The voucher of a unit's manager, or why that manager always installs.
+    fn of(u: &Unit) -> Result<Voucher, String> {
+        match u.manager {
+            Manager::Pnpm => Ok(Voucher::Pnpm),
+            Manager::Npm => Ok(Voucher::Npm),
+            Manager::Yarn if u.berry => Err("yarn cannot check an installed tree against its \
+                 lockfile, so yarn snapshots always install"
+                .to_string()),
+            Manager::Yarn => Err(
+                "yarn's own checks accept a tree with a package missing, so \
+                 yarn snapshots always install"
+                    .to_string(),
+            ),
+            Manager::Bun => Err(bun_refusal(u)),
+        }
+    }
+
     /// The name every refusal carries.
-    tool: &'static str,
+    fn tool(self) -> &'static str {
+        match self {
+            Voucher::Pnpm => "pnpm",
+            Voucher::Npm => "npm",
+        }
+    }
+
     /// The install record, under `node_modules`, whose mtime marks the end of
     /// the install.
-    record: &'static str,
-    /// Files an install writes after the record (see [`skipped_file`]).
-    skip_files: &'static [&'static str],
-    members: MemberSource,
-    vouch: Vouch,
-}
+    fn record(self) -> &'static str {
+        match self {
+            Voucher::Pnpm => ".modules.yaml",
+            Voucher::Npm => ".package-lock.json",
+        }
+    }
 
-/// The voucher of a unit's manager, or why that manager always installs.
-fn voucher(u: &Unit) -> Result<Voucher, String> {
-    match u.manager {
-        Manager::Pnpm => Ok(Voucher {
-            tool: "pnpm",
-            record: ".modules.yaml",
-            skip_files: &[".modules.yaml", ".pnpm-workspace-state*", ".pnpm/lock.yaml"],
-            members: MemberSource::PnpmList,
-            vouch: Vouch::PnpmFrozenOffline,
-        }),
-        Manager::Npm => Ok(Voucher {
-            tool: "npm",
-            record: ".package-lock.json",
-            skip_files: &[".package-lock.json"],
-            members: MemberSource::NpmQuery,
-            vouch: Vouch::NpmDryRun,
-        }),
-        Manager::Yarn if u.berry => Err("yarn cannot check an installed tree against its \
-             lockfile, so yarn snapshots always install"
-            .to_string()),
-        Manager::Yarn => Err(
-            "yarn's own checks accept a tree with a package missing, so \
-             yarn snapshots always install"
-                .to_string(),
-        ),
-        Manager::Bun => Err(bun_refusal(u)),
+    /// Files an install writes after the record (see [`skipped_file`]). npm's
+    /// hidden lockfile is skipped in the root `node_modules` only.
+    fn skip_files(self, is_root: bool) -> &'static [&'static str] {
+        match (self, is_root) {
+            (Voucher::Pnpm, _) => &[".modules.yaml", ".pnpm-workspace-state*", ".pnpm/lock.yaml"],
+            (Voucher::Npm, true) => &["./.package-lock.json"],
+            (Voucher::Npm, false) => &[],
+        }
     }
 }
 
@@ -903,30 +903,92 @@ struct Captured {
     stderr: String,
 }
 
-/// Run `cmd` under the deadline and the host slots, keeping the streams
-/// apart. `Err(reason)` when it cannot start or is killed by a clock; a
-/// non-zero exit is the caller's to read.
-fn capture_apart(
-    settings: &crate::config::Settings,
-    cmd: &mut Command,
-    input: Option<Vec<u8>>,
-    what: &str,
-) -> Result<Captured, String> {
-    match crate::hooks::common::capture_stdout_within(settings, cmd, input) {
-        Some((crate::hooks::common::Ran::Status(status), stdout, stderr)) => Ok(Captured {
-            status,
-            stdout,
-            stderr,
-        }),
-        Some((crate::hooks::common::Ran::TimedOut(_), _, _)) => Err(format!("{what} timed out")),
-        None => Err(format!("{what} could not start")),
+/// Why [`capture_apart`] has no [`Captured`].
+enum CaptureFailure {
+    TimedOut,
+    Spawn(std::io::Error),
+}
+
+impl CaptureFailure {
+    fn describe(&self, what: &str) -> String {
+        match self {
+            CaptureFailure::TimedOut => format!("{what} timed out"),
+            CaptureFailure::Spawn(e) => format!("{what} could not start: {e}"),
+        }
     }
 }
 
+/// Run `cmd` under the deadline and the host slots, keeping the streams
+/// apart. `Err` when it cannot start or is killed by a clock; a non-zero exit
+/// is the caller's to read.
+fn capture_apart(
+    settings: &crate::config::Settings,
+    cmd: &mut Command,
+) -> Result<Captured, CaptureFailure> {
+    let out = crate::hooks::common::capture_stdout_within(settings, cmd)
+        .map_err(CaptureFailure::Spawn)?;
+    match out.ran {
+        crate::hooks::common::Ran::Status(status) => Ok(Captured {
+            status,
+            stdout: out.stdout,
+            stderr: out.stderr,
+        }),
+        crate::hooks::common::Ran::TimedOut(_) => Err(CaptureFailure::TimedOut),
+    }
+}
+
+/// A file in the temp dir holding `text`, removed on drop. Never inside the
+/// snapshot, whose tree the stamp covers.
+struct TempText {
+    path: PathBuf,
+}
+
+impl TempText {
+    fn write(text: &str) -> std::io::Result<TempText> {
+        use std::io::Write;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = format!(
+            "greengate-npm-{}-{}.json",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(unique);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let guard = TempText { path };
+        file.write_all(text.as_bytes())?;
+        Ok(guard)
+    }
+}
+
+impl Drop for TempText {
+    fn drop(&mut self) {
+        // a file already gone is the goal; nothing else can act on a failure here
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The `counts=` line of the dry-run helper: exactly one line holding exactly
+/// three numbers. Anything else is `None`.
+fn parse_counts(text: &str) -> Option<[usize; 3]> {
+    let mut lines = text.lines().filter_map(|l| l.strip_prefix("counts="));
+    let line = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let numbers: Vec<usize> = line
+        .split_whitespace()
+        .map(|n| n.parse().ok())
+        .collect::<Option<_>>()?;
+    numbers.try_into().ok()
+}
+
 /// Reduce JSON the manager printed to plain lines with `node -e script`, the
-/// JSON on node's own stdin: this crate has no JSON parser, and the answer
-/// is npm's own. node's exit status decides; a missing node is a refusal that
-/// says so.
+/// JSON in a temp file whose path is node's argv: this crate has no JSON
+/// parser, and the answer is npm's own. node's exit status decides; a missing
+/// node is a refusal that says so.
 fn node_reads(
     settings: &crate::config::Settings,
     u: &Unit,
@@ -934,39 +996,44 @@ fn node_reads(
     script: &str,
 ) -> Result<String, String> {
     let tool = u.manager.tool();
+    let file = TempText::write(json)
+        .map_err(|e| format!("could not write {tool}'s output for node: {e}"))?;
     let mut cmd = Command::new(crate::hooks::common::program("node"));
-    cmd.args(["-e", script]);
+    cmd.arg("-e")
+        .arg(script)
+        .arg(&file.path)
+        .current_dir(std::env::temp_dir())
+        .env_remove("NODE_OPTIONS")
+        .stdin(Stdio::null());
     crate::hooks::common::strip_git_env(&mut cmd);
-    let node = match crate::hooks::common::capture_stdout_within(
-        settings,
-        &mut cmd,
-        Some(json.as_bytes().to_vec()),
-    ) {
-        Some((crate::hooks::common::Ran::Status(status), stdout, stderr)) => {
-            if !status.success() {
-                return Err(format!(
-                    "could not read {tool}'s output ({status}): {}",
-                    last_line(&stderr)
-                ));
-            }
-            stdout
-        }
-        Some((crate::hooks::common::Ran::TimedOut(_), _, _)) => {
-            return Err(format!("node timed out reading {tool}'s output"))
-        }
-        None => {
+    let out = match capture_apart(settings, &mut cmd) {
+        Ok(out) => out,
+        Err(CaptureFailure::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(format!(
-            "node not found on PATH (needed to read {tool}'s output); running {tool} {} instead",
-            install_verb(u)
-        ))
+                "node not found on PATH (needed to read {tool}'s output); put node on PATH, \
+                 or git config greengate.snapshotDeps install"
+            ));
+        }
+        Err(CaptureFailure::Spawn(e)) => {
+            return Err(format!("could not start node to read {tool}'s output: {e}"));
+        }
+        Err(CaptureFailure::TimedOut) => {
+            return Err(format!("node timed out reading {tool}'s output"));
         }
     };
-    Ok(node)
+    if !out.status.success() {
+        return Err(format!(
+            "could not read {tool}'s output ({}): {}",
+            out.status,
+            last_line(&out.stderr)
+        ));
+    }
+    Ok(out.stdout)
 }
 
 /// `npm query .workspace`: the `location` of each workspace, one per line.
 const NPM_QUERY_SCRIPT: &str = r#"
-const text = require('fs').readFileSync(0, 'utf8');
+const text = require('fs').readFileSync(process.argv[1], 'utf8');
 const start = text.indexOf('[');
 if (start < 0) throw new Error('no JSON array in npm query output');
 const found = JSON.parse(text.slice(start));
@@ -978,7 +1045,7 @@ for (const workspace of found) console.log(String(workspace.location));
 /// so parsing starts at the first `{`. Prints `error=<summary>`, or
 /// `counts=<add> <remove> <change>` and `first=<name@version>`.
 const NPM_DRY_RUN_SCRIPT: &str = r#"
-const text = require('fs').readFileSync(0, 'utf8');
+const text = require('fs').readFileSync(process.argv[1], 'utf8');
 const start = text.indexOf('{');
 if (start < 0) throw new Error('no JSON object in npm output');
 const report = JSON.parse(text.slice(start));
@@ -1005,10 +1072,10 @@ fn members(
     settings: &crate::config::Settings,
     u: &Unit,
     at: &Path,
-    voucher: &Voucher,
+    voucher: Voucher,
 ) -> Result<Vec<String>, String> {
-    match voucher.members {
-        MemberSource::PnpmList => {
+    match voucher {
+        Voucher::Pnpm => {
             if u.standalone {
                 return Ok(Vec::new());
             }
@@ -1032,14 +1099,17 @@ fn members(
                 })
                 .collect())
         }
-        MemberSource::NpmQuery => {
+        Voucher::Npm => {
             let what = "npm query .workspace";
             let out = capture_apart(
                 settings,
-                &mut manager_cmd(u, at, &["query", ".workspace"]),
-                None,
-                what,
-            )?;
+                &mut manager_cmd(
+                    u,
+                    at,
+                    &["query", ".workspace", "--offline", "--no-update-notifier"],
+                ),
+            )
+            .map_err(|e| e.describe(what))?;
             if !out.status.success() {
                 return Err(format!(
                     "npm could not list the workspace ({}): {}",
@@ -1117,7 +1187,25 @@ fn pnpm_layout_problem(nm: &Path, is_root: bool) -> Option<String> {
 /// `package-lock.json` byte-identical. Exit 0 alone decides nothing (npm
 /// exits 0 for a tree it would change), so the JSON does; a non-zero exit,
 /// empty or unparseable output is a refusal, never "no changes".
-fn npm_vouch(settings: &crate::config::Settings, u: &Unit, snap_dir: &Path) -> Result<(), String> {
+fn npm_vouch(
+    settings: &crate::config::Settings,
+    u: &Unit,
+    snap_dir: &Path,
+    members: &[String],
+) -> Result<(), String> {
+    // npm trusts `node_modules/.package-lock.json` when it is newer than the
+    // tree; with it gone npm must read the tree itself.
+    for member in members {
+        let hidden = snap_dir
+            .join(member)
+            .join("node_modules")
+            .join(".package-lock.json");
+        match std::fs::remove_file(&hidden) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("could not remove {}: {e}", hidden.display())),
+        }
+    }
     let lock_path = snap_dir.join(u.lockfile);
     let before = std::fs::read(&lock_path).map_err(|e| format!("{}: {e}", u.lockfile))?;
     let what = "npm install --dry-run";
@@ -1132,20 +1220,21 @@ fn npm_vouch(settings: &crate::config::Settings, u: &Unit, snap_dir: &Path) -> R
             "--json",
             "--no-audit",
             "--no-fund",
+            "--no-update-notifier",
         ],
     );
-    let out = capture_apart(settings, &mut cmd, None, what)?;
-    let verdict = npm_verdict(settings, u, &out, what);
+    let captured = capture_apart(settings, &mut cmd);
     // A dry-run must not write; if it did, put the committed bytes back
-    // before anything installs over them.
-    let mut restored = String::new();
+    // before anything installs over them, whether or not it finished.
     if std::fs::read(&lock_path).ok().as_deref() != Some(before.as_slice()) {
-        if let Err(e) = std::fs::write(&lock_path, &before) {
-            restored = format!(" (and {} could not be restored: {e})", u.lockfile);
-        }
+        let restored = match std::fs::write(&lock_path, &before) {
+            Ok(()) => String::new(),
+            Err(e) => format!(" (and {} could not be restored: {e})", u.lockfile),
+        };
         return Err(format!("{} would change{restored}", u.lockfile));
     }
-    verdict
+    let out = captured.map_err(|e| e.describe(what))?;
+    npm_verdict(settings, u, &out, what)
 }
 
 /// What npm's dry-run said, as `Ok` for "nothing to do" and otherwise the
@@ -1167,11 +1256,11 @@ fn npm_verdict(
                 }
             }
         }
-        return Err(format!(
-            "{what} exited with {}: {}",
-            out.status,
-            last_line(&out.stderr)
-        ));
+        let code = out
+            .status
+            .code()
+            .map_or_else(|| out.status.to_string(), |c| c.to_string());
+        return Err(format!("{what} exited {code}: {}", last_line(&out.stderr)));
     }
     if out.stdout.trim().is_empty() {
         return Err(format!(
@@ -1183,17 +1272,8 @@ fn npm_verdict(
     if let Some(summary) = text.lines().find_map(|l| l.strip_prefix("error=")) {
         return Err(format!("npm failed: {summary}"));
     }
-    let counts: Vec<usize> = text
-        .lines()
-        .find_map(|l| l.strip_prefix("counts="))
-        .map(|c| {
-            c.split_whitespace()
-                .filter_map(|n| n.parse().ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let [add, remove, change] = counts[..] else {
-        return Err(format!("{what} printed output npm's report does not match"));
+    let Some([add, remove, change]) = parse_counts(&text) else {
+        return Err(format!("{what} printed no add/remove/change counts"));
     };
     if add + remove + change > 0 {
         let first = text
@@ -1211,7 +1291,7 @@ fn npm_verdict(
 /// clone is in place and its manager vouched for it; `Err(reason)` — with the
 /// snapshot left exactly as it was — when it cannot be.
 ///
-/// Each manager supplies a [`Voucher`]: pnpm's is a layout check and a frozen
+/// Each manager is a [`Voucher`]: pnpm's is a layout check and a frozen
 /// offline install; npm's is a dry-run install, which reads the installed
 /// tree itself (`npm ls` cannot do that: it fails on peer-range conflicts
 /// `npm ci` accepts). yarn 1 is never reused: its checks accept a tree with
@@ -1224,8 +1304,8 @@ fn reuse(
     snapshot: &Path,
     unit_dirs: &[String],
 ) -> Result<(), String> {
-    let voucher = voucher(u)?;
-    let tool = voucher.tool;
+    let voucher = Voucher::of(u)?;
+    let tool = voucher.tool();
     let src_dir = source.join(&u.dir);
     let snap_dir = snapshot.join(&u.dir);
     let lock = u.lockfile;
@@ -1239,7 +1319,7 @@ fn reuse(
         return Err("nothing installed in the working tree".to_string());
     }
     let mut set = vec![String::new()];
-    for m in members(settings, u, &snap_dir, &voucher)? {
+    for m in members(settings, u, &snap_dir, voucher)? {
         let repo_rel = join_rel(&u.dir, &m);
         // A member with a lockfile of its own is its own unit.
         if unit_dirs.contains(&repo_rel) {
@@ -1252,7 +1332,7 @@ fn reuse(
     // Checked on the SOURCE, before anything is copied: a file changed
     // since the manager finished installing is an edit its own check may not
     // see, and a clone would carry it into a stamped snapshot.
-    let record_path = format!("node_modules/{}", voucher.record);
+    let record_path = format!("node_modules/{}", voucher.record());
     let record = std::fs::metadata(src_dir.join(&record_path))
         .and_then(|m| m.modified())
         .map_err(|_| format!("no {tool} install record ({record_path})"))?;
@@ -1260,7 +1340,7 @@ fn reuse(
         match newer_than(
             &src_dir.join(m).join("node_modules"),
             record,
-            voucher.skip_files,
+            voucher.skip_files(m.is_empty()),
         ) {
             Ok(None) => {}
             Ok(Some(f)) => {
@@ -1324,9 +1404,9 @@ fn reuse(
                 "{} links back into the working tree",
                 link.display()
             )),
-            Ok(None) => match voucher.vouch {
-                Vouch::PnpmFrozenOffline => pnpm_layout_problem(&to, m.is_empty()),
-                Vouch::NpmDryRun => match link_outside(&to, &roots) {
+            Ok(None) => match voucher {
+                Voucher::Pnpm => pnpm_layout_problem(&to, m.is_empty()),
+                Voucher::Npm => match link_outside(&to, &roots) {
                     Ok(Some(link)) => {
                         Some(format!("{} links outside the snapshot", link.display()))
                     }
@@ -1341,9 +1421,15 @@ fn reuse(
             return Err(format!("{why}{left}"));
         }
     }
-    let vouched = match voucher.vouch {
-        Vouch::PnpmFrozenOffline => pnpm_vouch(settings, u, &snap_dir),
-        Vouch::NpmDryRun => npm_vouch(settings, u, &snap_dir),
+    let vouched = match voucher {
+        Voucher::Pnpm => pnpm_vouch(settings, u, &snap_dir),
+        Voucher::Npm => {
+            println!(
+                "snapshot: checking node_modules in {} with npm",
+                unit_label(u)
+            );
+            npm_vouch(settings, u, &snap_dir, &set)
+        }
     };
     if let Err(why) = vouched {
         let left = rollback(&cloned);
@@ -1364,6 +1450,7 @@ fn pnpm_vouch(settings: &crate::config::Settings, u: &Unit, snap_dir: &Path) -> 
                 .to_string_lossy()
                 .starts_with(".pnpm-workspace-state")
             {
+                // best effort: pnpm's frozen install below rewrites or rejects the state
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -1836,9 +1923,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_link_outside_the_snapshot_is_refused_and_a_workspace_link_is_not() {
-        let d = std::env::temp_dir().join(format!("outside-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
-        let snapshot = d.join("snap");
+        let scratch = std::env::temp_dir().join(format!("outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
+        let snapshot = scratch.join("snap");
         let nm = snapshot.join("node_modules");
         std::fs::create_dir_all(snapshot.join("packages/a")).unwrap();
         std::fs::create_dir_all(nm.join(".bin")).unwrap();
@@ -1860,7 +1947,35 @@ mod tests {
         std::fs::remove_file(nm.join(".bin/evil")).unwrap();
         std::os::unix::fs::symlink("../../outside", nm.join("up")).unwrap();
         assert_eq!(link_outside(&nm, &roots).unwrap(), Some(nm.join("up")));
-        let _ = std::fs::remove_dir_all(&d); // scratch dir: absent is fine
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
+    }
+
+    #[test]
+    fn npms_hidden_lockfile_is_skipped_in_the_root_node_modules_only() {
+        let scratch = std::env::temp_dir().join(format!("hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
+        let nested = scratch.join("a/node_modules");
+        std::fs::create_dir_all(&nested).unwrap();
+        let record = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::write(scratch.join(".package-lock.json"), "new").unwrap();
+        let skips = Voucher::Npm.skip_files(true);
+        assert_eq!(newer_than(&scratch, record, skips).unwrap(), None);
+        std::fs::write(nested.join(".package-lock.json"), "new").unwrap();
+        assert_eq!(
+            newer_than(&scratch, record, skips).unwrap(),
+            Some(nested.join(".package-lock.json"))
+        );
+        let _ = std::fs::remove_dir_all(&scratch); // scratch dir: absent is fine
+    }
+
+    #[test]
+    fn counts_are_one_line_of_three_numbers() {
+        assert_eq!(parse_counts("counts=0 1 2\nfirst=a@1"), Some([0, 1, 2]));
+        assert_eq!(parse_counts(""), None);
+        assert_eq!(parse_counts("counts=0 1"), None);
+        assert_eq!(parse_counts("counts=0 1 2 3"), None);
+        assert_eq!(parse_counts("counts=0 x 2"), None);
+        assert_eq!(parse_counts("counts=0 0 0\ncounts=0 0 0"), None);
     }
 
     #[test]

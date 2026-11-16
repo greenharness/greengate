@@ -141,10 +141,10 @@ fn amont_env(
 ) -> (i32, String) {
     let mut cmd = crate::common::amont_cmd();
     cmd.args(args).current_dir(&repo.dir).stdin(Stdio::null());
-    cmd.envs(env.iter().copied());
     Repo::strip_git_env_impl(&mut cmd);
     cmd.env("GIT_CONFIG_GLOBAL", repo.dir.join("fake-gitconfig"));
     cmd.env("PATH", path_with(path_prefix));
+    cmd.envs(env.iter().copied());
     let out = cmd.output().expect("run amont");
     (
         out.status.code().unwrap_or(-1),
@@ -681,7 +681,7 @@ fn a_bun_lockfile_is_refused_with_the_fix_named() {
 // --------------------------------------------------------------- reuse mode
 
 const NPM_DRY_RUN: &str =
-    "npm install --dry-run --offline --ignore-scripts --json --no-audit --no-fund";
+    "npm install --dry-run --offline --ignore-scripts --json --no-audit --no-fund --no-update-notifier";
 const NPM_NOTHING_TO_DO: &str =
     "add node_modules/a 1.0.0\n{\"added\":0,\"add\":[],\"remove\":[],\"change\":[]}\n";
 
@@ -711,7 +711,15 @@ fn npm_reuse_keeps_a_clone_npm_accepts() {
         "{out}"
     );
     assert!(!out.contains("pnpm"), "{out}");
-    assert!(logged(&r, "npm query .workspace"), "{}", stub_log(&r));
+    assert!(
+        out.contains("snapshot: checking node_modules in the root with npm"),
+        "{out}"
+    );
+    assert!(
+        logged(&r, "npm query .workspace --offline --no-update-notifier"),
+        "{}",
+        stub_log(&r)
+    );
     assert!(logged(&r, NPM_DRY_RUN), "{}", stub_log(&r));
     assert!(!logged(&r, "npm ci"), "nothing installed: {}", stub_log(&r));
     assert!(note(&r, "HEAD").contains("pre-push-suite"));
@@ -821,7 +829,7 @@ fn reuse_refuses_a_non_zero_exit_quoting_the_error_for_npm() {
             std::fs::remove_file(ctl(r).join("vouch.out")).unwrap();
             set(r, "vouch.err", "npm error offline\n");
         },
-        "npm install --dry-run exited with",
+        "npm install --dry-run exited 1: npm error offline",
     );
 }
 
@@ -857,6 +865,119 @@ fn npm_refuses_if_node(setup: impl FnOnce(&Repo), reason: &str) {
         return;
     }
     npm_refuses(setup, reason);
+}
+
+/// A working-tree lockfile that is not the commit's cannot vouch for it.
+#[test]
+fn a_different_lockfile_in_the_working_tree_means_install_for_npm() {
+    let (r, _) = npm_reuse_repo();
+    r.write("package-lock.json", "lock v1\n# uncommitted\n");
+    let (code, out) = rehearse(&r, &["--wait"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("lockfile differs from the commit's"), "{out}");
+    assert!(!logged(&r, "npm query"), "{}", stub_log(&r));
+    assert!(logged(&r, "npm ci"), "{}", stub_log(&r));
+    assert!(!out.contains("checking node_modules in"), "{out}");
+}
+
+/// A nested project with its own lockfile is its own unit: never cloned as
+/// the outer unit's member, prepared on its own.
+#[test]
+fn a_nested_npm_lockfile_is_its_own_unit() {
+    let (r, _) = js_repo(|r| {
+        npm_root(r);
+        r.stage("tools/package.json", "{\"name\":\"tools\"}\n");
+        r.stage("tools/package-lock.json", "tools lock\n");
+    });
+    installed(&r, "");
+    installed(&r, "tools");
+    // tools' working-tree lockfile is not the commit's: it must install.
+    r.write("tools/package-lock.json", "tools lock, edited\n");
+    r.git(&["config", "greengate.snapshotDeps", "reuse"]);
+    set(&r, "members.out", "[{\"location\":\"tools\"}]\n");
+    set(&r, "vouch.out", NPM_NOTHING_TO_DO);
+    let (code, out) = rehearse(&r, &["--wait"]);
+    assert_eq!(code, 0, "{out}\n{}", stub_log(&r));
+    assert!(out.contains("in the root reused"), "{out}");
+    assert!(out.contains("in tools/"), "{out}");
+    assert!(
+        stub_log(&r)
+            .lines()
+            .any(|l| l.starts_with("npm ci") && l.ends_with("/tools")),
+        "{}",
+        stub_log(&r)
+    );
+    assert!(!logged(&r, "STALE"), "{}", stub_log(&r));
+}
+
+/// Only the units the push touches are prepared, in reuse mode too.
+#[test]
+fn an_untouched_npm_unit_is_not_prepared_in_reuse_mode() {
+    let (r, _) = js_repo(|r| {
+        npm_root(r);
+        r.stage("spikes/s/package.json", "{\"name\":\"s\"}\n");
+        r.stage("spikes/s/package-lock.json", "spike lock\n");
+    });
+    installed(&r, "");
+    installed(&r, "spikes/s");
+    r.git(&["config", "greengate.snapshotDeps", "reuse"]);
+    r.git(&["config", "branch.feat/x.remote", "."]);
+    r.git(&["config", "branch.feat/x.merge", "refs/heads/main"]);
+    set(&r, "members.out", "[]\n");
+    set(&r, "vouch.out", NPM_NOTHING_TO_DO);
+    let (code, out) = rehearse(&r, &["--wait"]);
+    assert_eq!(code, 0, "{out}\n{}", stub_log(&r));
+    assert!(out.contains("not preparing spikes/s/"), "{out}");
+    assert!(out.contains("in the root reused"), "{out}");
+    assert!(
+        !stub_log(&r).lines().any(|l| l.ends_with("/spikes/s")),
+        "{}",
+        stub_log(&r)
+    );
+}
+
+/// No node on PATH: the voucher cannot read npm's output, says so and how to
+/// fix it, leaves no clone behind and installs.
+#[test]
+fn reuse_without_node_refuses_names_node_and_installs() {
+    let (r, _) = npm_reuse_repo();
+    let tools = r.dir.join(".stubs/path");
+    std::fs::create_dir_all(&tools).unwrap();
+    for name in [
+        "git", "sh", "cat", "basename", "find", "grep", "mkdir", "cp", "rm", "sleep", "uname",
+        "env", "dirname", "tr", "sed", "head", "wc", "ls", "date", "mktemp", "hostname", "cut",
+    ] {
+        if let Some(found) = which_path(name) {
+            std::os::unix::fs::symlink(found, tools.join(name)).unwrap();
+        }
+    }
+    let path = format!(
+        "{}:{}",
+        stubs_dir(&r).join("bin").display(),
+        tools.display()
+    );
+    let (code, out) = amont_env(
+        &r,
+        &["rehearse", "--wait"],
+        None,
+        &[("PATH", path.as_str())],
+    );
+    assert_eq!(code, 0, "{out}\n{}", stub_log(&r));
+    assert!(
+        out.contains(
+            "node not found on PATH (needed to read npm's output); put node on PATH, \
+             or git config greengate.snapshotDeps install"
+        ),
+        "{out}"
+    );
+    assert!(logged(&r, "npm ci"), "{}", stub_log(&r));
+    assert!(!logged(&r, "STALE"), "{}", stub_log(&r));
+}
+
+fn which_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn pnpm_root(r: &Repo) {
@@ -937,6 +1058,7 @@ fn pnpm_reuse_keeps_a_clone_pnpm_accepts() {
         out.contains("reused from the working tree — pnpm accepted it"),
         "{out}"
     );
+    assert!(!out.contains("checking node_modules in"), "{out}");
     assert!(
         logged(
             &r,
@@ -1605,6 +1727,83 @@ fn real_npm_accepts_a_matching_clone_and_refuses_a_mismatch() {
     );
     assert!(out.contains("npm ci failed"), "{out}");
     assert!(!out.contains("pnpm"), "{out}");
+}
+
+/// `touch` with the given extra arguments: `File::set_modified` is newer
+/// than the repository's minimum Rust version.
+fn touch(path: &Path, args: &[&str]) {
+    let status = Command::new("touch")
+        .args(args)
+        .arg(path)
+        .status()
+        .expect("touch");
+    assert!(status.success(), "touch {args:?} {}", path.display());
+}
+
+/// Every file under `dir` gets a modification time long before any install.
+fn set_mtimes_back(dir: &Path) {
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            set_mtimes_back(&entry.path());
+        } else if kind.is_file() {
+            touch(&entry.path(), &["-t", "200109090000"]);
+        }
+    }
+}
+
+/// The hidden lockfile is made the newest file, as an install leaves it.
+fn touch_hidden_lockfile(r: &Repo) {
+    touch(&r.dir.join("node_modules/.package-lock.json"), &[]);
+}
+
+/// A tree npm would change is refused with npm's own counts, and `npm ci`
+/// installs instead.
+fn real_npm_refuses_a_damaged_tree(damage: impl FnOnce(&Repo)) {
+    let Some((r, _)) = real_repo("npm") else {
+        return;
+    };
+    damage(&r);
+    let (code, out) = real(&r, &["--wait"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("not reusing the working tree's install"),
+        "{out}"
+    );
+    assert!(out.contains("npm would add"), "{out}");
+    assert!(!out.contains("reused from the working tree"), "{out}");
+    assert!(out.contains("npm ci"), "{out}");
+}
+
+#[test]
+fn real_npm_refuses_a_package_raised_in_place_with_mtimes_set_back() {
+    real_npm_refuses_a_damaged_tree(|r| {
+        let manifest = r.dir.join("node_modules/a/package.json");
+        std::fs::write(&manifest, "{\"name\":\"a\",\"version\":\"1.0.1\"}").unwrap();
+        set_mtimes_back(&r.dir.join("node_modules"));
+        touch_hidden_lockfile(r);
+    });
+}
+
+#[test]
+fn real_npm_refuses_a_clone_with_a_package_deleted() {
+    real_npm_refuses_a_damaged_tree(|r| {
+        std::fs::remove_dir_all(r.dir.join("node_modules/a")).unwrap();
+    });
+}
+
+#[test]
+fn real_npm_refuses_a_clone_with_a_stray_package_directory() {
+    real_npm_refuses_a_damaged_tree(|r| {
+        let stray = r.dir.join("node_modules/stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(
+            stray.join("package.json"),
+            "{\"name\":\"stray\",\"version\":\"1.0.0\"}",
+        )
+        .unwrap();
+        set_mtimes_back(&stray);
+    });
 }
 
 #[test]
