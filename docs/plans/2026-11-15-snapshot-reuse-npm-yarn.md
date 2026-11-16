@@ -196,9 +196,41 @@ hook would cost a `du` per push.
   files): the kernel finishes the call, so a kill never leaves a partial
   tree, only a whole clone in the temp snapshot, the kill-leftover class that
   already exists. Cloning onto that leftover returns `EEXIST`.
-- Not measured: npm's trust of its hidden lockfile after a clone (e), workspace
-  discovery (c), and a real npm repo with an installed tree (application-landscape
-  moved to pnpm; fredericrous.com has no `node_modules`).
+- **npm, measured 2026-11-16** on activity-vision (`be20275`, 560 lockfile
+  packages, 25,143 files in `node_modules`), each tree on a private APFS
+  image: a fresh `npm ci --prefer-offline` takes 12.9 s and adds 368 MB
+  (median of 3); `clonefile(2)` plus the `npm install --dry-run --offline
+  --ignore-scripts --json` vouch takes 5.6 s (43% of the install) and adds
+  9.3 MB (2.5%). The faithful clone was accepted 3 times of 3, with
+  `package-lock.json` byte-identical after the dry-run. (e): the hidden
+  lockfile is OLDER than the newest directory of the clone, so npm distrusts
+  it and reads the tree. (f): a package version raised in place with its
+  file and directory mtimes set back before the record was still reported
+  (`changed=1`): npm vouches for the tree, not its record, which is stronger
+  than pnpm. (c): `npm query .workspace` lists `packages/a` and `packages/b`
+  as JSON `location`s (two `npm warn` lines go to stderr); members hold no
+  `node_modules` of their own, and the root's workspace links are relative
+  (`../packages/a`), inside the snapshot; the workspace clone was accepted.
+- **yarn 1, measured 2026-11-16** with the WHOLE voucher (the mtime scan
+  against `.yarn-integrity`, the outside-link refusal, then `yarn check
+  --integrity` and `--verify-tree`) on a workspace fixture: accepted the
+  faithful clone; refused fresh-mtime drift, out-of-range versions (also with
+  an old mtime), a fresh stray, a link outside the snapshot and a member
+  manifest the lockfile does not satisfy. It ACCEPTED five bad trees: a
+  missing package (`is-odd`, a member's dependency: a deletion leaves no
+  newer file, and `--verify-tree` did not notice), in-range drift with an old
+  mtime, a stray with an old mtime, nested drift in a member's
+  `node_modules` with an old mtime, and an in-place edit with an old mtime
+  (the last is pnpm's documented limit too). The real-repo timing on `web`
+  did not run: its `yarn install` failed on the network.
+
+**Gate decision (2026-11-16): npm GO, yarn 1 STOP.** npm meets the bar on
+both parts (zero false accepts beyond the shared in-place-edit limit, 43% of
+the install's time, 2.5% of its disk). yarn 1 fails safety on a missing
+package, which no timestamp can catch, so Phase 3 is not built: yarn units
+keep installing under `reuse`, and the docs and the refusal say why. Phase
+1b builds only what npm needs; the voucher seam stays a `match` so a later
+yarn or berry voucher is one more arm.
 
 Consequences for the phases: Phase 1a becomes `clonefile(2)` on macOS (an
 `extern "C"` declaration, no new crate) with the existing `cp` path only for
@@ -310,7 +342,7 @@ Files: `crates/greengate-runtime/src/snapshot_prep.rs`, `crates/greengate/tests/
 Per the table, plus the outside-the-snapshot symlink refusal, using Phase 1's
 `capture_stdout_within` and helper. Replace the `Manager::Npm` early return. The refusal reason comes from the parsed dry-run JSON (`npm would add N, remove N, change N: <first name@version>` or `package-lock.json would change`), never from `last_line` of the JSON.
 
-### Phase 3 — yarn 1 voucher (`crates/greengate-runtime/src/snapshot_prep.rs`, `crates/greengate/tests/it/snapshot_deps.rs`, `.github/workflows/ci.yaml`)
+### Phase 3 — yarn 1 voucher (`crates/greengate-runtime/src/snapshot_prep.rs`, `crates/greengate/tests/it/snapshot_deps.rs`, `.github/workflows/ci.yaml`) — NOT BUILT: yarn failed its Phase 0 gate (a missing package is accepted; Phase 0 results)
 
 Files: `crates/greengate-runtime/src/snapshot_prep.rs`, `crates/greengate/tests/it/snapshot_deps.rs`, `.github/workflows/ci.yaml`
 
