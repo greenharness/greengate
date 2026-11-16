@@ -362,7 +362,7 @@ Rewrite the `reuse` bullet in
 "Neither is yarn", add per-manager vouch, the yarn timestamp limit, berry and
 bun exclusions); `docs/custom-checks.md:342` mentions reuse; CHANGELOG entry;
 rustdoc at the top of `snapshot_prep.rs` and on `reuse`. Release greengate
-4.7.0 (4.6.0 shipped Phase 1a on 2026-11-16; new capability, minor) through the `tag-release` skill after the PR
+4.8.0 (4.6.0 shipped Phase 1a; 4.7.0 was cut by another session for #483 on 2026-11-16; new capability, minor) through the `tag-release` skill after the PR
 merges.
 
 ## Tests
@@ -490,5 +490,15 @@ Built on `feat/snapshot-reuse-npm`. Phase 3 (yarn) is not built: yarn 1 failed i
 - unix: approve; `cp -R -T` into a directory we created, modes and mtimes preserved, `LC_ALL=C` so the hint matches under any locale (24k, 30 s).
 
 deliberate: the Linux reflink mount and the two tmpfs tests cannot run on this Mac; they are proven by the pull request's checks, and a failure there is fixed on this branch.
+
+## Implementation review (Phases 1b, 2 and 4)
+
+- implementation-review: approve after round 1 and two Deltas (102k, 53k, 51k tokens); the blocking findings (no outcome record, discarded errors, a `d` name, a bool flag on `skip_files`) fixed; candidates ruled.
+- backend: approve; the hidden-lockfile concern measured not to reproduce on npm 11.9.0, the clone's `.package-lock.json` removed anyway; lockfile restored before an error; real-npm refusals added (45k tokens, 32 s on the last pass).
+- lang:rust: approve; the SIGPIPE blocker removed by giving node an unlinked file as stdin, never a pipe; one `Voucher` enum; typed spawn errors; strict counts (27k, 44 s).
+- tui: approve; the docs and CHANGELOG no longer claim npm catches a file edited in place; the checking line added; the wording fixes (43k, 24 s).
+- unix: approve; `--offline --no-update-notifier`, no `NODE_OPTIONS`, an owner-only temp file deleted as soon as it is written (26k, 38 s).
+
+deliberate: the `snapshot:` progress lines stay on stdout, like every other line in the file; moving them is its own change. The Windows npm path is not run (clone_dir refuses off macOS and Linux, so it is never reached). Next: release greengate 4.8.0 (rebased onto 4.7.0; the patch is unchanged but for CHANGELOG context, per range-diff).
 
 <!-- panel: repos=amont adds= reviewers=backend,lang:rust,unix,tui,po,architect body-sha=ee6f3bf135f8 -->
