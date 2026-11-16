@@ -153,7 +153,7 @@ Monitor. The commit gate does not change.
   `tests/corpus/land-detached.cases`.
 
 ## Phases
-- [ ] Phase 1 — greengate: `--detach` with the pinned sha, the worker, the lock, `--wait`, the receipt fields and atomic writes. `crates/greengate-runtime/src/land.rs`, `crates/greengate-runtime/src/names.rs`, `crates/greengate/src/main.rs` (help), `crates/greengate/tests/it/land.rs`, `crates/greengate/tests/it/flows/land.rs`, `CHANGELOG.md`, `Cargo.toml`. Release greengate 4.7.0 and install it.
+- [ ] Phase 1 — greengate: `--detach` with the pinned sha, the worker, the lock, `--wait`, the receipt fields and atomic writes. `crates/greengate-runtime/src/land.rs`, `crates/greengate-runtime/src/names.rs`, `crates/greengate/src/main.rs` (help), `crates/greengate/tests/it/land.rs`, `crates/greengate/tests/it/flows/land.rs`, `CHANGELOG.md`, `Cargo.toml`. Release greengate 4.7.0 and install it. Code DONE on this branch (01ad7fc0..afa678ca); the release is next, after the merge, as 4.8.0 (4.7.0 was cut by another branch first); the box is ticked in the release commit.
 - [ ] Phase 2 — greenpiste: the guard reads `--detach` and `--wait`, the deferred assertion, the shared version probe, the `land-detached` rule. `crates/greenpiste-guard/src/land.rs`, `crates/greenpiste-guard/src/push_target.rs`, `crates/greenpiste-guard/src/rules/push_preflight.rs`, `crates/greenpiste-guard/src/assertions/land_retry.rs`, `crates/greenpiste-guard/src/rules/heavy_build_unqueued.rs`, `crates/greenpiste-guard/src/rules/land_detached.rs`, `crates/greenpiste-guard/src/rules/mod.rs`, `src/rule_table.rs`, `crates/greenpiste-guard/src/corpus.rs`, `crates/greenpiste-guard/tests/corpus/land-detached.cases`, `CHANGELOG.md`, `Cargo.toml`, `greenharness.toml`. Release greenpiste 5.2.0; pin greengate 4.7.0 and greenpiste 5.2.0 in grh (`catalog.toml`, `manifests/greenpiste.toml`), release grh, install.
 
 ## Decision log
@@ -163,6 +163,9 @@ Monitor. The commit gate does not change.
 - 2026-11-16 — Liveness is a held `flock`, read by `greengate land --wait`; macOS has no `flock` command, so the wait is a greengate subcommand, not a shell loop.
 - 2026-11-16 — Known gap: the hook cannot judge the final receipt of a detached land (PostToolUse fires at the launch); it journals the deferral, and the pinned sha bounds what can be pushed.
 - 2026-11-16 — The skill's F6 step is not changed in this plan; the advise rule carries the advice first.
+- 2026-11-16 — The receipt is a cross-repo contract that changes only by addition: `started`, `branch`, `pushed`, `status` stay required, and a status greenpiste does not know is `Unknown`, never a pass.
+- 2026-11-16 — A dead worker's `--wait` exits 1, as Behaviour says; the died lines tell it from a refusal (round-1 implementation review; the carried "exit 3" is not taken).
+- 2026-11-16 — Implementation was a relais run whose verification failed only on two relais.toml checks naming pre-rename crates (`amont-runtime`, `amont`); the candidate was committed by hand (relais decision `salvaged`). Fixing relais.toml changes this repo's trust hash, so it waits for the person's re-grant.
 
 ## Verification
 - Phase 1, launch: in a fixture repo, `greengate land --detach --json` exits 0 within 5 s and prints `status: detached` with a receipt path; the receipt reads `running` with a `worker_pid`.
@@ -180,9 +183,28 @@ Monitor. The commit gate does not change.
 - Phase 2, rule: a foreground `greengate land --json` with timeout 600000 on greengate 4.7.0 → advised, with the rewritten command; with timeout 120000, or greengate 4.6.0 → no finding.
 - Phase 2, live: after install, one real `greengate land --detach` from a task worktree, then `--wait` under Monitor, ends `landed`.
 
+Observed on tree 90bf8c50 (`cargo test -p greengate --features test-hooks --test it -- land_detach::`, 16 passed, 0 failed; the commit gate's full suite passed):
+- launch, finish: `a_detached_land_returns_at_once_and_finishes_landed` → exit 0, receipt `landed`, `pushed` = `judged` = remote tip.
+- pinned sha: `a_commit_made_after_the_launch_is_never_pushed` → refused, remote unchanged.
+- hook moved HEAD: `a_hook_that_moves_head_is_refused_and_never_retried` → refused, `retried: false`, log says "pre-push hook moved HEAD", remote unchanged.
+- startup: `an_immediate_wait_after_each_launch_never_reports_a_death` → 5 rounds, each exit 0, no died line. Short of the plan's 50 rounds.
+- lock not leaked: `a_killed_worker_is_dead_within_a_poll_and_leaks_no_lock` → `kill -9` while the hook's `sleep 60` lives: died within 6 s, exit 1, next launch accepted. No `lsof` check was run.
+- race: `an_early_refusal_leaves_no_receipt_running` → 5 rounds, none left `running`. Short of the plan's 50.
+- dead worker: exit 1, died line names the log and a rerun with the original flags.
+- two lands: `a_second_launch_while_a_worker_lives_is_refused_and_names_the_receipt` → second refused naming the receipt and `--wait`; two intact logs.
+- flags: `--detach --dry-run` exit 2; `--wait` with any other flag exit 2; `--detach --tag v1 --force` exit 2; foreground `--json` keys unchanged.
+- added by review: an annotated tag lands detached; a refused launch under `--json` prints JSON; a missing tag adds no receipt; a worker given fd 1 finalizes `refused`; SIGTERM → `interrupted`, exit 143.
+
 ## Outcome
 
 Measure 7 days after the grh install, from transcripts with t04's script: the share of `greengate land` / `amont land` calls that hit 600 s or ran in the background without a receipt (baseline 201 of 203; target below 1 in 5). Count detached receipts ending `interrupted` or dead `running`, and any with `pushed` different from `judged`. Rollback: the rule goes off and the guard refuses `--detach` if dead or interrupted lands exceed 1 in 10, or on any `pushed` different from `judged`. Not addressed: the `git commit` chains t04 counted (t05 keeps the commit gate). Watch the `refused` receipts: a repo whose pre-push hook fast-forwards HEAD loses the detached form; if that is most refusals, add one retry on the new HEAD after the guard judges it.
+
+## Implementation review
+- implementation-review: round 1 approve-with-changes (4 blocking, 2 medium, 2 low); deltas resolved them; last delta approve-with-changes on 90bf8c50, the plan record answered here. Deliberate: the Phase 1 box waits for the release; `finish(json_out: bool)` predates this branch (only its visibility widened); the test's replace relies on compact receipt JSON.
+- code-review-backend: round 1 approve-with-changes (1 high: annotated tags; 2 medium, 2 low); delta 1 medium (no push the receipt cannot record), fixed; last delta approve.
+- code-review-language (rust): round 1 approve-with-changes (5 medium, 1 low); deltas resolved; last delta approve-with-changes (2 low, cosmetic).
+- code-review-unix: round 1 approve-with-changes (2 medium, 3 low); resolved; last delta approve.
+- Follow-up ticket: `set_cloexec` returning `io::Result`; the parser's flags as an `Invocation` enum; `finish`'s bool as an output enum; one `Meta` builder; relais.toml's pre-rename crate names (needs the person's re-grant).
 
 ## Full reviews (reference)
 - backend: round 1 rework (3 blocking, 1 high, 1 medium, 1 low); round 2 approve-with-changes (2 high, 1 medium, 1 low); delta 1 high (lock leak); final approve.
