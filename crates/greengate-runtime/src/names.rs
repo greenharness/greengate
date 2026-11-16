@@ -152,8 +152,8 @@ pub const PACK_FILE: &str = "greengate.pack";
 pub const AGENTS_START: &str = "<!-- greengate:start -->";
 pub const AGENTS_END: &str = "<!-- greengate:end -->";
 
-/// The `list --json` envelope. greenpiste and relais read it and the old
-/// `amont-list-v1` alike, from greenpiste 3.30.0 and relais 0.54.0.
+/// The `list --json` envelope. greenbelay and relais read it and the old
+/// `amont-list-v1` alike, from the hook's 3.30.0 and relais 0.54.0.
 pub const LIST_FORMAT: &str = "greengate-list-v1";
 
 /// The migration's lock and its done-marker, in the common dir.
@@ -209,9 +209,9 @@ pub mod old {
     pub const CONFIG_PREFIX: &str = "amont.";
     /// The environment variables' prefix.
     pub const ENV_PREFIX: &str = "AMONT_";
-    /// greenpiste's own keys under that namespace: not greengate's to move.
+    /// greenbelay's own keys under that namespace: not greengate's to move.
     pub const FOREIGN_PREFIX: &str = "amont.agent.";
-    /// greenpiste's own environment variables: not greengate's to move.
+    /// greenbelay's own environment variables: not greengate's to move.
     pub const FOREIGN_ENV_PREFIX: &str = "AMONT_AGENT_";
     /// The held store, never moved (see `migrate`'s module doc).
     pub const HELD_STORE: &str = "amont-held";

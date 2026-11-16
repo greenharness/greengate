@@ -8,6 +8,16 @@ missing here.
 
 ## Unreleased
 
+### Changed
+
+- **greenpiste is now greenbelay** (ADR-0071). greengate reads greenbelay's
+  provenance payloads from `<config dir>/greenbelay/provenance` (then
+  `amont-agent`'s directory, until the census), `greenharness-quiet` counts
+  greenbelay's `.greenbelay-tmp-*` temps and `tool = "greenbelay"` entries,
+  and CI fetches the excerpt fixtures from `greenharness/greenbelay`. Install
+  greenbelay 6.0.0 with this release: greengate no longer reads greenpiste's
+  names.
+
 ## v4.9.0
 
 ### Added

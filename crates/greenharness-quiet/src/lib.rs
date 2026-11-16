@@ -207,10 +207,10 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     done
 }
 
-/// greenpiste's temp prefix, which replaces [`LEGACY_AMONT_AGENT_TEMP_PREFIX`].
-const GREENPISTE_TEMP_PREFIX: &str = ".greenpiste-tmp-";
-/// greenpiste's `tool` value, which replaces [`LEGACY_AMONT_AGENT_TOOL`].
-const GREENPISTE_TOOL: &str = "greenpiste";
+/// greenbelay's temp prefix, which replaces [`LEGACY_AMONT_AGENT_TEMP_PREFIX`].
+const GREENBELAY_TEMP_PREFIX: &str = ".greenbelay-tmp-";
+/// greenbelay's `tool` value, which replaces [`LEGACY_AMONT_AGENT_TOOL`].
+const GREENBELAY_TOOL: &str = "greenbelay";
 
 // holds-until: the gate-guardrails programme census (ADR-0068) finds no
 // program still writing these two.
@@ -220,19 +220,19 @@ const LEGACY_AMONT_AGENT_TEMP_PREFIX: &str = ".amont-agent-tmp-";
 const LEGACY_AMONT_AGENT_TOOL: &str = "amont-agent";
 
 /// Whether the `tool` value an entry carries names the same tool as `wanted`,
-/// greenpiste and its former name amont-agent counting as one.
+/// greenbelay and its former name amont-agent counting as one.
 fn same_tool(found: Option<&str>, wanted: &str) -> bool {
-    let is_greenpiste = |name: &str| name == GREENPISTE_TOOL || name == LEGACY_AMONT_AGENT_TOOL;
-    found.is_some_and(|f| f == wanted || (is_greenpiste(f) && is_greenpiste(wanted)))
+    let is_greenbelay = |name: &str| name == GREENBELAY_TOOL || name == LEGACY_AMONT_AGENT_TOOL;
+    found.is_some_and(|f| f == wanted || (is_greenbelay(f) && is_greenbelay(wanted)))
 }
 
 /// Whether `name` is a temp some writer leaves while it writes: this crate's
 /// `.<id>.json.tmp`; amont's `<id>.json.tmp`, which writers used before it;
-/// and greenpiste's `.greenpiste-tmp-*.json` (`.amont-agent-tmp-*.json`
+/// and greenbelay's `.greenbelay-tmp-*.json` (`.amont-agent-tmp-*.json`
 /// before its rename).
 fn is_temp(name: &str) -> bool {
     name.ends_with(".json.tmp")
-        || ((name.starts_with(GREENPISTE_TEMP_PREFIX)
+        || ((name.starts_with(GREENBELAY_TEMP_PREFIX)
             || name.starts_with(LEGACY_AMONT_AGENT_TEMP_PREFIX))
             && name.ends_with(".json"))
 }
@@ -556,7 +556,7 @@ mod tests {
             ".1-0.json.tmp",
             "1-1.json.tmp",
             ".amont-agent-tmp-1-2.json",
-            ".greenpiste-tmp-1-3.json",
+            ".greenbelay-tmp-1-3.json",
         ];
         for t in temps {
             w(t, "");
@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn greenpiste_and_amont_agent_entries_are_one_tool() {
+    fn greenbelay_and_amont_agent_entries_are_one_tool() {
         let dir = scratch("sweep-renamed");
         fs::create_dir_all(&dir).unwrap();
         let write_entry = |name: &str, body: &str| fs::write(dir.join(name), body).unwrap();
@@ -600,19 +600,19 @@ mod tests {
             "old-name.json",
             r#"{"tool":"amont-agent","pid":2147483632}"#,
         );
-        write_entry("new-name.json", r#"{"tool":"greenpiste","pid":2147483632}"#);
+        write_entry("new-name.json", r#"{"tool":"greenbelay","pid":2147483632}"#);
         write_entry("other.json", r#"{"tool":"amont","pid":2147483632}"#);
-        sweep(&dir, "greenpiste", now_ms());
+        sweep(&dir, "greenbelay", now_ms());
         let gone = |n: &str| !dir.join(n).exists();
         if cfg!(unix) {
             assert!(gone("old-name.json"), "the former name is the same tool");
             assert!(gone("new-name.json"));
         }
         assert!(!gone("other.json"), "another tool's entry is its own");
-        assert!(same_tool(Some("greenpiste"), "amont-agent"));
+        assert!(same_tool(Some("greenbelay"), "amont-agent"));
         assert!(same_tool(Some("amont"), "amont"));
-        assert!(!same_tool(Some("amont"), "greenpiste"));
-        assert!(!same_tool(None, "greenpiste"));
+        assert!(!same_tool(Some("amont"), "greenbelay"));
+        assert!(!same_tool(None, "greenbelay"));
     }
 
     #[test]

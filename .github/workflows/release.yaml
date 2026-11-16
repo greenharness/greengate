@@ -159,7 +159,7 @@ jobs:
       # feature.
       #
       # `amont-agent` used to be a third. It is its own project now —
-      # github.com/greenharness/greenpiste — with its own release.
+      # github.com/greenharness/greenbelay — with its own release.
       - run: cargo build --release --target ${{ matrix.target }} --bin greengate --bin greengate-fleet
 
       - name: Archive

@@ -69,7 +69,7 @@ jobs:
           set -euo pipefail
           # Through the API, not raw.githubusercontent.com, which throttles
           # anonymous reads like the release web route (504s on 2026-11-08).
-          path=repos/greenharness/greenpiste/contents/tests/fixtures/excerpt/MANIFEST.sha256
+          path=repos/greenharness/greenbelay/contents/tests/fixtures/excerpt/MANIFEST.sha256
           ours=crates/greengate/tests/fixtures/excerpt/MANIFEST.sha256
           for attempt in 1 2 3; do
             rc=0

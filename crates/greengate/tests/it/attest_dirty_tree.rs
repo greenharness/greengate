@@ -206,7 +206,7 @@ fn a_push_with_provenance_writes_no_amont_named_ref() {
     assert_eq!(old_name_refs(&r.dir), "", "local: {out}");
 }
 
-/// A payload an older greenpiste wrote is kept, named in the output, and
+/// A payload an older release of the hook wrote is kept, named in the output, and
 /// nothing is published for it, under any name.
 #[test]
 fn a_legacy_provenance_payload_is_kept_and_no_amont_ref_is_written() {
@@ -217,7 +217,10 @@ fn a_legacy_provenance_payload_is_kept_and_no_amont_ref_is_written() {
     let (code, out) = push_hook_env(&r, &base, &origin, &[("CLAUDE_CONFIG_DIR", &config)]);
     assert_eq!(code, 0, "{out}");
     assert!(file.exists(), "kept: {out}");
-    assert!(out.contains("written by an older greenpiste"), "{out}");
+    assert!(
+        out.contains("written by an older release of the hook"),
+        "{out}"
+    );
     assert!(out.contains(&file.display().to_string()), "{out}");
     assert!(
         !note_refs(&origin).contains("provenance"),
