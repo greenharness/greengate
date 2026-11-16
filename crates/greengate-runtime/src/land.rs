@@ -385,12 +385,11 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
                 "" => return Err("--wait needs a receipt path".to_string()),
                 path => options.wait = Some(path.to_string()),
             },
-            _ => {
-                return Err(
-                    "takes no arguments, only [--force] [--json] [--dry-run] [--tag <name>] \
-                     [--detach], or --wait <receipt> alone"
-                        .to_string(),
-                )
+            other => {
+                return Err(format!(
+                    "unknown argument `{other}`; takes only [--force] [--json] [--dry-run] \
+                     [--tag <name>] [--detach], or --wait <receipt> alone"
+                ))
             }
         }
     }
@@ -399,6 +398,9 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
     }
     if options.detach && options.dry_run {
         return Err("--detach cannot be combined with --dry-run".to_string());
+    }
+    if options.tag.is_some() && options.mode() == Mode::Force {
+        return Err("a tag is never forced; --tag takes no --force".to_string());
     }
     if options.worker && (options.receipt.is_none() || options.lock_fd.is_none()) {
         return Err("--worker is internal: it needs --receipt and --lock-fd".to_string());
@@ -429,10 +431,7 @@ pub fn command(args: &[OsString]) -> i32 {
         return launch_of(&options);
     }
     if let Some(name) = options.tag.clone() {
-        if mode == Mode::Force {
-            eprintln!("{BIN}: land: a tag is never forced; --tag takes no --force");
-            return finish(&Report::new(Status::Usage), json_out);
-        }
+        // `parse_options` already refused --tag with --force (usage, exit 2).
         if dry_run {
             let (report, verdict) = dry_run_tag(&name);
             say_dry_run(&report, verdict);

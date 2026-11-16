@@ -16,8 +16,8 @@ use crate::posix_signal::{libc_pipe, libc_read, libc_signal, libc_write, SIGHUP,
 use std::fs::File;
 use std::os::unix::io::FromRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How often `--wait` reads the receipt.
@@ -26,8 +26,9 @@ const WAIT_POLL: Duration = Duration::from_secs(2);
 /// How long a launch waits for another launch's check to end.
 const LAUNCH_LOCK_BUDGET: Duration = Duration::from_secs(10);
 
-/// Exit code of `--wait` when the worker died without finalizing.
-const WORKER_DIED: i32 = 3;
+/// Exit code of `--wait` when the worker died without finalizing: a
+/// refusal, as the plan says; the died lines tell it apart.
+const WORKER_DIED: i32 = 1;
 
 /// `word` single-quoted, so it pastes into any shell.
 fn quoted(word: &str) -> String {
@@ -43,7 +44,7 @@ fn shell_word(word: &str) -> String {
     if plain {
         word.to_string()
     } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
+        quoted(word)
     }
 }
 
@@ -125,18 +126,19 @@ fn code_of_word(word: &str) -> i32 {
     }
 }
 
-fn judged_head(tag: Option<&str>) -> String {
-    let args = match tag {
-        Some(name) => vec![
-            "rev-parse".to_string(),
-            "--verify".to_string(),
-            "-q".to_string(),
-            format!("refs/tags/{name}^{{commit}}"),
-        ],
-        None => vec!["rev-parse".to_string(), "HEAD".to_string()],
-    };
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    crate::git::stdout(&args).unwrap_or_default()
+/// The object the land will push, as `land` resolves it: HEAD, or the tag
+/// itself (an annotated tag is its tag object, not the commit it points
+/// at, so it matches what `resolve_tag` pushes). `None` when git cannot
+/// name it.
+fn judged_head(tag: Option<&str>) -> Option<String> {
+    match tag {
+        Some(name) => {
+            let dst = format!("refs/tags/{name}");
+            crate::git::stdout(&["rev-parse", "--verify", "-q", &dst])
+        }
+        None => crate::git::stdout(&["rev-parse", "HEAD"]),
+    }
+    .filter(|sha| !sha.is_empty())
 }
 
 /// The receipt a land has until its worker takes it over: what the launcher
@@ -160,18 +162,23 @@ fn skeleton(options: &Options) -> Report {
     report
 }
 
-fn refused_launch(why: &str) -> i32 {
+/// A launch that does not start a worker: the reason on stderr, and under
+/// `--json` the refused document on stdout, as every other land prints one.
+fn refused_launch(json: bool, why: &str) -> i32 {
     eprintln!("{BIN}: land: {why}");
-    1
+    finish(&Report::new(Status::Refused), json)
 }
 
 /// `land --detach`: judge, record, start the worker, print where to wait.
 pub(crate) fn launch(options: &Options) -> i32 {
     let Some(dir) = receipt_dir() else {
-        return refused_launch("could not find the git directory");
+        return refused_launch(options.json, "could not find the git directory");
     };
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        return refused_launch(&format!("could not create {}: {e}", dir.display()));
+        return refused_launch(
+            options.json,
+            &format!("could not create {}: {e}", dir.display()),
+        );
     }
     // The check for a live worker, the receipt and the spawn are one step:
     // two launches that pass the check together would both start.
@@ -182,22 +189,36 @@ pub(crate) fn launch(options: &Options) -> i32 {
         .open(dir.join("land.lock"))
     {
         Ok(file) => file,
-        Err(e) => return refused_launch(&format!("could not open the launch lock: {e}")),
+        Err(e) => {
+            return refused_launch(
+                options.json,
+                &format!("could not open the launch lock: {e}"),
+            )
+        }
     };
     if !crate::fdlock::exclusive_within(&launch_lock, LAUNCH_LOCK_BUDGET) {
-        return refused_launch("another launch is in progress; try again");
+        return refused_launch(options.json, "another launch is in progress; try again");
     }
     if let Some(live) = live_receipt(&dir) {
-        eprintln!(
-            "{BIN}: land: a detached land is already running: {}\n    {}",
+        let why = format!(
+            "a detached land is already running: {}\n    {}",
             live.display(),
             wait_command(&live)
         );
-        return 1;
+        return refused_launch(options.json, &why);
     }
     crate::land::prune_receipts(&dir);
 
-    let judged = judged_head(options.tag.as_deref());
+    let Some(judged) = judged_head(options.tag.as_deref()) else {
+        let what = options
+            .tag
+            .as_deref()
+            .map_or_else(|| "HEAD".to_string(), |name| format!("the tag {name}"));
+        return refused_launch(
+            options.json,
+            &format!("no commit to judge: git cannot resolve {what}"),
+        );
+    };
     let started = now_nanos();
     let receipt = dir.join(format!("{started}-{}.json", std::process::id()));
     let log = receipt.with_extension("log");
@@ -208,10 +229,15 @@ pub(crate) fn launch(options: &Options) -> i32 {
         .open(lock_path(&receipt))
     {
         Ok(file) => file,
-        Err(e) => return refused_launch(&format!("could not open the receipt lock: {e}")),
+        Err(e) => {
+            return refused_launch(
+                options.json,
+                &format!("could not open the receipt lock: {e}"),
+            )
+        }
     };
     if !crate::fdlock::try_exclusive(&lock) {
-        return refused_launch("the receipt lock is already held");
+        return refused_launch(options.json, "the receipt lock is already held");
     }
     let report = skeleton(options);
     let meta = Meta {
@@ -222,10 +248,10 @@ pub(crate) fn launch(options: &Options) -> i32 {
     };
     let body = receipt_body(&report, "running", None, (started, None), Some(&meta));
     if let Err(e) = write_atomic(&receipt, &body) {
-        return refused_launch(&format!(
-            "could not write the receipt {}: {e}",
-            receipt.display()
-        ));
+        return refused_launch(
+            options.json,
+            &format!("could not write the receipt {}: {e}", receipt.display()),
+        );
     }
 
     let fd = std::os::unix::io::AsRawFd::as_raw_fd(&lock);
@@ -252,7 +278,7 @@ pub(crate) fn launch(options: &Options) -> i32 {
         if let Err(write_error) = write_atomic(&receipt, &body) {
             eprintln!("{BIN}: land: could not finalize the receipt: {write_error}");
         }
-        return refused_launch(&format!("could not start the worker: {e}"));
+        return refused_launch(options.json, &format!("could not start the worker: {e}"));
     }
     drop(launch_lock);
 
@@ -291,14 +317,18 @@ struct Finalizer {
     started: i64,
     meta: Meta,
     skeleton: Report,
-    done: AtomicBool,
+    /// Held for the whole final write: a signal that arrives during it waits
+    /// for the rename, so the process never exits with the receipt half done.
+    done: Mutex<bool>,
 }
 
 impl Finalizer {
     fn write(&self, report: &Report) {
-        if self.done.swap(true, Ordering::SeqCst) {
+        let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        if *done {
             return;
         }
+        *done = true;
         let mut report = report.clone();
         if report.branch.is_empty() && report.dst.is_empty() {
             report.branch = self.skeleton.branch.clone();
@@ -345,6 +375,12 @@ fn finalize_on_signals(fin: Arc<Finalizer>) {
         eprintln!("{BIN}: land: no signal pipe; a signal will not finalize the receipt");
         return;
     }
+    // Nothing the worker starts inherits the pipe.
+    for fd in fds {
+        if !crate::fdlock::set_cloexec(fd) {
+            eprintln!("{BIN}: land: could not set close-on-exec on the signal pipe");
+        }
+    }
     SIGNAL_PIPE_WRITE.store(fds[1], Ordering::SeqCst);
     let read_fd = fds[0];
     std::thread::spawn(move || {
@@ -364,6 +400,11 @@ fn finalize_on_signals(fin: Arc<Finalizer>) {
         let mut report = fin.skeleton.clone();
         report.status = Status::Interrupted(sig);
         fin.write(&report);
+        // A push may already have left: the remote state is unknown.
+        eprintln!(
+            "{BIN}: land: interrupted by signal {sig}; the remote state is unknown: check git ls-remote <remote> {}",
+            fin.skeleton.dst
+        );
         crate::fdlock::kill_group(std::process::id() as i32, SIGTERM);
         std::process::exit(128 + sig);
     });
@@ -377,18 +418,24 @@ fn finalize_on_signals(fin: Arc<Finalizer>) {
 
 /// The hidden `land --worker`: take the receipt, land the judged sha, finalize.
 pub(crate) fn worker(options: &Options) -> i32 {
+    // The parser refuses `--worker` without both (usage, exit 2); no
+    // receipt path is known here to finalize.
     let (Some(receipt), Some(lock_fd)) = (&options.receipt, options.lock_fd) else {
         return 2;
     };
-    // First: nothing this worker starts may hold the lock after it dies.
-    crate::fdlock::set_cloexec(lock_fd, true);
-    // SAFETY: the launcher passed this descriptor, an open lock file, and
-    // nothing else in this process owns it.
-    let _lock = unsafe { File::from_raw_fd(lock_fd) };
     let path = PathBuf::from(receipt);
+    // First: nothing this worker starts may hold the lock after it dies. A
+    // descriptor at 0-2 is stdio, never the lock; refuse rather than take it.
+    if lock_fd <= 2 || !crate::fdlock::set_cloexec(lock_fd) {
+        eprintln!("{BIN}: land: the lock descriptor {lock_fd} is not usable");
+        return finalize_refused(&path);
+    }
+    // SAFETY: the launcher passed this descriptor (checked above to be no
+    // stdio descriptor), an open lock file nothing else in this process owns.
+    let _lock = unsafe { File::from_raw_fd(lock_fd) };
     let Some(view) = read_view(&path) else {
         eprintln!("{BIN}: land: cannot read the receipt {receipt}");
-        return 1;
+        return finalize_refused(&path);
     };
     let mut skeleton = Report::new(Status::Refused);
     skeleton.branch = view.branch.clone();
@@ -414,7 +461,7 @@ pub(crate) fn worker(options: &Options) -> i32 {
         started: view.started,
         meta,
         skeleton,
-        done: AtomicBool::new(false),
+        done: Mutex::new(false),
     });
     finalize_on_signals(Arc::clone(&fin));
 
@@ -424,6 +471,27 @@ pub(crate) fn worker(options: &Options) -> i32 {
     };
     fin.write(&report);
     finish(&report, options.json)
+}
+
+/// A worker that cannot take its receipt over still finalizes it, so no
+/// `--wait` reads a dead `running` receipt.
+fn finalize_refused(path: &Path) -> i32 {
+    let report = Report::new(Status::Refused);
+    let now = now_nanos();
+    let body = receipt_body(
+        &report,
+        report.status.as_str(),
+        Some(report.status.code()),
+        (now, Some(now)),
+        None,
+    );
+    if let Err(e) = write_atomic(path, &body) {
+        eprintln!(
+            "{BIN}: land: could not finalize the receipt {}: {e}",
+            path.display()
+        );
+    }
+    report.status.code()
 }
 
 /// `land --wait <receipt>`.

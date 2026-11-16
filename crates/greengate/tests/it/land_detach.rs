@@ -230,6 +230,9 @@ fn a_hook_that_moves_head_is_refused_and_never_retried() {
     let body = receipt_text(&receipt_of(&launched));
     assert_eq!(receipt_field(&body, "status"), "refused");
     assert!(body.contains("\"retried\":false"), "{body}");
+    // Refused because the hook moved HEAD, not on some earlier path.
+    let log = std::fs::read_to_string(receipt_field(&body, "log")).expect("log");
+    assert!(log.contains("pre-push hook moved HEAD"), "{log}");
     assert_eq!(tip(&fx, "feat"), before);
 }
 
@@ -279,7 +282,11 @@ fn an_immediate_wait_after_each_launch_never_reports_a_death() {
             "round {round}: {}",
             waited.stdout
         );
-        assert!(waited.code == 0 || waited.code == 1, "{}", waited.stderr);
+        assert_eq!(
+            waited.code, 0,
+            "round {round}: {}{}",
+            waited.stdout, waited.stderr
+        );
         fx.r.stage(&format!("r{round}.txt"), "x\n");
         fx.r.commit(&format!("round {round}"));
     }
@@ -318,7 +325,7 @@ fn a_killed_worker_is_dead_within_a_poll_and_leaks_no_lock() {
         started.elapsed() < Duration::from_secs(6),
         "within one poll"
     );
-    assert_eq!(waited.code, 3, "{}{}", waited.stdout, waited.stderr);
+    assert_eq!(waited.code, 1, "{}{}", waited.stdout, waited.stderr);
     assert!(
         waited.stdout.contains(&format!("worker {worker} died")),
         "{}",
@@ -334,7 +341,7 @@ fn a_killed_worker_is_dead_within_a_poll_and_leaks_no_lock() {
     hook(&fx, "exit 0");
     let next = run(&fx, &["--detach", "--json"], None);
     for pid in std::fs::read_to_string(&pids).unwrap_or_default().lines() {
-        let _ = Command::new("kill").args(["-9", pid]).status();
+        let _ = Command::new("kill").args(["-9", pid]).status(); // cleanup: the pid may already be gone
     }
     assert_eq!(next.code, 0, "{}", next.stderr);
     assert_eq!(wait_for(&fx, &receipt_of(&next)).code, 0);
@@ -390,6 +397,51 @@ fn a_dry_run_cannot_be_detached_and_wait_stands_alone() {
     assert_eq!(run(&fx, &["--detach", "--wait", "x"], None).code, 2);
     let missing = run(&fx, &["--wait", "/nonexistent/receipt.json"], None);
     assert_eq!(missing.code, 2, "{}", missing.stderr);
+}
+
+#[test]
+fn an_annotated_tag_lands_detached() {
+    let fx = ahead();
+    plain_git(&fx.r.dir, &["tag", "-a", "v9", "-m", "release v9"]);
+    let launched = run(&fx, &["--detach", "--json", "--tag", "v9"], None);
+    assert_eq!(launched.code, 0, "{}", launched.stderr);
+    let waited = wait_for(&fx, &receipt_of(&launched));
+    assert_eq!(waited.code, 0, "{}{}", waited.stdout, waited.stderr);
+    let body = receipt_text(&receipt_of(&launched));
+    assert_eq!(receipt_field(&body, "status"), "landed");
+    assert_eq!(
+        receipt_field(&body, "pushed"),
+        receipt_field(&body, "judged")
+    );
+}
+
+#[test]
+fn a_detached_tag_is_never_forced() {
+    let fx = ahead();
+    let ran = run(&fx, &["--detach", "--tag", "v1", "--force"], None);
+    assert_eq!(ran.code, 2, "{}", ran.stderr);
+}
+
+#[test]
+fn a_refused_launch_under_json_still_prints_json() {
+    let fx = ahead();
+    let shim = parking_shim(&fx);
+    let first = run(&fx, &["--detach", "--json"], Some(&shim));
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    let second = run(&fx, &["--detach", "--json"], Some(&shim));
+    assert_eq!(second.code, 1, "{}", second.stderr);
+    assert!(
+        second.stdout.trim_start().starts_with('{'),
+        "{}",
+        second.stdout
+    );
+    assert!(
+        second.stdout.contains("\"status\":\"refused\""),
+        "{}",
+        second.stdout
+    );
+    release(&shim);
+    assert_eq!(wait_for(&fx, &receipt_of(&first)).code, 0);
 }
 
 #[test]

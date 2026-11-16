@@ -50,20 +50,26 @@ pub(crate) fn exclusive_within(file: &File, budget: Duration) -> bool {
     }
 }
 
-/// Set or clear `FD_CLOEXEC` on `fd`. Returns whether the call worked.
-pub(crate) fn set_cloexec(fd: i32, on: bool) -> bool {
+/// Set `FD_CLOEXEC` on `fd`: an exec'd child does not inherit it. Returns
+/// whether the call worked.
+pub(crate) fn set_cloexec(fd: i32) -> bool {
+    update_fd_flags(fd, |flags| flags | FD_CLOEXEC)
+}
+
+/// Clear `FD_CLOEXEC` on `fd`: an exec'd child inherits it. Returns whether
+/// the call worked.
+pub(crate) fn clear_cloexec(fd: i32) -> bool {
+    update_fd_flags(fd, |flags| flags & !FD_CLOEXEC)
+}
+
+fn update_fd_flags(fd: i32, change: impl Fn(i32) -> i32) -> bool {
     // SAFETY: fcntl on a descriptor number reads and writes only its flags.
     unsafe {
         let flags = libc_fcntl(fd, F_GETFD);
         if flags < 0 {
             return false;
         }
-        let wanted = if on {
-            flags | FD_CLOEXEC
-        } else {
-            flags & !FD_CLOEXEC
-        };
-        libc_fcntl(fd, F_SETFD, wanted) == 0
+        libc_fcntl(fd, F_SETFD, change(flags)) == 0
     }
 }
 

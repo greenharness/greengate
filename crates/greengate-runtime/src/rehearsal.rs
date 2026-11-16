@@ -692,7 +692,7 @@ pub fn spawn_amont(
         // fcntl, which is async-signal-safe.
         unsafe {
             cmd.pre_exec(move || {
-                if crate::fdlock::set_cloexec(fd, false) {
+                if crate::fdlock::clear_cloexec(fd) {
                     Ok(())
                 } else {
                     Err(std::io::Error::last_os_error())
