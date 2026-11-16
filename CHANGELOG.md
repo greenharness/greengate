@@ -8,6 +8,21 @@ missing here.
 
 ## Unreleased
 
+## v4.6.0
+
+### Changed
+
+- **`snapshotDeps reuse` clones or refuses; it never copies.** The clone of a
+  working tree's `node_modules` is now `clonefile(2)` on macOS and
+  `cp --reflink=always` on Linux, and the old plain-copy fallback is gone.
+  `cp -c` itself turned out to copy the whole tree silently, with exit 0, when
+  the snapshot's temp dir sits on another volume; `clonefile(2)` refuses
+  there. Measured on a 1.3 GB tree of 74,417 files: the clone adds 27.7 MB in
+  9.8 s, where the old fallback wrote 1.3 GB in 463 s. A refused clone prints
+  one line with the fix (set `TMPDIR` to a directory on the working tree's
+  volume, or `git config greengate.snapshotDeps install`) and the unit
+  installs, as before. npm and yarn still always install under `reuse`.
+
 ## v4.5.0
 
 ### Changed

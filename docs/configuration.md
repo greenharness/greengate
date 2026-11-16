@@ -568,7 +568,12 @@ like a broken branch rather than a missing install.
   and it refuses a `package.json` its lockfile does not satisfy — so does
   the snapshot.
 - **`reuse`** (pnpm only) clones the working tree's `node_modules`
-  (copy-on-write on APFS and btrfs: instant, no extra disk) — the root's
+  copy-on-write — `clonefile(2)` on macOS, `cp --reflink=always` on Linux
+  (btrfs, XFS with reflinks), about 2% of the tree's size in metadata — and
+  never falls back to a plain copy: on another volume or a filesystem that
+  cannot clone, it refuses in one line that names the fix (`TMPDIR` on the
+  working tree's volume, or `snapshotDeps install`) and installs instead —
+  the root's
   and each workspace member's, as `pnpm ls -r` lists them — and keeps the
   clone only when it is laid out the way pnpm's isolated linker leaves it
   (every package a link; a stray directory is refused, since pnpm's own
