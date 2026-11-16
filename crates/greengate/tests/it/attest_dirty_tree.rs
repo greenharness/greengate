@@ -165,16 +165,21 @@ fn old_name_refs(dir: &std::path::Path) -> String {
 }
 
 /// Writes a provenance payload for HEAD where greengate looks for it
-/// (`$CLAUDE_CONFIG_DIR/amont-agent/provenance/<repo>/<commit>`) and returns
-/// the config dir and the payload file.
-fn leave_provenance(r: &Repo, header: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+/// (`$CLAUDE_CONFIG_DIR/<owner>/provenance/<repo>/<commit>`: `greenbelay`, or
+/// the `amont-agent` fallback until the census) and returns the config dir and
+/// the payload file.
+fn leave_provenance(
+    r: &Repo,
+    owner: &str,
+    header: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let tip = head(r);
     let tree = String::from_utf8_lossy(&r.git(&["rev-parse", "HEAD^{tree}"]).stdout)
         .trim()
         .to_string();
     let config = r.path("claude-config");
     let name = r.dir.file_name().expect("repo dir name");
-    let dir = config.join("amont-agent").join("provenance").join(name);
+    let dir = config.join(owner).join("provenance").join(name);
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(&tip);
     std::fs::write(&file, format!("{header}\ncommit {tip}\ntree {tree}\n")).unwrap();
@@ -189,7 +194,8 @@ fn a_push_with_provenance_writes_no_amont_named_ref() {
     let Some((r, base, origin)) = signing_repo() else {
         return;
     };
-    let (config, file) = leave_provenance(&r, "greengate-provenance-v1");
+    // greenbelay's own directory, end to end (ADR-0071).
+    let (config, file) = leave_provenance(&r, "greenbelay", "greengate-provenance-v1");
     let (code, out) = push_hook_env(&r, &base, &origin, &[("CLAUDE_CONFIG_DIR", &config)]);
     assert_eq!(code, 0, "{out}");
     let remote = note_refs(&origin);
@@ -206,18 +212,21 @@ fn a_push_with_provenance_writes_no_amont_named_ref() {
     assert_eq!(old_name_refs(&r.dir), "", "local: {out}");
 }
 
-/// A payload an older greenpiste wrote is kept, named in the output, and
+/// A payload an older release of the hook wrote is kept, named in the output, and
 /// nothing is published for it, under any name.
 #[test]
 fn a_legacy_provenance_payload_is_kept_and_no_amont_ref_is_written() {
     let Some((r, base, origin)) = signing_repo() else {
         return;
     };
-    let (config, file) = leave_provenance(&r, "amont-provenance-v1");
+    let (config, file) = leave_provenance(&r, "amont-agent", "amont-provenance-v1");
     let (code, out) = push_hook_env(&r, &base, &origin, &[("CLAUDE_CONFIG_DIR", &config)]);
     assert_eq!(code, 0, "{out}");
     assert!(file.exists(), "kept: {out}");
-    assert!(out.contains("written by an older greenpiste"), "{out}");
+    assert!(
+        out.contains("written by an older release of the hook"),
+        "{out}"
+    );
     assert!(out.contains(&file.display().to_string()), "{out}");
     assert!(
         !note_refs(&origin).contains("provenance"),

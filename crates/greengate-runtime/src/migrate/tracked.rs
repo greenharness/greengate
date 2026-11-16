@@ -3,8 +3,8 @@
 //! lands one such commit per repository).
 //!
 //! Never part of the automatic first run: a tracked rename is a change to
-//! the repository, and greengate 3.x, greenpiste and relais before 0.54
-//! read only `amont.conf`, so it happens when someone asks for it.
+//! the repository, and greengate 3.x, the hook before its 3.30.0 and relais
+//! before 0.54 read only `amont.conf`, so it happens when someone asks for it.
 //!
 //! What it does, each step skipped when there is nothing to do:
 //!
@@ -240,7 +240,7 @@ fn leftovers(root: &Path, git: &GitFn<'_>) -> Result<(Vec<String>, usize), Migra
             ".",
         ],
     )?;
-    // A line naming only greenpiste's own variables is greenpiste's.
+    // A line naming only greenbelay's own variables is greenbelay's.
     let lines: Vec<String> = out
         .unwrap_or_default()
         .lines()

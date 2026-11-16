@@ -652,7 +652,7 @@ fn values(raw: &str) -> Vec<String> {
 /// without losing one), and the old key goes only once every value is
 /// present. A new key that holds a value of its own was set by the person:
 /// the new name wins, and the old values are dropped. `amont.agent.*` is
-/// greenpiste's, never moved. A `cluster.namespace` of `amont-gates` is
+/// greenbelay's, never moved. A `cluster.namespace` of `amont-gates` is
 /// dropped on the way forward: 4.0's default namespace is `greengate-gates`.
 pub fn move_keys(
     scope: &Scope,

@@ -59,7 +59,7 @@ const READ_NAMES: [git_attest::format::Names; 2] =
 pub const NOTES_FULL_REF: &str = "refs/notes/greengate-attest";
 pub const INPUTS_FULL_REF: &str = "refs/notes/greengate-attest-inputs";
 
-/// The header an older greenpiste wrote (until greengate 4.4). greengate no
+/// The header an older release of the hook wrote (until greengate 4.4). greengate no
 /// longer signs it: a payload that still carries it is kept and named, so
 /// nothing writes an `amont-provenance` note after the switch (ADR-0068,
 /// "writers switch once"). Removed at the census.
@@ -69,7 +69,7 @@ const PROVENANCE_LEGACY_FORMAT: &str = "amont-provenance-v1";
 /// what a push carried besides its tests, the plan and the verdicts on it.
 /// Its own ref, so CI's attestation verifier never reads it, and its own
 /// namespace, so a provenance signature is never accepted as an attestation.
-/// The green names, which greenpiste writes and greengate signs.
+/// The green names, which greenbelay writes and greengate signs.
 pub const PROVENANCE_REF: &str = "greengate-provenance";
 pub const PROVENANCE_FULL_REF: &str = "refs/notes/greengate-provenance";
 pub const PROVENANCE_NAMESPACE: &str = "greengate-provenance";
@@ -351,22 +351,22 @@ pub fn attest_push_per_tip(
     }
 }
 
-/// greenpiste's data directory under the Claude config dir.
-const PROVENANCE_OWNER: &str = "greenpiste";
-/// Its name before greenpiste 5.0 migrated it.
+/// greenbelay's data directory under the Claude config dir.
+const PROVENANCE_OWNER: &str = "greenbelay";
+/// Its name before the hook's 2026-11-15 data-name migration moved it.
 // holds-until: the gate-guardrails programme census (ADR-0068) finds no
 // machine still holding the old directory.
 const OLD_PROVENANCE_OWNER: &str = "amont-agent";
 
-/// Where greenpiste leaves each provenance payload, newest name first:
-/// `<config dir>/greenpiste/provenance`, then `<config dir>/amont-agent/
-/// provenance`, where payloads stay until greenpiste 5.0 migrates the machine.
-/// The config dir is resolved as greenpiste's `settings::config_dir` does
+/// Where greenbelay leaves each provenance payload, newest name first:
+/// `<config dir>/greenbelay/provenance`, then `<config dir>/amont-agent/
+/// provenance`, where payloads stay until the hook's migration moves them.
+/// The config dir is resolved as greenbelay's `settings::config_dir` does
 /// (`$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`, else `%USERPROFILE%\.claude`).
 ///
 /// Never a git config key: a key could point amont at a directory nobody
 /// guards, and the payload's `review` line is only as true as the guard on
-/// greenpiste's store. `env` is the lookup, so a test needs no global state.
+/// greenbelay's store. `env` is the lookup, so a test needs no global state.
 fn provenance_dirs(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<[PathBuf; 2]> {
     let config = match env("CLAUDE_CONFIG_DIR") {
         Some(d) => PathBuf::from(d),
@@ -449,7 +449,7 @@ fn provenance_push_from_dirs(dirs: &[PathBuf], remote: &str, refs: &[PushRef]) {
         if at > 0 && !named_old {
             named_old = true;
             crate::say!(
-                "  provenance read from {} (amont-agent's directory, until greenpiste 5.0 moves it)",
+                "  provenance read from {} (amont-agent's directory, until greenbelay migrates it)",
                 dirs[at].display()
             );
         }
@@ -460,7 +460,7 @@ fn provenance_push_from_dirs(dirs: &[PathBuf], remote: &str, refs: &[PushRef]) {
         let first = payload.lines().next().unwrap_or_default();
         let claimed = payload.lines().find_map(|l| l.strip_prefix("tree "));
         // Only the green header is signed (ADR-0068, "writers switch once").
-        // A payload an older greenpiste left keeps its file and is named:
+        // A payload an older release of the hook left keeps its file and is named:
         // signing it would write an `amont-provenance` note after the switch.
         if first == PROVENANCE_LEGACY_FORMAT {
             crate::say!("{}", legacy_provenance_line(&r.local_oid, &file));
@@ -557,11 +557,11 @@ struct PendingRecord {
     payload: String,
 }
 
-/// What is said for a payload an older greenpiste wrote: which file, why it
+/// What is said for a payload an older release of the hook wrote: which file, why it
 /// is kept, and the two ways out.
 fn legacy_provenance_line(commit: &str, file: &Path) -> String {
     format!(
-        "  provenance for {} not signed: {} was written by an older greenpiste: upgrade greenpiste, then delete {} or re-run its review",
+        "  provenance for {} not signed: {} was written by an older release of the hook: upgrade greenbelay, then delete {} or re-run its review",
         &commit[..commit.len().min(7)],
         file.display(),
         file.display()
@@ -600,10 +600,10 @@ fn canon_refusal(commit: &str, file: &std::path::Path) -> Vec<String> {
             "  provenance for {} not signed: its payload carries a canon line",
             &commit[..commit.len().min(7)]
         ),
-        "    (a pre-release greenpiste wrote it); delete the file".to_string(),
+        "    (a pre-release build of the hook wrote it); delete the file".to_string(),
         format!("    {name} in"),
         format!("    {dir}"),
-        "    and upgrade greenpiste".to_string(),
+        "    and upgrade greenbelay".to_string(),
     ]
 }
 
@@ -1095,7 +1095,7 @@ pub(crate) mod tests {
     #[test]
     fn each_payload_is_read_from_the_new_dir_first_then_the_old() {
         let config = dir("provenance-names");
-        let new = config.join("greenpiste/provenance/r");
+        let new = config.join("greenbelay/provenance/r");
         let old = config.join("amont-agent/provenance/r");
         let dirs = [new.clone(), old.clone()];
         assert_eq!(read_payload(&dirs, "c1"), None, "neither holds it");
@@ -1122,7 +1122,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_provenance_dir_is_resolved_like_greenpistes_config_dir() {
+    fn the_provenance_dir_is_resolved_like_greenbelays_config_dir() {
         use std::ffi::OsString;
         let env = |pairs: &'static [(&'static str, &'static str)]| {
             move |k: &str| {
@@ -1135,21 +1135,21 @@ pub(crate) mod tests {
         assert_eq!(
             provenance_dirs(env(&[("CLAUDE_CONFIG_DIR", "/c"), ("HOME", "/h")])),
             Some([
-                PathBuf::from("/c/greenpiste/provenance"),
+                PathBuf::from("/c/greenbelay/provenance"),
                 PathBuf::from("/c/amont-agent/provenance")
             ])
         );
         assert_eq!(
             provenance_dirs(env(&[("HOME", "/h"), ("USERPROFILE", "/u")])),
             Some([
-                PathBuf::from("/h/.claude/greenpiste/provenance"),
+                PathBuf::from("/h/.claude/greenbelay/provenance"),
                 PathBuf::from("/h/.claude/amont-agent/provenance")
             ])
         );
         assert_eq!(
             provenance_dirs(env(&[("USERPROFILE", "/u")])),
             Some([
-                PathBuf::from("/u/.claude/greenpiste/provenance"),
+                PathBuf::from("/u/.claude/greenbelay/provenance"),
                 PathBuf::from("/u/.claude/amont-agent/provenance")
             ])
         );
@@ -1393,7 +1393,7 @@ pub(crate) mod tests {
         scratch_cleanup(&work);
     }
 
-    /// A payload an older greenpiste left on disk (`amont-provenance-v1`) is
+    /// A payload an older release of the hook left on disk (`amont-provenance-v1`) is
     /// NOT signed: signing it would write an `amont-provenance` note after
     /// the switch (ADR-0068, "writers switch once"). Its file is kept and
     /// named, with the fix, and nothing is published. Fails if the header
@@ -1431,8 +1431,11 @@ pub(crate) mod tests {
         );
         let file_name = file.display().to_string();
         assert!(said.contains(&file_name), "names the file: {said}");
-        assert!(said.contains("written by an older greenpiste"), "{said}");
-        assert!(said.contains("upgrade greenpiste"), "{said}");
+        assert!(
+            said.contains("written by an older release of the hook"),
+            "{said}"
+        );
+        assert!(said.contains("upgrade greenbelay"), "{said}");
         scratch_cleanup(&d);
         scratch_cleanup(&work);
     }
@@ -1528,7 +1531,7 @@ pub(crate) mod tests {
     }
 
     /// A payload that already states a canonical tree was written by a
-    /// pre-release greenpiste: it is refused, never signed, never removed.
+    /// pre-release build of the hook: it is refused, never signed, never removed.
     #[test]
     fn a_payload_with_a_canon_line_is_refused_and_kept() {
         let (d, work, remote, head, tree, _) = provenance_world("prov-canon");
@@ -1563,15 +1566,15 @@ pub(crate) mod tests {
             "9f1c2ab0d6e4c1b2a3f405e6d7c8b9a0f1e2d3c4".to_string(),
             "e".repeat(64),
         ] {
-            let file = PathBuf::from("/Users/someone/.claude/greenpiste/provenance/greengate")
+            let file = PathBuf::from("/Users/someone/.claude/greenbelay/provenance/greengate")
                 .join(&commit);
             let lines = canon_refusal(&commit, &file);
             assert!(lines[0].starts_with("  provenance for "), "{lines:?}");
             assert!(lines[0].contains(&commit[..7]), "{lines:?}");
             let all = lines.join("\n");
-            assert!(all.contains("canon line") && all.contains("pre-release greenpiste"));
+            assert!(all.contains("canon line") && all.contains("pre-release build of the hook"));
             assert!(all.contains(&format!("    {commit} in\n")), "{all}");
-            assert!(all.contains("upgrade greenpiste"), "{all}");
+            assert!(all.contains("upgrade greenbelay"), "{all}");
             for l in &lines {
                 assert!(
                     l.chars().count() <= 80,

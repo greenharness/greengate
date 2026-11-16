@@ -74,7 +74,7 @@ Threat model and private reporting:
 Three companions, each its own repository because it runs somewhere greengate
 deliberately does not:
 
-- [**amont-agent**](https://github.com/greenharness/greenpiste) — a Claude
+- [**greenbelay**](https://github.com/greenharness/greenbelay) — a Claude
   Code `PreToolUse` hook for the mistake no git hook can reach, because it
   lives in the command string itself: `git push … | tail -5` reports tail's
   exit status, so a rejected push reads as success. The guard judges the
