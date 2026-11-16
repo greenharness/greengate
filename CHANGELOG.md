@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v4.8.0
+
 ### Added
 
 - **`snapshotDeps reuse` now reuses npm's `node_modules`.** An npm unit's
