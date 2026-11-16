@@ -204,6 +204,7 @@ Measure 7 days after the grh install, from transcripts with t04's script: the sh
 - code-review-backend: round 1 approve-with-changes (1 high: annotated tags; 2 medium, 2 low); delta 1 medium (no push the receipt cannot record), fixed; last delta approve.
 - code-review-language (rust): round 1 approve-with-changes (5 medium, 1 low); deltas resolved; last delta approve-with-changes (2 low, cosmetic).
 - code-review-unix: round 1 approve-with-changes (2 medium, 3 low); resolved; last delta approve.
+- After CI: `rust` (`make lint-cross`, windows target) and `windows` (test build) failed on unix-only code; `Options::rerun_flags` and the `land_detach` test module are now `#[cfg(unix)]` (92028b4a). `make lint-cross` passes locally on all three targets, and the test crate checks for x86_64-pc-windows-gnu. Delta: implementation-review approve, rust approve; backend and unix carry. Deliberate: the two bounded polls in the tests (`land_detach.rs:85`, `:319`) wait on a real child process, with no clock to inject. `load (macos-latest)` was cancelled before a runner started it (no steps ran).
 - Follow-up ticket: `set_cloexec` returning `io::Result`; the parser's flags as an `Invocation` enum; `finish`'s bool as an output enum; one `Meta` builder; relais.toml's pre-rename crate names (needs the person's re-grant).
 
 ## Full reviews (reference)
