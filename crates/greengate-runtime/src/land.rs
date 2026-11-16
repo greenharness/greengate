@@ -29,7 +29,8 @@
 //! |      |                | how it ended (`--wait` reads it)                     |
 //!
 //! `--wait <receipt>` exits with the code of the status the receipt ended in,
-//! and with 3 when the worker died without finalizing it.
+//! and with 1 (a refusal; its `worker <pid> died` lines tell it apart) when
+//! the worker died without finalizing it.
 //!
 //! `4` is deliberately worded as "not observed". Equality proves the tip was
 //! seen; inequality does not prove an update was lost, because another writer

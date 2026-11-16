@@ -144,7 +144,7 @@ const USAGE: &str = concat!(
     "                  pushes only that sha, print the --wait command and exit 0\n",
     "                  (a detached land; no --dry-run; unix only)]\n",
     "                 land --wait <receipt>  follow a detached land: prints its\n",
-    "                  verdict and exits with the land's code; exits 3 if the\n",
+    "                  verdict and exits with the land's code; exits 1 if the\n",
     "                  worker died, 2 if there is no receipt; takes no other flag\n",
     "  slot run       run a heavy command in a host slot, queued with every other\n",
     "                 one on this machine; exits 75 without running it when no\n",
