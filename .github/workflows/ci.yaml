@@ -344,7 +344,7 @@ jobs:
           # reaches any Rust at all. Removing it is safe and is not a weakening
           # of the check: the two crates being checked have one dependency,
           # greensummit, itself std-only — the property the `deps` job exists
-          # to enforce — so the floor is resolved for it from `^1.6` as well.
+          # to enforce — so the floor is resolved for it from `^2` as well.
           # The checkout is disposable; nothing is committed back.
           rm -f Cargo.lock
           cargo "+$MSRV" check -p greengate -p greengate-runtime

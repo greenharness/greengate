@@ -2,12 +2,13 @@
 //! opt-out (decisions ADR-0037).
 //!
 //! A later greensummit major stops reading `set planExempt off` in
-//! `amont.conf` (2.0.0 still reads it); it may ship once no repository opts out of the canonical tree through that
-//! line alone. Adding `@plan-exempt off` beside it is safe where the spec
-//! declares no gates, and costs the input fingerprints of every attest before
-//! 1.6.0 where it does, so the sweep also needs each repository's pinned
-//! attest. Read from HEAD's tree, through attest's own library: the fleet
-//! has no copy of the format either.
+//! `amont.conf` (2.0.0 still reads it); it may ship once no repository opts
+//! out of the canonical tree through that line alone. Adding
+//! `@plan-exempt off` beside it is safe where the spec declares no gates, and
+//! costs the input fingerprints of every attest before 1.6.0 where it does,
+//! so the sweep also needs each repository's pinned greensummit Action. Read
+//! from HEAD's tree, through greensummit's own library: the fleet has no copy
+//! of the format either.
 
 use std::path::Path;
 
@@ -19,7 +20,7 @@ use greensummit::spec::{at, plan_exempt, PlanExempt};
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct AttestState {
     /// Only `set planExempt off` in `amont.conf` opts this repository out
-    /// of the canonical tree: the line attest reads until 2.0.0.
+    /// of the canonical tree: the line greensummit 2.0 still reads.
     pub deprecated_opt_out: bool,
     /// HEAD's `greensummit-inputs` declares at least one gate.
     pub spec_with_gates: bool,
@@ -32,9 +33,9 @@ pub struct AttestState {
 pub struct AttestPin {
     /// The workflow file, relative to the repository.
     pub file: String,
-    /// `attest` or `attest/sign`.
+    /// The action's role word: `attest` (the verifier) or `attest/sign`.
     pub action: String,
-    /// What follows the `@`: a tag, a moving major such as `v1`, or a sha.
+    /// What follows the `@`: a tag, a moving major such as `v2`, or a sha.
     pub reference: String,
     /// The release it names, `X.Y.Z`: the tag itself, or the `# vX.Y.Z`
     /// comment beside a sha. `None` for a moving major (it follows the
@@ -162,7 +163,7 @@ mod tests {
         let p = pin("      - uses: greenharness/greensummit@v2").unwrap();
         assert_eq!(
             (p.action.as_str(), p.reference.as_str(), p.version),
-            ("attest", "v1", None)
+            ("attest", "v2", None)
         );
         let p = pin("        uses: greenharness/greensummit/sign@v1.7.0").unwrap();
         assert_eq!(

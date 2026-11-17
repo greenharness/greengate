@@ -27,7 +27,9 @@ missing here.
   - the in-cluster signer runs this greengate, because a block it signs under
     the old header is refused by `cluster collect`.
 
-  The signing key stays at `~/.ssh/greengate-attest`.
+  The signing key stays at `~/.ssh/greengate-attest`. Signer blocks an older
+  greengate left unpushed under `refs/notes/attest-local/` stay there, unread;
+  delete them with `git update-ref -d` if you want them gone.
 - **`greengate attest check-inputs` prints its ok line on stderr**, as
   `check-greensummit-inputs: ok` (was `check-attest-inputs: ok` on stdout):
   the exit status is the answer.

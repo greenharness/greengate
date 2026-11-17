@@ -49,6 +49,11 @@ pub use greensummit::notes::{classify_push as classify_push_stderr, PushFailure}
 /// The notes ref, fully qualified — `update-ref -d` needs it. The one name
 /// set greensummit 2.0 reads and writes (ADR-0073): no other set is read.
 pub const NOTES_FULL_REF: &str = "refs/notes/greensummit";
+
+/// The block headers greengate wrote before greensummit 2.0 (ADR-0073):
+/// never read, only named in a refusal so the stale signer is the cause
+/// shown.
+const PRE_SUMMIT_HEADERS: [&str; 2] = ["greengate-attest-v2", "amont-attest-v2"];
 pub const INPUTS_FULL_REF: &str = "refs/notes/greensummit-inputs";
 
 /// The header an older release of the hook wrote (until greengate 4.4). greengate no
@@ -742,13 +747,18 @@ pub(crate) enum BlockRefusal {
     /// A block about something else: not one block of this format, another
     /// platform or tree, or a gate missing. The ConfigMap is what to read.
     Content(String),
+    /// A block under the header a greengate older than greensummit 2.0
+    /// wrote: the signer image is stale, and rolling it is what to do.
+    StaleSigner(String),
 }
 
 impl BlockRefusal {
     /// The reason, as said.
     pub(crate) fn reason(&self) -> &str {
         match self {
-            BlockRefusal::Signer(why) | BlockRefusal::Content(why) => why,
+            BlockRefusal::Signer(why)
+            | BlockRefusal::Content(why)
+            | BlockRefusal::StaleSigner(why) => why,
         }
     }
 }
@@ -764,22 +774,26 @@ pub(crate) fn signer_block(
     signers: &Path,
 ) -> Result<SignerBlock, BlockRefusal> {
     use greensummit::format::{bound_platform, field, split_blocks};
-    use BlockRefusal::{Content, Signer};
+    use BlockRefusal::{Content, Signer, StaleSigner};
     let (mut blocks, _) = split_blocks(body);
     if blocks.len() != 1 {
         return Err(Content(format!("{} signed blocks, not one", blocks.len())));
     }
     let signed_block = blocks.remove(0);
     // One name set (ADR-0073): a block under an older header is not read,
-    // and its signature is checked under greensummit's namespace only.
-    let names = greensummit::format::WRITE;
+    // and its signature is checked under greensummit's namespace only. The
+    // headers greengate wrote before greensummit 2.0 are recognised only to
+    // say why: the signer runs an older greengate.
     let header = signed_block.payload.split('\n').next();
-    if header != Some(names.format) {
-        return Err(Content(format!(
-            "not a {} payload (header {})",
-            names.format,
-            header.unwrap_or("missing")
-        )));
+    if header != Some(FORMAT) {
+        let header = header.unwrap_or("missing");
+        if PRE_SUMMIT_HEADERS.contains(&header) {
+            return Err(StaleSigner(format!(
+                "a {header} block, written by a greengate older than greensummit 2.0, \
+                 not a {FORMAT} one"
+            )));
+        }
+        return Err(Content(format!("not a {FORMAT} payload (header {header})")));
     }
     let on = field(&signed_block.payload, "platform");
     if on != Some(crate::cluster::PLATFORM) {
@@ -798,7 +812,7 @@ pub(crate) fn signer_block(
         )));
     }
     let principal = greensummit::sign::verify(
-        names.namespace,
+        NAMESPACE,
         &signed_block.payload,
         &signed_block.signature,
         signers,
@@ -1416,11 +1430,11 @@ pub(crate) mod tests {
         scratch_cleanup(&work);
     }
 
-    /// Spelled out: an attestation push writes the green refs, the green
-    /// header and a green-namespace signature, and no `amont-*` ref. Fails if
-    /// any writer still files the old names.
+    /// Spelled out: an attestation push writes greensummit's refs, header and
+    /// namespace (greengate's provenance beside them), and no older ref.
+    /// Fails if any writer still files the old names.
     #[test]
-    fn an_attestation_push_writes_only_green_refs() {
+    fn an_attestation_push_writes_only_greensummit_refs() {
         let (d, work, remote, head, _tree, signers) = provenance_world("attest-green-refs");
         let gates = ["pre-push-cargo-test".to_string()];
         in_repo(&work, || {
@@ -1435,7 +1449,8 @@ pub(crate) mod tests {
             "{refs}"
         );
         assert!(
-            refs.lines().all(|r| r.starts_with("refs/notes/greengate-")),
+            refs.lines().all(|r| r.starts_with("refs/notes/greensummit")
+                || r.starts_with("refs/notes/greengate-provenance")),
             "an old name was written: {refs}"
         );
         let note = git(&remote, &["notes", "--ref", "greensummit", "show", &head]);
@@ -2131,7 +2146,7 @@ pub(crate) mod tests {
         // The old header, validly signed under its own namespace: not read.
         let old = block_with(OLD_FORMAT, OLD_NAMESPACE, tree, &key);
         match signer_block(&old, tree, &signers) {
-            Err(BlockRefusal::Content(why)) => {
+            Err(BlockRefusal::StaleSigner(why)) => {
                 assert!(why.contains(OLD_FORMAT), "{why}");
                 assert!(why.contains(SUMMIT.format), "{why}");
             }
@@ -2197,16 +2212,7 @@ pub(crate) mod tests {
     fn a_verification_says_which_name_it_went_through() {
         let mut verdict = greensummit::verify::Verdict::nothing("test");
         assert!(verified_lines(&verdict).is_empty());
-        verdict.verified_under = vec![
-            greensummit::format::SUMMIT.namespace.to_string(),
-            OLD_NAMESPACE.to_string(),
-        ];
-        assert_eq!(
-            verified_lines(&verdict),
-            [
-                format!("verified under {}", greensummit::format::SUMMIT.namespace),
-                format!("verified under {OLD_NAMESPACE}"),
-            ]
-        );
+        verdict.verified_under = vec![NAMESPACE.to_string()];
+        assert_eq!(verified_lines(&verdict), ["verified under greensummit"]);
     }
 }

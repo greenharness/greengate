@@ -1340,7 +1340,7 @@ mod tests {
             &signers,
             format!(
                 "cluster-signer@x86_64-linux namespaces=\"{},{}\" {public}\n",
-                greensummit::format::SUMMIT.namespace,
+                greensummit::format::NAMESPACE,
                 OLD_NAMESPACE
             ),
         )
@@ -1365,12 +1365,9 @@ mod tests {
         // The signer signs under greensummit's namespace and header, and the
         // block does not verify under the namespace greengate signed under
         // before greensummit 2.0.
-        assert!(
-            text.starts_with(greensummit::format::SUMMIT.format),
-            "{text}"
-        );
+        assert!(text.starts_with(greensummit::format::FORMAT), "{text}");
         assert!(greensummit::sign::verify(
-            greensummit::format::SUMMIT.namespace,
+            greensummit::format::NAMESPACE,
             &blocks[0].payload,
             &blocks[0].signature,
             &signers,

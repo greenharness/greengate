@@ -12,7 +12,7 @@
 //! `$GIT_DIR` and the common dir, and the ledgers' headers. greengate 3.x's
 //! spellings live only in `migrate.rs`, which moves them once; the names
 //! test fails on an old data name anywhere else. Kept on purpose: the notes
-//! namespaces (the legacy `amont-*` set, read beside the green one: plan 3a-3), the shim placeholder, and
+//! namespaces (the old `amont-*` names, which only tests spell to prove they are ignored), the shim placeholder, and
 //! the binary aliases above.
 //!
 //! In a format string, name the constant inline: `eprintln!("{BIN}: …")`.

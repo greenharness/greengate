@@ -130,8 +130,8 @@ pub(crate) const GREEN: GateNames = GateNames {
 pub(crate) const WRITE: GateNames = GREEN;
 
 /// The sets a stamp is read under: the written one alone. Kept as a list so
-/// the readers below keep their shape; collapsing the one-element loops is a
-/// follow-up, as in greensummit 2.0.
+/// the readers below keep their shape; the one-element loops are collapsed
+/// by the greensummit-rename census (its Phase 5), as in greensummit 2.0.x.
 pub(crate) const READ: [GateNames; 1] = [WRITE];
 
 /// First token of the marker file and of every note body. Versioned like
@@ -1886,7 +1886,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- declared-input reuse (`.github/greensummit-inputs`) -------------------
+    // Declared-input reuse (`.github/greensummit-inputs`).
 
     /// A repository declaring that gate `test` reads only `a.ts`, with one
     /// commit stamped `test@abc`. The plans directory is where a later,
@@ -2578,11 +2578,10 @@ mod tests {
         }
     }
 
-    /// A green inputs note is filed under the GREEN key (its own input
-    /// domain) and answers before the legacy one; the legacy key in the
-    /// green ref is not read.
+    /// An inputs note is read under the key of its own set's input domain;
+    /// a note filed under the old set's key in the same ref is not read.
     #[test]
-    fn the_green_inputs_ref_is_read_first_under_its_own_key() {
+    fn the_inputs_ref_is_read_under_its_own_key() {
         let dir = declared("green-inputs", "test a.ts\n");
         in_repo(&dir, || {
             let tree = git(&dir, &["rev-parse", "HEAD^{tree}"]);

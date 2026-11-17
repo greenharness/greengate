@@ -527,6 +527,9 @@ fn next_step(record: &Pending, refusal: &BlockRefusal, namespace: &str) -> Strin
                 record.name
             )
         }
+        BlockRefusal::StaleSigner(_) => {
+            "roll the attest-signer image to this greengate release".to_string()
+        }
     }
 }
 
@@ -1170,7 +1173,7 @@ pub(in crate::cluster::detached) mod tests {
         // trusts: the refusal is the one-set read and nothing else.
         let body = block_with(OLD_FORMAT, OLD_NAMESPACE, tree, &key);
         match judge_block(&record, &body, Some(&signers)) {
-            Err(BlockRefusal::Content(why)) => {
+            Err(BlockRefusal::StaleSigner(why)) => {
                 assert!(why.contains(OLD_FORMAT), "{why}");
                 assert!(why.contains(SUMMIT.format), "{why}");
             }
