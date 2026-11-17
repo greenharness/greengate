@@ -1183,6 +1183,18 @@ pub(in crate::cluster::detached) mod tests {
     }
 
     #[test]
+    fn a_stale_signer_is_told_to_roll_its_image_not_to_read_the_configmap() {
+        let record = sample("wf-stale");
+        let said = next_step(
+            &record,
+            &BlockRefusal::StaleSigner("x".into()),
+            "attest-signer",
+        );
+        assert!(said.contains("roll the attest-signer image"), "{said}");
+        assert!(!said.contains("configmap"), "{said}");
+    }
+
+    #[test]
     fn judge_block_accepts_a_greensummit_block() {
         use crate::attest::tests::{block_with, both_names_signer, dir};
         use greensummit::format::SUMMIT;

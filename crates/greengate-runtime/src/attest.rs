@@ -49,12 +49,12 @@ pub use greensummit::notes::{classify_push as classify_push_stderr, PushFailure}
 /// The notes ref, fully qualified — `update-ref -d` needs it. The one name
 /// set greensummit 2.0 reads and writes (ADR-0073): no other set is read.
 pub const NOTES_FULL_REF: &str = "refs/notes/greensummit";
+pub const INPUTS_FULL_REF: &str = "refs/notes/greensummit-inputs";
 
 /// The block headers greengate wrote before greensummit 2.0 (ADR-0073):
 /// never read, only named in a refusal so the stale signer is the cause
 /// shown.
-const PRE_SUMMIT_HEADERS: [&str; 2] = ["greengate-attest-v2", "amont-attest-v2"];
-pub const INPUTS_FULL_REF: &str = "refs/notes/greensummit-inputs";
+pub(crate) const PRE_SUMMIT_HEADERS: [&str; 2] = ["greengate-attest-v2", "amont-attest-v2"];
 
 /// The header an older release of the hook wrote (until greengate 4.4). greengate no
 /// longer signs it: a payload that still carries it is kept and named, so
@@ -2093,7 +2093,7 @@ pub(crate) mod tests {
 
     /// The header and namespace greengate wrote before greensummit 2.0,
     /// spelled out: greensummit no longer exports them.
-    pub(crate) const OLD_FORMAT: &str = "greengate-attest-v2";
+    pub(crate) const OLD_FORMAT: &str = PRE_SUMMIT_HEADERS[0];
     pub(crate) const OLD_NAMESPACE: &str = "greengate-attest";
 
     /// A key the signers file lists, bound to the cluster's platform, under
@@ -2143,14 +2143,17 @@ pub(crate) mod tests {
         let checked = signer_block(&body, tree, &signers)
             .unwrap_or_else(|e| panic!("{}: {}", SUMMIT.format, e.reason()));
         assert_eq!(checked.gates, ["suite"]);
-        // The old header, validly signed under its own namespace: not read.
-        let old = block_with(OLD_FORMAT, OLD_NAMESPACE, tree, &key);
-        match signer_block(&old, tree, &signers) {
-            Err(BlockRefusal::StaleSigner(why)) => {
-                assert!(why.contains(OLD_FORMAT), "{why}");
-                assert!(why.contains(SUMMIT.format), "{why}");
+        // Each header an older greengate wrote, validly signed: not read,
+        // and refused as a stale signer.
+        for header in PRE_SUMMIT_HEADERS {
+            let old = block_with(header, OLD_NAMESPACE, tree, &key);
+            match signer_block(&old, tree, &signers) {
+                Err(BlockRefusal::StaleSigner(why)) => {
+                    assert!(why.contains(header), "{why}");
+                    assert!(why.contains(SUMMIT.format), "{why}");
+                }
+                other => panic!("a {header} block must be refused, got {other:?}"),
             }
-            other => panic!("an old-header block must be refused, got {other:?}"),
         }
         // greensummit's header signed under the old namespace: the signature
         // is checked under greensummit's, so it fails.
