@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v4.11.0
+
 ### Changed
 
 - **BREAKING: greengate signs and reads greensummit notes** (ADR-0073).
