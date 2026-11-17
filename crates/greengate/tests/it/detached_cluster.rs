@@ -1599,7 +1599,7 @@ fn cluster_sign_writes_one_configmap_for_the_unsigned_finished_workflow() {
         "\"greengate.signer/workflow-namespace\":\"greengate-gates\"".to_string(),
         format!("\"greengate.signer/tree\":\"{}\"", l.tree),
         format!(
-            "greengate-attest-v2\\ntree {}\\ngates pre-push-lint\\nplatform x86_64-linux\\ngreengate ",
+            "greensummit-v2\\ntree {}\\ngates pre-push-lint\\nplatform x86_64-linux\\ngreengate ",
             l.tree
         ),
         "\\n\\n-----BEGIN SSH SIGNATURE-----".to_string(),
@@ -1832,7 +1832,7 @@ impl Lane {
         let signers = self.cluster.r.path(".github/allowed_signers");
         let mut text = std::fs::read_to_string(&signers).unwrap();
         text.push_str(&format!(
-            "{SIGNER_PRINCIPAL} namespaces=\"greengate-attest\" {}\n",
+            "{SIGNER_PRINCIPAL} namespaces=\"greensummit\" {}\n",
             public.trim()
         ));
         std::fs::write(&signers, text).unwrap();
@@ -1861,10 +1861,10 @@ impl Lane {
     fn signer_block(&self, tree: &str, gates: &str) -> String {
         use std::io::Write as _;
         let payload = format!(
-            "greengate-attest-v2\ntree {tree}\ngates {gates}\nplatform x86_64-linux\ngreengate 0.0.0\n"
+            "greensummit-v2\ntree {tree}\ngates {gates}\nplatform x86_64-linux\ngreengate 0.0.0\n"
         );
         let mut child = Command::new("ssh-keygen")
-            .args(["-Y", "sign", "-n", "greengate-attest", "-f"])
+            .args(["-Y", "sign", "-n", "greensummit", "-f"])
             .arg(signer_key(&self.cluster))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1917,7 +1917,7 @@ impl Lane {
         let shown = self.cluster.r.git(&[
             "notes",
             "--ref",
-            "attest-local/greengate-attest",
+            "greensummit-local/greensummit",
             "show",
             key,
         ]);
@@ -2241,7 +2241,7 @@ fn without_the_signer_key_collect_never_asks_for_signer_blocks() {
 
 /// A filed block survives a sync of the attestation mirror from origin
 /// (`attest covered` runs attest's verifier, whose `sync_mirrors` replaces
-/// the local `refs/notes/greengate-attest` with origin's, as `stamps` does when a
+/// the local `refs/notes/greensummit` with origin's, as `stamps` does when a
 /// gate is not stamped): the push still publishes the signer's block.
 #[test]
 fn a_filed_signer_block_survives_a_sync_of_the_attest_mirror() {
@@ -2256,7 +2256,7 @@ fn a_filed_signer_block_survives_a_sync_of_the_attest_mirror() {
     let filed = l.local_attest_note(&l.tree);
     assert!(filed.contains("greengate 0.0.0"), "{filed}");
     // origin holds a note of its own, made apart from the local mirror, so
-    // a sync replaces the local `refs/notes/greengate-attest` with it
+    // a sync replaces the local `refs/notes/greensummit` with it
     let base_tree = out(
         &l.cluster.r,
         &["rev-parse", &format!("{}^{{tree}}", l.base)],
@@ -2276,18 +2276,18 @@ fn a_filed_signer_block_survives_a_sync_of_the_attest_mirror() {
         "-q",
         "--no-verify",
         "origin",
-        "refs/notes/origin-only:refs/notes/greengate-attest",
+        "refs/notes/origin-only:refs/notes/greensummit",
     ]);
     assert!(pushed.status.success());
     let (_, stamps) = l.cluster.amont(&["attest", "covered"], &[], None);
-    let mirrored = out(&l.cluster.r, &["rev-parse", "refs/notes/greengate-attest"]);
+    let mirrored = out(&l.cluster.r, &["rev-parse", "refs/notes/greensummit"]);
     let origin = out(
         &l.cluster.r,
         &[
             "--git-dir",
             &l.cluster.remote().display().to_string(),
             "rev-parse",
-            "refs/notes/greengate-attest",
+            "refs/notes/greensummit",
         ],
     );
     assert_eq!(mirrored, origin, "stamps synced the mirror: {stamps}");

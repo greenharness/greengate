@@ -233,7 +233,7 @@ pub struct FleetScan {
     pub downgraded_events: usize,
     pub repos_with_downgrades: usize,
     /// Repositories that opt out of the canonical tree only through `set
-    /// planExempt off`, which `git-attest` 2.0.0 stops reading. That
+    /// planExempt off`, which a later greensummit major stops reading. That
     /// release waits for this and the next count to be zero.
     pub repos_with_deprecated_opt_out: usize,
     /// Repositories pinning an attest action before 1.7.0 (the first that

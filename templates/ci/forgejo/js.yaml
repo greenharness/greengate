@@ -19,12 +19,12 @@ jobs:
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
       # amont.attest: when every pre-push block gate passed locally, amont
-      # left a SIGNED note (refs/notes/greengate-attest) on the tree it tested.
+      # left a SIGNED note (refs/notes/greensummit) on the tree it tested.
       # This step verifies that note and reports which gates it covers, so the
       # steps below can skip work already done — on THIS exact tree, on THIS
       # platform, by a key you committed as .forgejo/allowed_signers:
       #
-      #   you@example.com namespaces="greengate-attest,amont-attest" ssh-ed25519 AAAA…
+      #   you@example.com namespaces="greensummit" ssh-ed25519 AAAA…
       #
       # Fail-open by construction: any failure reports nothing covered and
       # every gated step simply runs. The most an attestation can ever save is
@@ -32,11 +32,11 @@ jobs:
       # matters because a non-skip is otherwise silent.
       #
       # amont still does not run in CI. This is a separate, single-purpose
-      # verifier: https://github.com/fredericrous/attest — which is also where
+      # verifier: https://github.com/greenharness/greensummit — which is also where
       # verify.sh lives if you would rather inline the shell than depend on an
       # action.
       - id: attest
-        uses: https://github.com/fredericrous/attest@v1
+        uses: https://github.com/greenharness/greensummit@v2
       - run: npm ci
       - run: npx --no-install eslint --max-warnings 0 . # pre-commit-lint-js — delete if no eslint config
       # pre-push-run-tests-js runs whichever gate scripts the package defines,

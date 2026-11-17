@@ -745,7 +745,7 @@ fn the_push_journey() {
         step!("attest", out.contains("attested"), "{out}");
         let attested = on_remote(
             &remote,
-            &["notes", "--ref", "greengate-attest", "show", &head(&r)],
+            &["notes", "--ref", "greensummit", "show", &head(&r)],
         );
         let gates = attested
             .lines()

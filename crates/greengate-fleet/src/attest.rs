@@ -1,8 +1,8 @@
 //! What each repository says to attest, for the step that retires the old
 //! opt-out (decisions ADR-0037).
 //!
-//! `git-attest` 2.0.0 stops reading `set planExempt off` in `amont.conf`; it
-//! may ship once no repository opts out of the canonical tree through that
+//! A later greensummit major stops reading `set planExempt off` in
+//! `amont.conf` (2.0.0 still reads it); it may ship once no repository opts out of the canonical tree through that
 //! line alone. Adding `@plan-exempt off` beside it is safe where the spec
 //! declares no gates, and costs the input fingerprints of every attest before
 //! 1.6.0 where it does, so the sweep also needs each repository's pinned
@@ -13,7 +13,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use git_attest::spec::{at, plan_exempt, PlanExempt};
+use greensummit::spec::{at, plan_exempt, PlanExempt};
 
 /// One repository's answer.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -21,9 +21,9 @@ pub struct AttestState {
     /// Only `set planExempt off` in `amont.conf` opts this repository out
     /// of the canonical tree: the line attest reads until 2.0.0.
     pub deprecated_opt_out: bool,
-    /// HEAD's `attest-inputs` declares at least one gate.
+    /// HEAD's `greensummit-inputs` declares at least one gate.
     pub spec_with_gates: bool,
-    /// Every `uses: fredericrous/attest[/sign]@<ref>` in its workflows.
+    /// Every `uses: greenharness/greensummit[/sign]@<ref>` in its workflows.
     pub pins: Vec<AttestPin>,
 }
 
@@ -93,7 +93,7 @@ fn pins(repo: &Path) -> Vec<AttestPin> {
 }
 
 /// The pin a workflow line carries, if any:
-/// `uses: [https://github.com/]fredericrous/attest[/sign]@<ref> [# vX.Y.Z]`.
+/// `uses: [https://github.com/]greenharness/greensummit[/sign]@<ref> [# vX.Y.Z]`.
 fn pin_on(line: &str, file: &str) -> Option<AttestPin> {
     let rest = line
         .trim_start()
@@ -101,7 +101,7 @@ fn pin_on(line: &str, file: &str) -> Option<AttestPin> {
         .unwrap_or(line.trim_start());
     let rest = rest.strip_prefix("uses:")?.trim_start();
     let rest = rest.strip_prefix("https://github.com/").unwrap_or(rest);
-    let rest = rest.strip_prefix("fredericrous/attest")?;
+    let rest = rest.strip_prefix("greenharness/greensummit")?;
     let (action, rest) = match rest.strip_prefix("/sign@") {
         Some(r) => ("attest/sign", r),
         None => ("attest", rest.strip_prefix('@')?),
@@ -159,30 +159,33 @@ mod tests {
 
     #[test]
     fn every_pin_shape_is_read() {
-        let p = pin("      - uses: fredericrous/attest@v1").unwrap();
+        let p = pin("      - uses: greenharness/greensummit@v2").unwrap();
         assert_eq!(
             (p.action.as_str(), p.reference.as_str(), p.version),
             ("attest", "v1", None)
         );
-        let p = pin("        uses: fredericrous/attest/sign@v1.7.0").unwrap();
+        let p = pin("        uses: greenharness/greensummit/sign@v1.7.0").unwrap();
         assert_eq!(
             (p.action.as_str(), p.version.as_deref()),
             ("attest/sign", Some("1.7.0"))
         );
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        let p = pin(&format!("  - uses: fredericrous/attest@{sha} # v1.6.0")).unwrap();
+        let p = pin(&format!(
+            "  - uses: greenharness/greensummit@{sha} # v1.6.0"
+        ))
+        .unwrap();
         assert_eq!(
             (p.reference.as_str(), p.version.as_deref()),
             (sha, Some("1.6.0"))
         );
         let p = pin(&format!(
-            "uses: https://github.com/fredericrous/attest@{sha}"
+            "uses: https://github.com/greenharness/greensummit@{sha}"
         ))
         .unwrap();
         assert_eq!(p.version, None);
-        assert_eq!(pin("uses: fredericrous/attestation@v1"), None);
+        assert_eq!(pin("uses: greenharness/greensummitation@v1"), None);
         assert_eq!(pin("uses: actions/checkout@v4"), None);
-        assert_eq!(pin("# uses: fredericrous/attest@v1"), None);
+        assert_eq!(pin("# uses: greenharness/greensummit@v2"), None);
     }
 
     #[test]
@@ -191,11 +194,11 @@ mod tests {
             pins: vec![pin(line).unwrap()],
             ..AttestState::default()
         };
-        assert!(!state("uses: fredericrous/attest@v1").pins_before(1, 7));
-        assert!(state("uses: fredericrous/attest@v1.6.0").pins_before(1, 7));
-        assert!(!state("uses: fredericrous/attest@v1.7.0").pins_before(1, 7));
+        assert!(!state("uses: greenharness/greensummit@v2").pins_before(1, 7));
+        assert!(state("uses: greenharness/greensummit@v1.6.0").pins_before(1, 7));
+        assert!(!state("uses: greenharness/greensummit@v1.7.0").pins_before(1, 7));
         assert!(
-            state("uses: fredericrous/attest@0123456789abcdef0123456789abcdef01234567")
+            state("uses: greenharness/greensummit@0123456789abcdef0123456789abcdef01234567")
                 .pins_before(1, 7)
         );
         assert!(!AttestState::default().pins_before(1, 7));
@@ -226,10 +229,10 @@ mod tests {
         std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("amont.conf"), "set planExempt off\n").unwrap();
-        std::fs::write(dir.join(".github/attest-inputs"), "ci-test src\n").unwrap();
+        std::fs::write(dir.join(".github/greensummit-inputs"), "ci-test src\n").unwrap();
         std::fs::write(
             dir.join(".github/workflows/ci.yaml"),
-            "steps:\n  - uses: fredericrous/attest@v1\n",
+            "steps:\n  - uses: greenharness/greensummit@v2\n",
         )
         .unwrap();
         git(&dir, &["add", "-A"]);
@@ -241,7 +244,7 @@ mod tests {
 
         // Both lines, as the sweep writes them: no longer deprecated alone.
         std::fs::write(
-            dir.join(".github/attest-inputs"),
+            dir.join(".github/greensummit-inputs"),
             "@plan-exempt off\nci-test src\n",
         )
         .unwrap();

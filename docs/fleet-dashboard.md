@@ -129,7 +129,7 @@ FleetScan {
   hooks_outside_seen : usize      // repos whose hooks resolve somewhere we will not touch
   excluded_dirs      : usize
   dirs_visited       : usize      // how much of the tree was actually walked
-  repos_with_deprecated_opt_out   : usize  // only `set planExempt off`: read until git-attest 2.0.0
+  repos_with_deprecated_opt_out   : usize  // only `set planExempt off`: read until a later greensummit major
   repos_pinning_attest_before_1_7 : usize  // an attest pin older than 1.7.0, or an unnamed sha
   repos              : Vec<Repo>
 }
@@ -277,14 +277,14 @@ display as covered-by.
 ### `attest`
 
 `attest` measures the step that retires greengate's opt-out from attest (decisions
-ADR-0037). `git-attest` 2.0.0 stops reading `set planExempt off` in
-`greengate.conf`, so it waits for `repos_with_deprecated_opt_out` to reach zero.
-The sweep that gets it there adds `@plan-exempt off` to `attest-inputs`. Where
+ADR-0037). A later greensummit major stops reading `set planExempt off` in
+`greengate.conf` (2.0.0 still reads it), so it waits for `repos_with_deprecated_opt_out` to reach zero.
+The sweep that gets it there adds `@plan-exempt off` to `greensummit-inputs`. Where
 the spec declares gates (`spec_with_gates`), the new line voids the input
 fingerprints of an attest before 1.6.0. So the sweep also waits for
 `repos_pinning_attest_before_1_7` to reach zero.
 
-The answers are read from HEAD's tree through the `git_attest` library. A
+The answers are read from HEAD's tree through the `greensummit` library. A
 moving `v1` follows the releases and is never counted. A sha counts unless a
 `# vX.Y.Z` comment beside it names a release.
 

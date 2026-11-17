@@ -434,12 +434,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-attest"
-version = "1.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80a859b140b2e8ff0ea5c569b923f93e8e2f9bd6988af87b262c11df614e7c60"
-
-[[package]]
 name = "greengate"
 version = "4.10.0"
 dependencies = [
@@ -452,8 +446,8 @@ name = "greengate-fleet"
 version = "4.10.0"
 dependencies = [
  "crossterm",
- "git-attest",
  "greengate-runtime",
+ "greensummit",
  "ratatui",
  "serde",
  "serde_json",
@@ -463,9 +457,9 @@ dependencies = [
 name = "greengate-runtime"
 version = "4.10.0"
 dependencies = [
- "git-attest",
  "greenharness-quiet",
  "greenharness-slots",
+ "greensummit",
 ]
 
 [[package]]
@@ -475,6 +469,12 @@ version = "4.10.0"
 [[package]]
 name = "greenharness-slots"
 version = "4.10.0"
+
+[[package]]
+name = "greensummit"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8de87b50568ea9a55f7497bb0b7b99aad3b8bf291b88cb2524e887837f03bccb"
 
 [[package]]
 name = "hashbrown"

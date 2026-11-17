@@ -1,18 +1,18 @@
 //! amont's side of attest's input fingerprints and canonical tree.
 //!
-//! The format itself (the `attest-inputs` grammar, fingerprints, the
+//! The format itself (the `greensummit-inputs` grammar, fingerprints, the
 //! canonical tree, note keys, the opt-out, the completeness proof) belongs to
-//! the `git_attest` library, attest's one implementation of it (decisions
+//! the `greensummit` library, attest's one implementation of it (decisions
 //! ADR-0037). What stays here is amont's own knowledge on top of it: which
 //! route its LOCAL gate stamps take, and the key those stamps are filed
 //! under. The hook runs at the worktree top, so "the repository" is `.`.
 
 use std::path::Path;
 
-use git_attest::format::Names;
-use git_attest::spec::{at, coverage, plan_exempt, PlanExempt, DEPRECATED_OPT_OUT};
+use greensummit::format::Names;
+use greensummit::spec::{at, coverage, plan_exempt, PlanExempt, DEPRECATED_OPT_OUT};
 
-pub use git_attest::spec::{conf_says_plan_exempt_off, CoverageError, Findings, Spec, EXEMPT};
+pub use greensummit::spec::{conf_says_plan_exempt_off, CoverageError, Findings, Spec, EXEMPT};
 
 /// The repository a hook stands in: git starts hooks at the worktree top.
 fn here() -> &'static Path {
@@ -31,14 +31,14 @@ pub(crate) fn spec_at(tree: &str) -> Option<Spec> {
 
 /// The fingerprint of `gate` on `tree`, as attest computes it.
 pub(crate) fn fingerprint(tree: &str, spec: &Spec, gate: &str) -> Option<String> {
-    git_attest::fingerprint::fingerprint(here(), tree, spec, gate).ok()
+    greensummit::fingerprint::fingerprint(here(), tree, spec, gate).ok()
 }
 
 /// The synthetic key of (gate, fingerprint) in the inputs ref of the name
 /// set `names` (its input domain builds the key): each set reads its own key
 /// in its own ref, never the other's.
 pub(crate) fn input_key(names: &Names, gate: &str, fp: &str) -> Option<String> {
-    git_attest::fingerprint::key_in(here(), names, gate, fp).ok()
+    greensummit::fingerprint::key_in(here(), names, gate, fp).ok()
 }
 
 /// Does `gate` declare `file`, itself or a directory above it? Asked of
@@ -66,7 +66,7 @@ pub(crate) fn canonical_route(tree: &str) -> Option<String> {
     if plan_exempt(here(), tree).is_off() {
         return None;
     }
-    git_attest::fingerprint::canon(here(), tree).ok()
+    greensummit::fingerprint::canon(here(), tree).ok()
 }
 
 /// The key under which the local gate stamps of a canonical fingerprint are
@@ -80,7 +80,7 @@ pub(crate) fn canon_gate_key(domain: &str, canon: &str) -> Option<String> {
         &["hash-object", "--stdin"],
         format!("{domain} {canon}\n").as_bytes(),
     )
-    .filter(|s| git_attest::format::is_oid(s))
+    .filter(|s| greensummit::format::is_oid(s))
 }
 
 /// The line to print when HEAD opts out of the canonical tree through
@@ -92,9 +92,9 @@ pub fn deprecated_opt_out() -> Option<&'static str> {
 }
 
 /// Do the required gates declare, completely, everything `tree` tracks?
-/// attest's proof (`git-attest check-inputs` runs the same one).
+/// attest's proof (`greensummit check-inputs` runs the same one).
 pub fn check(tree: &str, required: &[String]) -> Result<Findings, CoverageError> {
-    git_attest::spec::check_coverage(here(), tree, required)
+    greensummit::spec::check_coverage(here(), tree, required)
 }
 
 #[cfg(test)]
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn a_gate_declares_a_file_or_a_directory_above_it() {
-        let spec = git_attest::spec::parse_spec(b"lint src amont.conf\ntest src\n").unwrap();
+        let spec = greensummit::spec::parse_spec(b"lint src amont.conf\ntest src\n").unwrap();
         assert!(declares(&spec, "lint", "amont.conf"));
         assert!(declares(&spec, "lint", "src/main.rs"));
         assert!(!declares(&spec, "test", "amont.conf"));

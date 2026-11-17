@@ -8,7 +8,7 @@
 //!
 //! **This crate gains no third-party dependency.** The hook binary depends on
 //! it, so anything added here reaches every commit transitively. The one
-//! crate it links is `git-attest`, attest's std-only implementation of the
+//! crate it links is `greensummit`, attest's std-only implementation of the
 //! attestation format (decisions ADR-0037), argued in Cargo.toml and checked
 //! by `scripts/check-no-deps.sh`. ratatui and friends belong in `amont-fleet`.
 //!

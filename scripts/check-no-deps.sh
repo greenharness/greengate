@@ -70,16 +70,16 @@ if ! printf '%s\n' "$crates" | grep -qx 'greengate'; then
 fi
 
 # Two crates are allowed, each argued beside its declaration in
-# crates/greengate-runtime/Cargo.toml: git-attest (decisions ADR-0037), attest's
+# crates/greengate-runtime/Cargo.toml: greensummit (decisions ADR-0037), attest's
 # std-only implementation of the attestation format, and greenharness-quiet
 # (ADR-0039), the one implementation of the quiet-run active entry. Each is
 # allowed by name, and only while its OWN tree is empty, checked below: a
 # dependency it gains would reach the commit path through it.
-ALLOWED="git-attest greenharness-quiet greenharness-slots"
+ALLOWED="greensummit greenharness-quiet greenharness-slots"
 #
 # The one legitimate `|| true` in this file: `grep -v` exits 1 when nothing
 # matches, and nothing matching IS the success case here.
-ext=$(printf '%s\n' "$crates" | grep -vE '^(greengate|greengate-runtime|git-attest|greenharness-quiet|greenharness-slots)$' || true)
+ext=$(printf '%s\n' "$crates" | grep -vE '^(greengate|greengate-runtime|greensummit|greenharness-quiet|greenharness-slots)$' || true)
 
 if [ -n "$ext" ]; then
   echo "greengate gained external dependencies:" >&2
@@ -101,4 +101,4 @@ for leaf in $ALLOWED; do
     exit 1
   fi
 done
-echo "greengate: no external dependencies (git-attest, greenharness-quiet and greenharness-slots, std-only, are the allowed crates)"
+echo "greengate: no external dependencies (greensummit, greenharness-quiet and greenharness-slots, std-only, are the allowed crates)"

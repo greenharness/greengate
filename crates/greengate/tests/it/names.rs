@@ -72,8 +72,8 @@ const ALLOWED_DATA: &[(&str, usize, &str)] = &[
     ),
     (
         "greengate-runtime/src/gate_stamp.rs",
-        7,
-        "the legacy notes name set, read beside the green one until the census (ADR-0068, 3a-3)",
+        13,
+        "a test-only copy of the old amont-gate and amont-attest names, which proves stamps under them are no longer read (ADR-0073)",
     ),
     (
         "greengate-runtime/src/staged_only.rs",

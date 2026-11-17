@@ -100,9 +100,9 @@ impl History {
 /// the same empty answer — a report that cannot be built is reported as
 /// missing, never as zero.
 pub fn history_in(repo: &Path) -> History {
-    // Both name sets (decisions ADR-0068): runs recorded before the writers
-    // switched sit under the legacy ref until the census, and each set's
-    // notes are parsed under that set's own header.
+    // The written name set only (ADR-0073): runs recorded under the old
+    // `amont-gate` names are no longer evidence. A set's notes are parsed
+    // under that set's own header.
     let mut history = History::default();
     for set in crate::gate_stamp::READ {
         history.runs.extend(history_under(repo, &set).runs);

@@ -425,7 +425,7 @@ fn attested(repo: &Repo, slots: &Path, line: &str) -> Option<String> {
         .unwrap_or_default()
         .to_string();
     let note = Command::new("git")
-        .args(["notes", "--ref", "greengate-attest", "show", &tip])
+        .args(["notes", "--ref", "greensummit", "show", &tip])
         .current_dir(&remote)
         .output()
         .expect("git notes on the remote");
