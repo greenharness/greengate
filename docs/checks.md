@@ -828,7 +828,7 @@ The gate stamps above stay local by design — an unsigned note is only as
 honest as whoever can write the ref. Their signed successor can travel:
 with `git config greengate.attest true`, a push whose block gates all passed
 leaves an `ssh-keygen`-signed note on each pushed tip in
-`refs/notes/greengate-attest` and sends that ref along, and CI may then skip
+`refs/notes/greensummit` and sends that ref along, and CI may then skip
 the test steps the attestation names — but only for exactly the attested
 tree, and only after the signature verifies. The whole contract, including
 what CI must check and why every failure mode falls back to running the

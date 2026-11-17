@@ -101,7 +101,7 @@ fn push_hook_env(
 /// The `gates` line the origin's attestation note on `tip` carries, if any.
 fn attested_gates(origin: &std::path::Path, tip: &str) -> String {
     let note = Command::new("git")
-        .args(["notes", "--ref", "greengate-attest", "show", tip])
+        .args(["notes", "--ref", "greensummit", "show", tip])
         .current_dir(origin)
         .output()
         .expect("git notes on the origin");
@@ -156,7 +156,7 @@ fn old_name_refs(dir: &std::path::Path) -> String {
             "for-each-ref",
             "--format=%(refname)",
             "refs/notes/amont-*",
-            "refs/notes/attest-local/amont-*",
+            "refs/notes/greensummit-local/amont-*",
         ])
         .current_dir(dir)
         .output()
@@ -199,10 +199,7 @@ fn a_push_with_provenance_writes_no_amont_named_ref() {
     let (code, out) = push_hook_env(&r, &base, &origin, &[("CLAUDE_CONFIG_DIR", &config)]);
     assert_eq!(code, 0, "{out}");
     let remote = note_refs(&origin);
-    assert!(
-        remote.contains("refs/notes/greengate-attest"),
-        "{remote}\n{out}"
-    );
+    assert!(remote.contains("refs/notes/greensummit"), "{remote}\n{out}");
     assert!(
         remote.contains("refs/notes/greengate-provenance"),
         "{remote}\n{out}"

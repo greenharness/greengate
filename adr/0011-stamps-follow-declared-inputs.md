@@ -31,7 +31,7 @@ under a tree key it missed every stamp: the local pre-push gate re-ran
 `cargo test` (32 min cold) for content it had already judged.
 
 Attest already gives a repository a way to say what a gate reads
-(`.github/attest-inputs`) and a fingerprint over exactly those bytes. CI uses
+(`.github/attest-inputs@6833c074`) and a fingerprint over exactly those bytes. CI uses
 it (`decisions:ADR-0033`). The local stamps did not.
 
 ## Decision

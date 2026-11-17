@@ -330,7 +330,7 @@ fn an_attested_tree_reads_as_attested_even_when_it_is_not_checked_out() {
     r.write(
         ".github/allowed_signers",
         &format!(
-            "t@example.org namespaces=\"greengate-attest,greengate-provenance\" {}\n",
+            "t@example.org namespaces=\"greensummit,greengate-provenance\" {}\n",
             public.trim()
         ),
     );
@@ -353,7 +353,7 @@ fn an_attested_tree_reads_as_attested_even_when_it_is_not_checked_out() {
     let listed = std::process::Command::new("git")
         .arg("--git-dir")
         .arg(&remote)
-        .args(["notes", "--ref", "greengate-attest", "list"])
+        .args(["notes", "--ref", "greensummit", "list"])
         .output()
         .expect("git notes list");
     let keys: Vec<String> = String::from_utf8_lossy(&listed.stdout)
@@ -366,7 +366,7 @@ fn an_attested_tree_reads_as_attested_even_when_it_is_not_checked_out() {
             let shown = std::process::Command::new("git")
                 .arg("--git-dir")
                 .arg(&remote)
-                .args(["notes", "--ref", "greengate-attest", "show", k])
+                .args(["notes", "--ref", "greensummit", "show", k])
                 .output()
                 .expect("git notes show");
             String::from_utf8_lossy(&shown.stdout).into_owned()

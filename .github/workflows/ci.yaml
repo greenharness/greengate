@@ -24,7 +24,7 @@ on:
   schedule:
     - cron: "17 6 * * 1"
 
-# WHAT A SIGNATURE ALREADY COVERS (ADR-0024). `.github/attest-inputs` declares
+# WHAT A SIGNATURE ALREADY COVERS (ADR-0024). `.github/greensummit-inputs` declares
 # what each gate reads, so a result signed for one tree is reused on any tree
 # whose declared files are byte-identical: the closing commit of a branch
 # changes only docs/plans and skips the heavy jobs below. `verify` reads the
@@ -190,17 +190,17 @@ jobs:
       # which exists to catch drift no push made.
       - id: linux
         if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
-        uses: fredericrous/attest@c5c61817f5a78c3a23d31c903c00ba1eef50cc39 # v1.7.0
+        uses: greenharness/greensummit@9a54c1db68fc641e123f91fbb98a715bba5474ab # v2.0.0
         with:
           platform: x86_64-linux
       - id: macos
         if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
-        uses: fredericrous/attest@c5c61817f5a78c3a23d31c903c00ba1eef50cc39 # v1.7.0
+        uses: greenharness/greensummit@9a54c1db68fc641e123f91fbb98a715bba5474ab # v2.0.0
         with:
           platform: aarch64-macos
       - id: windows
         if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
-        uses: fredericrous/attest@c5c61817f5a78c3a23d31c903c00ba1eef50cc39 # v1.7.0
+        uses: greenharness/greensummit@9a54c1db68fc641e123f91fbb98a715bba5474ab # v2.0.0
         with:
           platform: x86_64-windows
       # A pull request proves Linux; macOS, Windows and the load scenarios
@@ -343,8 +343,8 @@ jobs:
           # found"), which is what the committed one is, so it fails before it
           # reaches any Rust at all. Removing it is safe and is not a weakening
           # of the check: the two crates being checked have one dependency,
-          # git-attest, itself std-only — the property the `deps` job exists
-          # to enforce — so the floor is resolved for it from `^1.6` as well.
+          # greensummit, itself std-only — the property the `deps` job exists
+          # to enforce — so the floor is resolved for it from `^2` as well.
           # The checkout is disposable; nothing is committed back.
           rm -f Cargo.lock
           cargo "+$MSRV" check -p greengate -p greengate-runtime
@@ -1276,21 +1276,21 @@ jobs:
       # One block per platform: a payload names one, and the signer defaults to
       # its own runner's. The platform below is the one the plan validated.
       - if: ${{ steps.plan.outputs.linux != '' }}
-        uses: fredericrous/attest/sign@c5c61817f5a78c3a23d31c903c00ba1eef50cc39 # v1.7.0
+        uses: greenharness/greensummit/sign@9a54c1db68fc641e123f91fbb98a715bba5474ab # v2.0.0
         with:
           key: ${{ secrets.ATTEST_SIGNING_KEY }}
           gates: ${{ steps.plan.outputs.linux }}
           platform: x86_64-linux
           producer: attest-sign-linux
       - if: ${{ steps.plan.outputs.macos != '' }}
-        uses: fredericrous/attest/sign@c5c61817f5a78c3a23d31c903c00ba1eef50cc39 # v1.7.0
+        uses: greenharness/greensummit/sign@9a54c1db68fc641e123f91fbb98a715bba5474ab # v2.0.0
         with:
           key: ${{ secrets.ATTEST_SIGNING_KEY }}
           gates: ${{ steps.plan.outputs.macos }}
           platform: aarch64-macos
           producer: attest-sign-macos
       - if: ${{ steps.plan.outputs.windows != '' }}
-        uses: fredericrous/attest/sign@c5c61817f5a78c3a23d31c903c00ba1eef50cc39 # v1.7.0
+        uses: greenharness/greensummit/sign@9a54c1db68fc641e123f91fbb98a715bba5474ab # v2.0.0
         with:
           key: ${{ secrets.ATTEST_SIGNING_KEY }}
           gates: ${{ steps.plan.outputs.windows }}

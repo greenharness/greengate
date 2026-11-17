@@ -1051,7 +1051,7 @@ fn stamps_reads_a_cluster_token_only_from_a_trusted_manifest() {
     assert!(text.contains("\"pre-commit-lint\":\"absent\""), "{text}");
 }
 
-/// `git_attest::format::MAX_BLOCKS`: past it the verifier ignores blocks.
+/// `greensummit::format::MAX_BLOCKS`: past it the verifier ignores blocks.
 const MAX_BLOCKS: usize = 32;
 
 const ATTEST_CONF: &str = "set executor cluster\n\
@@ -1082,7 +1082,7 @@ impl Cluster {
         c.r.write(
             ".github/allowed_signers",
             &format!(
-                "t@example.org namespaces=\"greengate-attest,greengate-provenance\" {}\n",
+                "t@example.org namespaces=\"greensummit,greengate-provenance\" {}\n",
                 public.trim()
             ),
         );
@@ -1120,7 +1120,7 @@ impl Cluster {
         let shown = std::process::Command::new("git")
             .arg("--git-dir")
             .arg(self.remote())
-            .args(["notes", "--ref", "greengate-attest", "show", key])
+            .args(["notes", "--ref", "greensummit", "show", key])
             .output()
             .expect("git notes show");
         String::from_utf8_lossy(&shown.stdout).into_owned()
@@ -1129,7 +1129,7 @@ impl Cluster {
     /// `(platform, gates)` of each block of the remote's note on `key`.
     pub(crate) fn remote_blocks(&self, key: &str) -> Vec<(String, Vec<String>)> {
         let note = self.remote_note(key);
-        note.split("greengate-attest-v2\n")
+        note.split("greensummit-v2\n")
             .skip(1)
             .map(|block| {
                 let field = |name: &str| {

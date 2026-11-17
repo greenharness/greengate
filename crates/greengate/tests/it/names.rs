@@ -52,8 +52,8 @@ const ALLOWED_DATA: &[(&str, usize, &str)] = &[
     ),
     (
         "greengate-runtime/src/attest.rs",
-        10,
-        "the old provenance header that is detected and kept, the old key path fallback and tests that spell the old names out (ADR-0068, plan 3a-3), until the census",
+        11,
+        "the old provenance header that is detected and kept, the old key path fallback, the pre-greensummit block headers named only in a stale-signer refusal (ADR-0073), and tests that spell the old names out, until the census",
     ),
     (
         "greengate-runtime/src/cluster/detached.rs",
@@ -72,8 +72,8 @@ const ALLOWED_DATA: &[(&str, usize, &str)] = &[
     ),
     (
         "greengate-runtime/src/gate_stamp.rs",
-        7,
-        "the legacy notes name set, read beside the green one until the census (ADR-0068, 3a-3)",
+        13,
+        "a test-only copy of the old amont-gate and amont-attest names, which proves stamps under them are no longer read (ADR-0073)",
     ),
     (
         "greengate-runtime/src/staged_only.rs",

@@ -9,10 +9,10 @@
 //!
 //! # What is amont's, and what is attest's
 //!
-//! The attestation FORMAT — the payload, a note's blocks, the `attest-inputs`
+//! The attestation FORMAT — the payload, a note's blocks, the `greensummit-inputs`
 //! spec, fingerprints, the canonical tree, the note keys, signing, the
 //! fetch-append-push publish loop and the verifier — is attest's, and amont
-//! calls the `git_attest` library for every part of it (decisions ADR-0037).
+//! calls the `greensummit` library for every part of it (decisions ADR-0037).
 //! There used to be a copy here, kept in step by hand; a fix to the format now
 //! lands once.
 //!
@@ -31,33 +31,30 @@
 //! One sharp edge is the notes push itself: `git push` from inside pre-push
 //! runs pre-push again. The child carries [`PUSH_GUARD`] in its environment
 //! and the dispatcher yields immediately when it sees it — checking a ref
-//! list that is only ever `refs/notes/greengate-attest` would be work spent
+//! list that is only ever `refs/notes/greensummit` would be work spent
 //! proving nothing.
 
 use crate::names::BIN;
 use std::path::{Path, PathBuf};
 
-use git_attest::format::block;
-use git_attest::notes::{publish as publish_notes, Publish, Published};
-use git_attest::produce::attestation;
+use greensummit::format::block;
+use greensummit::notes::{publish as publish_notes, Publish, Published};
+use greensummit::produce::attestation;
 
 use crate::pushrefs::PushRef;
 
-pub use git_attest::format::{platform, FORMAT, INPUTS_REF, NAMESPACE, NOTES_REF};
-pub use git_attest::notes::{classify_push as classify_push_stderr, PushFailure};
+pub use greensummit::format::{platform, FORMAT, INPUTS_REF, NAMESPACE, NOTES_REF};
+pub use greensummit::notes::{classify_push as classify_push_stderr, PushFailure};
 
-/// The order attest's name sets are read in (decisions ADR-0068): a block's
-/// header picks one, and its namespace follows. It mirrors git-attest's
-/// verify.rs read order, `[(GREEN, ..), (LEGACY, ..)]`. git-attest OWNS that
-/// read order: this copy must follow it, never lead it, and it is removed at
-/// the Phase 5 census.
-const READ_NAMES: [git_attest::format::Names; 2] =
-    [git_attest::format::GREEN, git_attest::format::LEGACY];
+/// The notes ref, fully qualified — `update-ref -d` needs it. The one name
+/// set greensummit 2.0 reads and writes (ADR-0073): no other set is read.
+pub const NOTES_FULL_REF: &str = "refs/notes/greensummit";
+pub const INPUTS_FULL_REF: &str = "refs/notes/greensummit-inputs";
 
-/// The notes ref, fully qualified — `update-ref -d` needs it. Written under
-/// the green names since greengate 4.4 (the same as git-attest's `WRITE`).
-pub const NOTES_FULL_REF: &str = "refs/notes/greengate-attest";
-pub const INPUTS_FULL_REF: &str = "refs/notes/greengate-attest-inputs";
+/// The block headers greengate wrote before greensummit 2.0 (ADR-0073):
+/// never read, only named in a refusal so the stale signer is the cause
+/// shown.
+pub(crate) const PRE_SUMMIT_HEADERS: [&str; 2] = ["greengate-attest-v2", "amont-attest-v2"];
 
 /// The header an older release of the hook wrote (until greengate 4.4). greengate no
 /// longer signs it: a payload that still carries it is kept and named, so
@@ -276,7 +273,7 @@ pub fn attest_push_per_tip(
             // log; at push time they are noise.
             let mut reasons = Vec::new();
             let att = attestation(here(), &tree, &line, &on, producer, &mut reasons);
-            let Ok(sig) = git_attest::sign::sign(NAMESPACE, &att.payload, &key) else {
+            let Ok(sig) = greensummit::sign::sign(NAMESPACE, &att.payload, &key) else {
                 continue;
             };
             let body = block(&att.payload, &sig);
@@ -487,7 +484,7 @@ fn provenance_push_from_dirs(dirs: &[PathBuf], remote: &str, refs: &[PushRef]) {
         }
         // canon(T) whatever `planExempt` says: that governs skipping a gate,
         // not a tree's identity. No canon, no signature: kept for next time.
-        let Ok(canon) = git_attest::fingerprint::canon(here(), &tree) else {
+        let Ok(canon) = greensummit::fingerprint::canon(here(), &tree) else {
             crate::say!(
                 "  provenance for {} not signed: its canonical tree cannot be computed;",
                 &r.local_oid[..r.local_oid.len().min(7)]
@@ -513,7 +510,7 @@ fn provenance_push_from_dirs(dirs: &[PathBuf], remote: &str, refs: &[PushRef]) {
     let mut blocks: Vec<(String, String)> = Vec::new();
     let mut signed: Vec<PathBuf> = Vec::new();
     for rec in found {
-        let sig = match git_attest::sign::sign(PROVENANCE_NAMESPACE, &rec.payload, &key) {
+        let sig = match greensummit::sign::sign(PROVENANCE_NAMESPACE, &rec.payload, &key) {
             Ok(sig) => sig,
             Err(e) => {
                 crate::say!(
@@ -636,7 +633,7 @@ fn publish(remote: &str, notes_ref: &str, blocks: &[(String, String)]) -> bool {
 /// neither GitHub nor Forgejo: the gate names a VALID attestation covers for
 /// the tree checked out here, space-separated, or `None`.
 ///
-/// attest's verifier, the one its action and `git-attest covered` run: input
+/// attest's verifier, the one its action and `greensummit covered` run: input
 /// fingerprints, the canonical tree and every block of a note included.
 /// `principal` of `None` accepts whoever the signature says, if that key is in
 /// the signers file. `anywhere` names the gates accepted from any platform
@@ -688,7 +685,7 @@ pub fn covered_report(
     anywhere: &[String],
 ) -> Covered {
     let verdict =
-        git_attest::verify::evaluate(dir, signers, principal, require_platform, anywhere, false);
+        greensummit::verify::evaluate(dir, signers, principal, require_platform, anywhere, false);
     for line in verdict.loud.iter().chain(&verdict.warnings) {
         eprintln!("{BIN}: {line}");
     }
@@ -706,9 +703,9 @@ pub fn covered_report(
 }
 
 /// One `verified under <namespace>` line per name set a covering block
-/// verified under, in git-attest's own wording, so a count of those lines
+/// verified under, in greensummit's own wording, so a count of those lines
 /// covers greengate's verifications too.
-fn verified_lines(verdict: &git_attest::verify::Verdict) -> Vec<String> {
+fn verified_lines(verdict: &greensummit::verify::Verdict) -> Vec<String> {
     verdict
         .verified_under
         .iter()
@@ -717,7 +714,7 @@ fn verified_lines(verdict: &git_attest::verify::Verdict) -> Vec<String> {
 }
 
 /// The verifier's trail lines that say a note's signature did not verify:
-/// `note on <where>: <why>` (git-attest 1.6 `verify`). The other lines about a
+/// `note on <where>: <why>` (greensummit 1.6 `verify`). The other lines about a
 /// note (`… carries no signature block`, `… has more than N blocks`) carry no
 /// `: `, and a tree that moved is not a `note on` line at all.
 fn signature_rejections(trail: &[String]) -> Vec<String> {
@@ -737,17 +734,6 @@ pub(crate) struct SignerBlock {
     pub gates: Vec<String>,
     /// The block as a note holds it.
     pub body: String,
-    /// The name set its header named, which its signature verified under.
-    pub names: git_attest::format::Names,
-}
-
-impl SignerBlock {
-    /// Whether the block is of the name set this greengate publishes
-    /// (`WRITE`): one of the other set would sit under a ref whose header is
-    /// not its own.
-    pub(crate) fn is_publishable(&self) -> bool {
-        self.names == git_attest::format::WRITE
-    }
 }
 
 /// Why a signer block is refused, by cause: what a person checks next
@@ -761,18 +747,23 @@ pub(crate) enum BlockRefusal {
     /// A block about something else: not one block of this format, another
     /// platform or tree, or a gate missing. The ConfigMap is what to read.
     Content(String),
+    /// A block under the header a greengate older than greensummit 2.0
+    /// wrote: the signer image is stale, and rolling it is what to do.
+    StaleSigner(String),
 }
 
 impl BlockRefusal {
     /// The reason, as said.
     pub(crate) fn reason(&self) -> &str {
         match self {
-            BlockRefusal::Signer(why) | BlockRefusal::Content(why) => why,
+            BlockRefusal::Signer(why)
+            | BlockRefusal::Content(why)
+            | BlockRefusal::StaleSigner(why) => why,
         }
     }
 }
 
-/// `body` as a signer block for `tree`: exactly one git-attest block, of
+/// `body` as a signer block for `tree`: exactly one greensummit block, of
 /// this format, on the cluster's platform, for `tree`, whose signature
 /// verifies against `signers` (attest's verifier, platform-bound principals
 /// enforced) as a principal bound to the cluster's platform. `Err` is the
@@ -782,23 +773,28 @@ pub(crate) fn signer_block(
     tree: &str,
     signers: &Path,
 ) -> Result<SignerBlock, BlockRefusal> {
-    use git_attest::format::{bound_platform, field, split_blocks};
-    use BlockRefusal::{Content, Signer};
+    use greensummit::format::{bound_platform, field, split_blocks};
+    use BlockRefusal::{Content, Signer, StaleSigner};
     let (mut blocks, _) = split_blocks(body);
     if blocks.len() != 1 {
         return Err(Content(format!("{} signed blocks, not one", blocks.len())));
     }
     let signed_block = blocks.remove(0);
-    // The header names the set; the namespace follows it, never the other
-    // set's (ADR-0068): an old signature cannot pass as a new one.
+    // One name set (ADR-0073): a block under an older header is not read,
+    // and its signature is checked under greensummit's namespace only. The
+    // headers greengate wrote before greensummit 2.0 are recognised only to
+    // say why: the signer runs an older greengate.
     let header = signed_block.payload.split('\n').next();
-    let Some(names) = READ_NAMES.into_iter().find(|n| Some(n.format) == header) else {
-        return Err(Content(format!(
-            "not an {} or {} payload",
-            git_attest::format::GREEN.format,
-            git_attest::format::LEGACY.format
-        )));
-    };
+    if header != Some(FORMAT) {
+        let header = header.unwrap_or("missing");
+        if PRE_SUMMIT_HEADERS.contains(&header) {
+            return Err(StaleSigner(format!(
+                "a {header} block, written by a greengate older than greensummit 2.0, \
+                 not a {FORMAT} one"
+            )));
+        }
+        return Err(Content(format!("not a {FORMAT} payload (header {header})")));
+    }
     let on = field(&signed_block.payload, "platform");
     if on != Some(crate::cluster::PLATFORM) {
         return Err(Content(format!(
@@ -815,8 +811,8 @@ pub(crate) fn signer_block(
             claimed.unwrap_or("missing")
         )));
     }
-    let principal = git_attest::sign::verify(
-        names.namespace,
+    let principal = greensummit::sign::verify(
+        NAMESPACE,
         &signed_block.payload,
         &signed_block.signature,
         signers,
@@ -837,18 +833,17 @@ pub(crate) fn signer_block(
             .map(str::to_string)
             .collect(),
         body: block(&signed_block.payload, &signed_block.signature),
-        names,
     })
 }
 
 /// Where `cluster collect` files a checked signer block until a push
-/// publishes it: attest's local-only notes (`refs/notes/attest-local/
-/// greengate-attest`, SPEC "origin never saw them"). Not the local
+/// publishes it: attest's local-only notes (`refs/notes/greensummit-local/
+/// greensummit`, SPEC "origin never saw them"). Not the local
 /// [`NOTES_REF`], which mirrors origin's and is replaced whenever it is
 /// synced. Blocks an older greengate filed under `attest-local/amont-attest`
-/// are not read; `greengate doctor` reports those refs.
+/// or `attest-local/greengate-attest` are not read.
 fn signer_notes_ref() -> String {
-    format!("{}{NOTES_REF}", git_attest::format::LOCAL_PREFIX)
+    format!("{}{NOTES_REF}", greensummit::format::LOCAL_PREFIX)
 }
 
 /// File a checked signer block in the local-only notes ([`signer_notes_ref`])
@@ -861,7 +856,7 @@ pub(crate) fn file_signer_block(body: &str, keys: &[&str]) -> Result<(), String>
     for key in keys {
         let entry = [((*key).to_string(), body.to_string())];
         if matches!(
-            git_attest::notes::publish_local(here(), None, &notes_ref, &entry),
+            greensummit::notes::publish_local(here(), None, &notes_ref, &entry),
             Published::Error
         ) {
             return Err(format!(
@@ -876,7 +871,7 @@ pub(crate) fn file_signer_block(body: &str, keys: &[&str]) -> Result<(), String>
 /// check, those on another platform or tree skipped before any signature is
 /// verified.
 fn filed_signer_blocks(tree: &str) -> Vec<SignerBlock> {
-    use git_attest::format::{field, split_blocks};
+    use greensummit::format::{field, split_blocks};
     let Some(signers) = default_signers() else {
         return Vec::new();
     };
@@ -892,15 +887,13 @@ fn filed_signer_blocks(tree: &str) -> Vec<SignerBlock> {
                 && field(&b.payload, "tree") == Some(tree)
         })
         .filter_map(|b| signer_block(&block(&b.payload, &b.signature), tree, &signers).ok())
-        // Published under the written ref, so only a block of the written set.
-        .filter(SignerBlock::is_publishable)
         .collect()
 }
 
 /// Where the repository keeps its `allowed_signers`, resolved from the
 /// repository root as attest resolves it.
 pub fn default_signers() -> Option<PathBuf> {
-    git_attest::verify::default_signers(here())
+    greensummit::verify::default_signers(here())
 }
 
 /// A ref oid that is all zeros — git's spelling of "no object" in the
@@ -909,7 +902,7 @@ fn is_zero(oid: &str) -> bool {
     !oid.is_empty() && oid.bytes().all(|b| b == b'0')
 }
 
-/// uninstall: forget the local notes refs of both name sets. The copies already pushed to remotes are
+/// uninstall: forget the local notes ref. The copies already pushed to remotes are
 /// statements we made and stand by; only OUR bookkeeping is removed — the
 /// same line `gate_stamp::forget` draws.
 pub fn forget() -> bool {
@@ -918,12 +911,7 @@ pub fn forget() -> bool {
 
 /// The same, for a repository this process is not standing in.
 pub fn forget_in(repo: &std::path::Path) -> bool {
-    let mut deleted = false;
-    for names in READ_NAMES {
-        let full = format!("refs/notes/{}", names.notes_ref);
-        deleted |= crate::git::succeeds_in(repo, &["update-ref", "-d", &full]);
-    }
-    deleted
+    crate::git::succeeds_in(repo, &["update-ref", "-d", NOTES_FULL_REF])
 }
 
 #[cfg(test)]
@@ -939,7 +927,7 @@ pub(crate) mod tests {
     }
 
     /// The written refs are the green ones, each full ref is `refs/notes/`
-    /// plus its short one, and git-attest writes GREEN. Fails if either
+    /// plus its short one, and greensummit writes GREEN. Fails if either
     /// side drifts back to an `amont-*` name.
     #[test]
     fn the_written_names_are_green_and_each_full_ref_names_its_ref() {
@@ -949,17 +937,19 @@ pub(crate) mod tests {
             (PROVENANCE_FULL_REF, PROVENANCE_REF),
         ] {
             assert_eq!(full, format!("refs/notes/{short}"));
-            assert!(full.starts_with("refs/notes/greengate-"), "{full}");
         }
-        assert_eq!(git_attest::format::WRITE, git_attest::format::GREEN);
+        assert_eq!(NOTES_FULL_REF, "refs/notes/greensummit");
+        assert_eq!(INPUTS_FULL_REF, "refs/notes/greensummit-inputs");
+        assert_eq!(PROVENANCE_FULL_REF, "refs/notes/greengate-provenance");
+        assert_eq!(greensummit::format::WRITE, greensummit::format::SUMMIT);
     }
 
     fn canon(tree: &str) -> Option<String> {
-        git_attest::fingerprint::canon(here(), tree).ok()
+        greensummit::fingerprint::canon(here(), tree).ok()
     }
 
     fn sign(payload: &str, key: &Path) -> Option<String> {
-        git_attest::sign::sign(NAMESPACE, payload, key).ok()
+        greensummit::sign::sign(NAMESPACE, payload, key).ok()
     }
 
     fn verify(payload: &str, sig: &str, signers: &Path, principal: &str) -> bool {
@@ -973,7 +963,7 @@ pub(crate) mod tests {
         signers: &Path,
         principal: &str,
     ) -> bool {
-        git_attest::sign::verify(namespace, payload, sig, signers, Some(principal)).is_ok()
+        greensummit::sign::verify(namespace, payload, sig, signers, Some(principal)).is_ok()
     }
 
     /// `greengate.attest` and the key path come from git config, which each test
@@ -1440,11 +1430,11 @@ pub(crate) mod tests {
         scratch_cleanup(&work);
     }
 
-    /// Spelled out: an attestation push writes the green refs, the green
-    /// header and a green-namespace signature, and no `amont-*` ref. Fails if
-    /// any writer still files the old names.
+    /// Spelled out: an attestation push writes greensummit's refs, header and
+    /// namespace (greengate's provenance beside them), and no older ref.
+    /// Fails if any writer still files the old names.
     #[test]
-    fn an_attestation_push_writes_only_green_refs() {
+    fn an_attestation_push_writes_only_greensummit_refs() {
         let (d, work, remote, head, _tree, signers) = provenance_world("attest-green-refs");
         let gates = ["pre-push-cargo-test".to_string()];
         in_repo(&work, || {
@@ -1455,22 +1445,20 @@ pub(crate) mod tests {
             &["for-each-ref", "--format=%(refname)", "refs/notes"],
         );
         assert!(
-            refs.lines().any(|r| r == "refs/notes/greengate-attest"),
+            refs.lines().any(|r| r == "refs/notes/greensummit"),
             "{refs}"
         );
         assert!(
-            refs.lines().all(|r| r.starts_with("refs/notes/greengate-")),
+            refs.lines().all(|r| r.starts_with("refs/notes/greensummit")
+                || r.starts_with("refs/notes/greengate-provenance")),
             "an old name was written: {refs}"
         );
-        let note = git(
-            &remote,
-            &["notes", "--ref", "greengate-attest", "show", &head],
-        );
+        let note = git(&remote, &["notes", "--ref", "greensummit", "show", &head]);
         let (p, sig) = note.split_once("\n\n").expect("payload and signature");
         let payload = format!("{p}\n");
-        assert!(payload.starts_with("greengate-attest-v2\n"), "{payload}");
+        assert!(payload.starts_with("greensummit-v2\n"), "{payload}");
         assert!(verify_in(
-            "greengate-attest",
+            "greensummit",
             &payload,
             sig,
             &signers,
@@ -1772,11 +1760,11 @@ pub(crate) mod tests {
         let (_d, work, remote, _) = remote_and_work("inputs");
         std::fs::create_dir_all(work.join(".github")).unwrap();
         std::fs::write(
-            work.join(".github/attest-inputs"),
+            work.join(".github/greensummit-inputs"),
             "pre-push-run-tests-js a.ts\n",
         )
         .unwrap();
-        git(&work, &["add", ".github/attest-inputs"]);
+        git(&work, &["add", ".github/greensummit-inputs"]);
         git(&work, &["commit", "-qm", "chore: spec"]);
         in_repo(&work, || {
             attest_push(
@@ -2099,13 +2087,18 @@ pub(crate) mod tests {
 
     // --- attest 1.4.0 parity: the notes ref is origin's mirror --------------
 
-    // Both name sets (decisions ADR-0068): a signer block's header picks the
-    // set and the namespace its signature is checked under follows, never
-    // the other set's.
+    // One name set (ADR-0073): a signer block under the header greengate
+    // wrote before greensummit 2.0 is not read, even when its key is trusted
+    // under the old namespace too.
+
+    /// The header and namespace greengate wrote before greensummit 2.0,
+    /// spelled out: greensummit no longer exports them.
+    pub(crate) const OLD_FORMAT: &str = PRE_SUMMIT_HEADERS[0];
+    pub(crate) const OLD_NAMESPACE: &str = "greengate-attest";
 
     /// A key the signers file lists, bound to the cluster's platform, under
-    /// BOTH namespaces: a refusal below comes from the header-to-namespace
-    /// binding, not from the signers file.
+    /// the old namespace and greensummit's: a refusal below comes from the
+    /// one-set read, not from the signers file.
     pub(crate) fn both_names_signer(dir: &Path) -> (PathBuf, PathBuf) {
         let key = dir.join("signer_key");
         let ok = std::process::Command::new("ssh-keygen")
@@ -2122,8 +2115,8 @@ pub(crate) mod tests {
             format!(
                 "cluster-signer@{} namespaces=\"{},{}\" {pubkey}",
                 crate::cluster::PLATFORM,
-                git_attest::format::LEGACY.namespace,
-                git_attest::format::GREEN.namespace
+                OLD_NAMESPACE,
+                greensummit::format::SUMMIT.namespace
             ),
         )
         .unwrap();
@@ -2136,65 +2129,64 @@ pub(crate) mod tests {
             "{header}\ntree {tree}\ngates suite\nplatform {}\ngreengate 0.0.0\n",
             crate::cluster::PLATFORM
         );
-        let sig = git_attest::sign::sign(namespace, &payload, key).expect("sign");
+        let sig = greensummit::sign::sign(namespace, &payload, key).expect("sign");
         block(&payload, &sig)
     }
 
     #[test]
-    fn a_signer_block_is_checked_under_the_namespace_its_header_names() {
-        use git_attest::format::{GREEN, LEGACY};
+    fn a_signer_block_is_read_only_under_greensummit_names() {
+        use greensummit::format::SUMMIT;
         let scratch = dir("signer-names");
         let (key, signers) = both_names_signer(&scratch);
         let tree = "0123456789012345678901234567890123456789";
-        for set in [GREEN, LEGACY] {
-            let body = block_with(set.format, set.namespace, tree, &key);
-            let checked = signer_block(&body, tree, &signers)
-                .unwrap_or_else(|e| panic!("{}: {}", set.format, e.reason()));
-            assert_eq!(checked.names, set);
-            assert_eq!(checked.gates, ["suite"]);
+        let body = block_with(SUMMIT.format, SUMMIT.namespace, tree, &key);
+        let checked = signer_block(&body, tree, &signers)
+            .unwrap_or_else(|e| panic!("{}: {}", SUMMIT.format, e.reason()));
+        assert_eq!(checked.gates, ["suite"]);
+        // Each header an older greengate wrote, validly signed: not read,
+        // and refused as a stale signer.
+        for header in PRE_SUMMIT_HEADERS {
+            let old = block_with(header, OLD_NAMESPACE, tree, &key);
+            match signer_block(&old, tree, &signers) {
+                Err(BlockRefusal::StaleSigner(why)) => {
+                    assert!(why.contains(header), "{why}");
+                    assert!(why.contains(SUMMIT.format), "{why}");
+                }
+                other => panic!("a {header} block must be refused, got {other:?}"),
+            }
         }
-        for (header, signed_under) in [(LEGACY, GREEN), (GREEN, LEGACY)] {
-            let body = block_with(header.format, signed_under.namespace, tree, &key);
-            assert!(
-                matches!(
-                    signer_block(&body, tree, &signers),
-                    Err(BlockRefusal::Signer(_))
-                ),
-                "a {} block signed under {} must be refused",
-                header.format,
-                signed_under.namespace
-            );
-        }
+        // greensummit's header signed under the old namespace: the signature
+        // is checked under greensummit's, so it fails.
+        let crossed = block_with(SUMMIT.format, OLD_NAMESPACE, tree, &key);
+        assert!(matches!(
+            signer_block(&crossed, tree, &signers),
+            Err(BlockRefusal::Signer(_))
+        ));
         scratch_cleanup(&scratch);
     }
 
     #[test]
-    fn forget_in_removes_the_notes_ref_of_both_name_sets() {
-        let repo_dir = repo("forget-both");
+    fn forget_in_removes_the_notes_ref() {
+        let repo_dir = repo("forget-in");
         git(&repo_dir, &["commit", "-q", "--allow-empty", "-m", "c"]);
-        for names in READ_NAMES {
-            git(
-                &repo_dir,
-                &["notes", "--ref", names.notes_ref, "add", "-m", "x", "HEAD"],
-            );
-        }
+        git(
+            &repo_dir,
+            &["notes", "--ref", NOTES_REF, "add", "-m", "x", "HEAD"],
+        );
         assert!(forget_in(&repo_dir));
-        for names in READ_NAMES {
-            let full = format!("refs/notes/{}", names.notes_ref);
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_dir)
-                .args(["rev-parse", "--verify", "-q", &full])
-                .output()
-                .unwrap();
-            assert!(!out.status.success(), "{full} survived forget_in");
-        }
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_dir)
+            .args(["rev-parse", "--verify", "-q", NOTES_FULL_REF])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{NOTES_FULL_REF} survived forget_in");
         scratch_cleanup(&repo_dir);
     }
 
     #[test]
-    fn filed_signer_blocks_drops_a_block_of_the_other_name_set() {
-        use git_attest::format::{GREEN, LEGACY};
+    fn filed_signer_blocks_drops_a_block_under_the_old_names() {
+        use greensummit::format::SUMMIT;
         let work = repo("filed-names");
         std::fs::write(work.join("a.txt"), "x").unwrap();
         git(&work, &["add", "a.txt"]);
@@ -2203,38 +2195,27 @@ pub(crate) mod tests {
         std::fs::create_dir_all(work.join(".forgejo")).unwrap();
         std::fs::copy(&signers, work.join(".forgejo/allowed_signers")).unwrap();
         let tree = git(&work, &["rev-parse", "HEAD^{tree}"]);
-        let green = block_with(GREEN.format, GREEN.namespace, &tree, &key);
-        let legacy = block_with(LEGACY.format, LEGACY.namespace, &tree, &key);
+        let summit = block_with(SUMMIT.format, SUMMIT.namespace, &tree, &key);
+        let old = block_with(OLD_FORMAT, OLD_NAMESPACE, &tree, &key);
         in_repo(&work, || {
-            file_signer_block(&legacy, &[&tree]).expect("file the legacy block");
+            file_signer_block(&old, &[&tree]).expect("file the old block");
             assert!(
                 filed_signer_blocks(&tree).is_empty(),
-                "a legacy block is not publishable while WRITE is green"
+                "a block under the old names is not read"
             );
-            file_signer_block(&format!("{legacy}\n{green}"), &[&tree]).expect("file both");
+            file_signer_block(&format!("{old}\n{summit}"), &[&tree]).expect("file both");
             let kept = filed_signer_blocks(&tree);
             assert_eq!(kept.len(), 1, "{kept:?}");
-            assert_eq!(kept[0].names, git_attest::format::WRITE);
-            assert_eq!(kept[0].names, GREEN);
-            assert!(kept[0].is_publishable());
+            assert!(kept[0].body.starts_with(SUMMIT.format), "{}", kept[0].body);
         });
         scratch_cleanup(&work);
     }
 
     #[test]
     fn a_verification_says_which_name_it_went_through() {
-        let mut verdict = git_attest::verify::Verdict::nothing("test");
+        let mut verdict = greensummit::verify::Verdict::nothing("test");
         assert!(verified_lines(&verdict).is_empty());
-        verdict.verified_under = vec![
-            git_attest::format::GREEN.namespace.to_string(),
-            git_attest::format::LEGACY.namespace.to_string(),
-        ];
-        assert_eq!(
-            verified_lines(&verdict),
-            [
-                format!("verified under {}", git_attest::format::GREEN.namespace),
-                format!("verified under {}", git_attest::format::LEGACY.namespace),
-            ]
-        );
+        verdict.verified_under = vec![NAMESPACE.to_string()];
+        assert_eq!(verified_lines(&verdict), ["verified under greensummit"]);
     }
 }

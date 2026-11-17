@@ -30,7 +30,7 @@ producer amont-agent 2.43.0
 -----END SSH SIGNATURE-----
 ```
 
-Payload and signature are separated exactly as in an attestation block (attest [SPEC.md, "The note"](https://github.com/fredericrous/attest/blob/main/SPEC.md#the-note)) (the
+Payload and signature are separated exactly as in an attestation block (attest [SPEC.md, "The note"](https://github.com/greenharness/greensummit/blob/main/SPEC.md#the-note)) (the
 payload's trailing newline is signed), fields are read **by prefix**, the
 first occurrence wins, and an unknown line is ignored.
 
@@ -39,7 +39,7 @@ first occurrence wins, and an unknown line is ignored.
 | `greengate-provenance-v1` | format token, always first; any other value means absent |
 | `commit <oid>` | the pushed commit |
 | `tree <oid>` | its full tree |
-| `canon <oid>` | canon(T) of `tree` (attest [SPEC.md, "Canonical tree"](https://github.com/fredericrous/attest/blob/main/SPEC.md#canonical-tree)), whatever `planExempt` says; written by the signer, never by amont-agent (see "The handoff") |
+| `canon <oid>` | canon(T) of `tree` (attest [SPEC.md, "Canonical tree"](https://github.com/greenharness/greensummit/blob/main/SPEC.md#canonical-tree)), whatever `planExempt` says; written by the signer, never by amont-agent (see "The handoff") |
 | `patch <id>` | optional: `git diff --binary <merge-base(origin/main, commit)> <commit> -- . ':!docs/plans'` piped to `git patch-id --verbatim`; omitted when it cannot be computed |
 | `plan <path> <body-sha>` | the plan file in `tree` and its body-sha (`amont-agent plan-sha`) |
 | `review <how> <content-id>` | `reviewed`, `by-patch` (the hook's `reviewed-by-patch`) or `overruled`, and the content id (see "Content id") of the tree the review read |
@@ -52,11 +52,11 @@ record.
 
 **Where it lives.** `refs/notes/greengate-provenance`, one or more blocks per
 object, keyed by the **tree** and by the **commit**, as attestations are, and
-published by the same append-and-push loop (attest [SPEC.md, "Producing"](https://github.com/fredericrous/attest/blob/main/SPEC.md#producing)). The signature's
-ssh-keygen namespace is `greengate-provenance`, never `greengate-attest`: a
+published by the same append-and-push loop (attest [SPEC.md, "Producing"](https://github.com/greenharness/greensummit/blob/main/SPEC.md#producing)). The signature's
+ssh-keygen namespace is `greengate-provenance`, never `greensummit`: a
 provenance block can never be replayed as an attestation, and an
 `allowed_signers` entry accepts it only once it lists that namespace
-(`namespaces="greengate-attest,greengate-provenance,amont-attest,amont-provenance"`).
+(`namespaces="greensummit,greengate-provenance,amont-provenance"`).
 
 **The handoff.** amont-agent writes the unsigned payload to
 `<config dir>/amont-agent/provenance/<repo>/<commit>`, where `<config dir>`

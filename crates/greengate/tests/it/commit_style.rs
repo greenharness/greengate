@@ -168,12 +168,12 @@ fn the_amont_conf_opt_out_alone_is_deprecated_on_stderr_only() {
     assert!(!run.stdout.contains("deprecated"), "{}", run.stdout);
     assert!(
         run.stderr.contains(
-            "deprecated: planExempt in amont.conf; also write @plan-exempt off in attest-inputs"
+            "deprecated: planExempt in amont.conf; also write @plan-exempt off in greensummit-inputs"
         ),
         "{}",
         run.stderr
     );
-    r.write(".github/attest-inputs", "@plan-exempt off\n");
+    r.write(".github/greensummit-inputs", "@plan-exempt off\n");
     r.git(&["add", "-A"]);
     r.commit("chore: both opt-outs");
     let run = r.run(&["list", "--json"]);

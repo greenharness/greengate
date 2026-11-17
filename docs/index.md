@@ -82,7 +82,7 @@ deliberately does not:
   neither needs the other; they meet in one optional place, where its
   session notice asks `greengate agents-md --check` whether the guidance block
   an agent is about to believe has gone stale.
-- [**attest**](https://github.com/fredericrous/attest) — the CI half of
+- [**greensummit**](https://github.com/greenharness/greensummit) — the CI half of
   `greengate.attest`: when every pre-push block gate passed locally, greengate
   leaves a **signed** note on the tree it tested, and this single-purpose
   verifier lets CI skip work provably already done. Fail-open by

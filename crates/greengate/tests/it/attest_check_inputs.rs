@@ -1,7 +1,7 @@
 //! `amont attest check-inputs` — do the named gates declare, completely,
 //! everything the tree tracks?
 //!
-//! The proof is attest's (`git_attest::spec::check_coverage`, decisions
+//! The proof is attest's (`greensummit::spec::check_coverage`, decisions
 //! ADR-0037), and attest's own table pins every way a declaration can look
 //! complete and not be. What stays here is amont's wiring: each of the three
 //! answers reaches the terminal with its exit code, and a missing
@@ -11,7 +11,7 @@ use crate::common;
 
 use common::{HookRun, Repo};
 
-const SPEC: &str = ".github/attest-inputs";
+const SPEC: &str = ".github/greensummit-inputs";
 
 /// A repository tracking `files`, plus the spec text, committed.
 fn tracked(spec: Option<&str>, files: &[(&str, &str)]) -> Repo {
@@ -40,7 +40,7 @@ fn a_gate_declaring_every_tracked_file_is_covered() {
     );
     let run = check(&repo, &["g"]);
     assert_eq!(run.code, 0, "{}", run.output());
-    assert!(run.says("check-attest-inputs: ok"), "{}", run.output());
+    assert!(run.says("check-greensummit-inputs: ok"), "{}", run.output());
 }
 
 #[test]
@@ -61,7 +61,11 @@ fn an_unusable_spec_exits_two_and_says_which() {
     let none = tracked(None, &[("a.txt", "a")]);
     let run = check(&none, &["g"]);
     assert_eq!(run.code, 2, "{}", run.output());
-    assert!(run.says("no .forgejo/attest-inputs or"), "{}", run.output());
+    assert!(
+        run.says("no .forgejo/greensummit-inputs or"),
+        "{}",
+        run.output()
+    );
 
     // A glob invalidates the whole spec. With no allowed_signers anywhere,
     // `verify.sh` would have answered "nothing covered" and exited 0 before
@@ -72,7 +76,7 @@ fn an_unusable_spec_exits_two_and_says_which() {
     assert!(run.says("is invalid"), "{}", run.output());
 
     let both = tracked(Some("g a.txt\n"), &[("a.txt", "a")]);
-    both.stage(".forgejo/attest-inputs", "g a.txt\n");
+    both.stage(".forgejo/greensummit-inputs", "g a.txt\n");
     both.commit("second spec");
     let run = check(&both, &["g"]);
     assert_eq!(run.code, 2, "{}", run.output());

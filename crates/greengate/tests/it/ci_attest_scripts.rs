@@ -477,7 +477,7 @@ fn every_ci_gate_the_makefile_requires_is_known_to_every_script_and_the_workflow
     let sign = std::fs::read_to_string(script("ci-attest-sign-plan.sh")).unwrap();
     let verify = std::fs::read_to_string(script("ci-attest-verify-plan.sh")).unwrap();
     let workflow = std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
-    let spec = std::fs::read_to_string(root.join(".github/attest-inputs")).unwrap();
+    let spec = std::fs::read_to_string(root.join(".github/greensummit-inputs")).unwrap();
     let release = std::fs::read_to_string(script("ci-release-gates.sh")).unwrap();
     for g in gates {
         assert!(
@@ -489,7 +489,7 @@ fn every_ci_gate_the_makefile_requires_is_known_to_every_script_and_the_workflow
         assert!(workflow.contains(g), "{g} is not in ci.yaml");
         assert!(
             spec.lines().any(|l| l.starts_with(&format!("{g} "))),
-            "{g} is not declared in .github/attest-inputs"
+            "{g} is not declared in .github/greensummit-inputs"
         );
     }
 }
@@ -565,7 +565,7 @@ fn fake_verifier(dir: &Path, answers: &[(&str, &str)]) -> PathBuf {
         body.push_str(&format!("  {p}) echo \"{gates}\" ;;\n"));
     }
     body.push_str("esac\n");
-    let bin = dir.join("git-attest");
+    let bin = dir.join("greensummit");
     std::fs::write(&bin, body).unwrap();
     let ok = Command::new("chmod")
         .arg("+x")
@@ -590,7 +590,7 @@ fn release_gates(answers: &[(&str, &str)]) -> (i32, String) {
     let bin = fake_verifier(&dir, answers);
     let o = Command::new("sh")
         .arg(script("ci-release-gates.sh"))
-        .env("GIT_ATTEST", &bin)
+        .env("GREENSUMMIT_BIN", &bin)
         .output()
         .expect("run script");
     let _ = std::fs::remove_dir_all(&dir);

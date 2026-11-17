@@ -8,7 +8,7 @@
 //!
 //! **This crate gains no third-party dependency.** The hook binary depends on
 //! it, so anything added here reaches every commit transitively. The one
-//! crate it links is `git-attest`, attest's std-only implementation of the
+//! crate it links is `greensummit`, attest's std-only implementation of the
 //! attestation format (decisions ADR-0037), argued in Cargo.toml and checked
 //! by `scripts/check-no-deps.sh`. ratatui and friends belong in `amont-fleet`.
 //!
@@ -649,7 +649,7 @@ fn commit_style_json(style: &commit_style::Style, rows: &[commit_style::Setting]
 ///
 /// Every other machine-readable thing this tool writes carries one and
 /// REFUSES what it does not recognise — `amont-gate-v1`, `greengate-held-v1`,
-/// `greengate-skew-v1`, `greengate-bypasses-v1`, and `amont-attest-v2`, whose bump
+/// `greengate-skew-v1`, `greengate-bypasses-v1`, and `greensummit-v2`, whose `-v2`
 /// exists precisely so a v1 verifier reads a v2 note as no note rather than
 /// misreading it. This document, the most public machine surface of the
 /// three, carried none: a reader had no way to state which contract it was

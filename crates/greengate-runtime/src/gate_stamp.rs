@@ -108,22 +108,12 @@ pub(crate) struct GateNames {
     pub canon_domain: &'static str,
     /// The attest names whose input domain keys a declared gate's
     /// fingerprint in the inputs ref.
-    pub attest: git_attest::format::Names,
+    pub attest: greensummit::format::Names,
 }
 
-/// The names stamps were written under until greengate 4.4 (amont 1.x to
-/// 4.3). Still read during the 30-day window; removed at the census.
-pub(crate) const LEGACY: GateNames = GateNames {
-    format: "amont-gate-v1",
-    notes_ref: "amont-gate",
-    inputs_ref: "amont-gate-inputs",
-    cluster_ref: "amont-gate-cluster",
-    done_ref: "amont-gate-done",
-    canon_domain: "amont-gate-canon",
-    attest: git_attest::format::LEGACY,
-};
-
-/// The names stamps are written under since greengate 4.4. Read first.
+/// The names stamps are written under since greengate 4.4, and the only
+/// ones read since greensummit 2.0 (ADR-0073): the `amont-gate-*` stamps of
+/// amont 1.x to greengate 4.3 are no longer read, so their gates rerun once.
 pub(crate) const GREEN: GateNames = GateNames {
     format: "greengate-gate-v1",
     notes_ref: "greengate-gate",
@@ -131,7 +121,7 @@ pub(crate) const GREEN: GateNames = GateNames {
     cluster_ref: "greengate-gate-cluster",
     done_ref: "greengate-gate-done",
     canon_domain: "greengate-gate-canon",
-    attest: git_attest::format::GREEN,
+    attest: greensummit::format::SUMMIT,
 };
 
 /// The ONE owner of what is written: [`FORMAT`] and the short `*_REF`
@@ -139,9 +129,10 @@ pub(crate) const GREEN: GateNames = GateNames {
 /// held equal to `refs/notes/{short}` by a test. GREEN since greengate 4.4.
 pub(crate) const WRITE: GateNames = GREEN;
 
-/// The order a stamp is read in: the green set first, the legacy one only
-/// for a key the green ref holds no note for.
-pub(crate) const READ: [GateNames; 2] = [GREEN, LEGACY];
+/// The sets a stamp is read under: the written one alone. Kept as a list so
+/// the readers below keep their shape; the one-element loops are collapsed
+/// by the greensummit-rename census (its Phase 5), as in greensummit 2.0.x.
+pub(crate) const READ: [GateNames; 1] = [WRITE];
 
 /// First token of the marker file and of every note body. Versioned like
 /// `staged_only::FORMAT`: a future amont that changes the shape bumps this,
@@ -156,7 +147,7 @@ pub const NOTES_REF: &str = WRITE.notes_ref;
 pub const NOTES_FULL_REF: &str = "refs/notes/greengate-gate";
 
 /// The second ref: stamps keyed by a gate's declared-input fingerprint
-/// (`.github/attest-inputs`, see [`crate::attest_inputs`]) instead of by the
+/// (`.github/greensummit-inputs`, see [`crate::attest_inputs`]) instead of by the
 /// whole tree. A gate whose inputs a repository declares is reused on any tree
 /// where those inputs are byte-identical — the closing plan commit changes the
 /// tree and none of them. Every key there is an oid that is not an object, as
@@ -477,10 +468,8 @@ fn note_in(notes_ref: &str, key: &str) -> Note {
 }
 
 /// The stamp at `key` as a READER sees it: the note in `which` ref of the
-/// first set of [`READ`] that holds one, parsed under that set's header. A
-/// green ref's note is the answer even when its header is wrong (it then
-/// vouches for nothing): the legacy ref is read only for a key the green
-/// ref has no note for.
+/// set of [`READ`] that holds one, parsed under that set's header. A note
+/// whose header is wrong is the answer still, and vouches for nothing.
 fn stamp_in(which: fn(&GateNames) -> &'static str, key: &str) -> Note {
     READ.iter()
         .find_map(|set| read_in(set, which(set), key))
@@ -491,9 +480,8 @@ fn stamp_in(which: fn(&GateNames) -> &'static str, key: &str) -> Note {
 /// `set`'s header; `None` when the ref holds no note there (or git would not
 /// answer, which reads the same: no stamp).
 ///
-/// A git failure on the green ref returns `None`, so a legacy note may answer
-/// in its place. That is the safe direction: the gate then re-runs, or reads
-/// the older stamp.
+/// A git failure returns `None`, which is the safe direction: the gate then
+/// re-runs.
 fn read_in(set: &GateNames, notes_ref: &str, key: &str) -> Option<Note> {
     crate::git::stdout(&["notes", "--ref", notes_ref, "show", key])
         .map(|body| Note::parse_as(&body, set.format))
@@ -524,8 +512,8 @@ fn input_tokens(tree: &str) -> Vec<String> {
         let Some(fp) = crate::attest_inputs::fingerprint(tree, &spec, gate) else {
             continue;
         };
-        // Each set computes its own key and reads its own ref; the legacy
-        // one only when the green ref has no note at the green key.
+        // The set computes its own key (its input domain) and reads its own
+        // ref.
         let note = READ.iter().find_map(|set| {
             let key = crate::attest_inputs::input_key(&set.attest, gate, &fp)?;
             read_in(set, set.inputs_ref, &key)
@@ -1898,7 +1886,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- declared-input reuse (`.github/attest-inputs`) -------------------
+    // Declared-input reuse (`.github/greensummit-inputs`).
 
     /// A repository declaring that gate `test` reads only `a.ts`, with one
     /// commit stamped `test@abc`. The plans directory is where a later,
@@ -1909,7 +1897,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs/plans")).unwrap();
         std::fs::write(dir.join("a.ts"), "x").unwrap();
         std::fs::write(dir.join("docs/plans/p.md"), "plan v1").unwrap();
-        std::fs::write(dir.join(".github/attest-inputs"), spec).unwrap();
+        std::fs::write(dir.join(".github/greensummit-inputs"), spec).unwrap();
         git(&dir, &["add", "-A"]);
         in_repo(&dir, || {
             record(&["test@abc"]);
@@ -1995,7 +1983,7 @@ mod tests {
             // The spec's own blob is in every fingerprint: widening what the
             // gate reads is a different declaration, so nothing is reused.
             std::fs::write(dir.join("b.ts"), "y").unwrap();
-            std::fs::write(dir.join(".github/attest-inputs"), "test a.ts b.ts\n").unwrap();
+            std::fs::write(dir.join(".github/greensummit-inputs"), "test a.ts b.ts\n").unwrap();
             git(&dir, &["add", "-A"]);
             git(&dir, &["commit", "-qm", "chore: widen the declaration"]);
             let head = git(&dir, &["rev-parse", "HEAD"]);
@@ -2075,7 +2063,7 @@ mod tests {
         std::fs::write(dir.join("a.ts"), "x").unwrap();
         std::fs::write(dir.join("amont.conf"), "scope = src\n").unwrap();
         std::fs::write(dir.join("docs/plans/p.md"), "v1").unwrap();
-        std::fs::write(dir.join(".github/attest-inputs"), "test a.ts\n").unwrap();
+        std::fs::write(dir.join(".github/greensummit-inputs"), "test a.ts\n").unwrap();
         git(&dir, &["add", "-A"]);
         in_repo(&dir, || {
             record(&["test@abc"]);
@@ -2140,8 +2128,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs/plans")).unwrap();
         std::fs::write(dir.join("a.ts"), "x").unwrap();
         std::fs::write(dir.join("docs/plans/p.md"), "v1").unwrap();
-        std::fs::write(dir.join(".github/attest-inputs"), "test a.ts\n").unwrap();
-        std::fs::write(dir.join(".forgejo/attest-inputs"), "test a.ts\n").unwrap();
+        std::fs::write(dir.join(".github/greensummit-inputs"), "test a.ts\n").unwrap();
+        std::fs::write(dir.join(".forgejo/greensummit-inputs"), "test a.ts\n").unwrap();
         git(&dir, &["add", "-A"]);
         in_repo(&dir, || {
             record(&["test@abc"]);
@@ -2159,7 +2147,7 @@ mod tests {
         let dir = repo("failed");
         std::fs::create_dir_all(dir.join(".github")).unwrap();
         std::fs::write(dir.join("a.ts"), "x").unwrap();
-        std::fs::write(dir.join(".github/attest-inputs"), "test a.ts\n").unwrap();
+        std::fs::write(dir.join(".github/greensummit-inputs"), "test a.ts\n").unwrap();
         git(&dir, &["add", "-A"]);
         in_repo(&dir, || {
             // pre-commit blocked or ran nothing: an empty record, no marker.
@@ -2349,9 +2337,9 @@ mod tests {
     fn a_spec_that_cannot_be_used_means_no_canonical_stamps() {
         // A directory where the spec should be: listed, unreadable as a blob.
         let dir = repo("canon-unreadable-spec");
-        std::fs::create_dir_all(dir.join(".github/attest-inputs")).unwrap();
+        std::fs::create_dir_all(dir.join(".github/greensummit-inputs")).unwrap();
         std::fs::create_dir_all(dir.join("docs/plans")).unwrap();
-        std::fs::write(dir.join(".github/attest-inputs/x"), "x").unwrap();
+        std::fs::write(dir.join(".github/greensummit-inputs/x"), "x").unwrap();
         std::fs::write(dir.join("a.ts"), "x").unwrap();
         std::fs::write(dir.join("docs/plans/p.md"), "v1").unwrap();
         git(&dir, &["add", "-A"]);
@@ -2374,8 +2362,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("docs/plans")).unwrap();
         std::fs::write(dir.join("a.ts"), "x").unwrap();
         std::fs::write(dir.join("docs/plans/p.md"), "v1").unwrap();
-        std::fs::write(dir.join(".github/attest-inputs"), "test a.ts\n").unwrap();
-        std::fs::write(dir.join(".forgejo/attest-inputs"), "test a.ts\n").unwrap();
+        std::fs::write(dir.join(".github/greensummit-inputs"), "test a.ts\n").unwrap();
+        std::fs::write(dir.join(".forgejo/greensummit-inputs"), "test a.ts\n").unwrap();
         git(&dir, &["add", "-A"]);
         in_repo(&dir, || {
             record(&["test@abc"]);
@@ -2405,9 +2393,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Both name sets (decisions ADR-0068, plan "greengate signs its notes
-    // under green names", Phase 2): read green first, legacy only for a key
-    // the green ref has no note for, a note's header matching its ref.
+    // One name set read (ADR-0073); the old `amont-gate` set below exists
+    // only to prove it is ignored, and a note's header must match its ref.
 
     /// A repository with one unjudged commit: no stamp under either set.
     fn unstamped(name: &str) -> (PathBuf, String, String) {
@@ -2482,6 +2469,51 @@ mod tests {
         }
     }
 
+    /// The names amont 1.x to greengate 4.3 wrote stamps under, spelled out:
+    /// nothing outside these tests names them since greensummit 2.0.
+    const LEGACY: GateNames = GateNames {
+        format: "amont-gate-v1",
+        notes_ref: "amont-gate",
+        inputs_ref: "amont-gate-inputs",
+        cluster_ref: "amont-gate-cluster",
+        done_ref: "amont-gate-done",
+        canon_domain: "amont-gate-canon",
+        attest: greensummit::format::Names {
+            format: "amont-attest-v2",
+            notes_ref: "amont-attest",
+            inputs_ref: "amont-attest-inputs",
+            namespace: "amont-attest",
+            input_domain: "amont-attest-input",
+            canon_domain: "amont-attest-canon",
+            producer: "amont",
+        },
+    };
+
+    #[test]
+    fn a_stamp_under_the_old_names_is_not_read() {
+        let (dir, head, tree) = unstamped("old-refs");
+        for key in [&head, &tree] {
+            plant(
+                &dir,
+                LEGACY.notes_ref,
+                key,
+                &format!("{} test@old", LEGACY.format),
+            );
+        }
+        plant(
+            &dir,
+            LEGACY.cluster_ref,
+            &tree,
+            &format!("{} suite@old", LEGACY.format),
+        );
+        in_repo(&dir, || {
+            assert!(stamps_of(&head).is_empty());
+            assert!(tree_tokens(&tree).is_empty());
+            assert!(cluster_tokens(&tree).is_empty());
+        });
+        let _ = std::fs::remove_dir_all(&dir); // best-effort temp cleanup; a leftover dir cannot change the verdict
+    }
+
     #[test]
     fn with_notes_under_both_refs_the_green_note_is_read() {
         let (dir, head, tree) = unstamped("both-refs");
@@ -2546,11 +2578,10 @@ mod tests {
         }
     }
 
-    /// A green inputs note is filed under the GREEN key (its own input
-    /// domain) and answers before the legacy one; the legacy key in the
-    /// green ref is not read.
+    /// An inputs note is read under the key of its own set's input domain;
+    /// a note filed under the old set's key in the same ref is not read.
     #[test]
-    fn the_green_inputs_ref_is_read_first_under_its_own_key() {
+    fn the_inputs_ref_is_read_under_its_own_key() {
         let dir = declared("green-inputs", "test a.ts\n");
         in_repo(&dir, || {
             let tree = git(&dir, &["rev-parse", "HEAD^{tree}"]);
@@ -2599,11 +2630,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir); // best-effort temp cleanup; a leftover dir cannot change the verdict
     }
 
-    /// `gate_evidence::history_in` reads the runs of both name sets: a run
-    /// recorded before the writers switched is still evidence, and a new one
-    /// lands in the green ref.
+    /// `gate_evidence::history_in` reads the runs of the written set only: a
+    /// run recorded under the old names is no evidence since greensummit 2.0.
     #[test]
-    fn history_reads_runs_under_both_name_sets() {
+    fn history_reads_runs_under_the_written_names_only() {
         let (dir, _head, tree) = unstamped("history-both");
         let other = git(&dir, &["rev-parse", "HEAD"]);
         plant(
@@ -2632,29 +2662,18 @@ mod tests {
             .map(|(k, r)| (k.clone(), r.gate.clone()))
             .collect();
         got.sort();
-        let mut want = vec![
-            (other, "old-gate".to_string()),
-            (tree, "new-gate".to_string()),
-        ];
-        want.sort();
-        assert_eq!(got, want);
+        assert_eq!(got, [(tree, "new-gate".to_string())]);
         let _ = std::fs::remove_dir_all(&dir); // best-effort temp cleanup; a leftover dir cannot change the verdict
     }
 
     #[test]
-    fn forget_removes_the_refs_of_both_name_sets() {
-        let (dir, _head, tree) = unstamped("forget-both");
+    fn forget_removes_the_written_refs() {
+        let (dir, _head, tree) = unstamped("forget-written");
         plant(
             &dir,
             GREEN.notes_ref,
             &tree,
             &format!("{} test@g", GREEN.format),
-        );
-        plant(
-            &dir,
-            LEGACY.notes_ref,
-            &tree,
-            &format!("{} test@l", LEGACY.format),
         );
         for set in READ {
             plant(&dir, set.done_ref, &tree, "done");

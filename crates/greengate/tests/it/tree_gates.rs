@@ -79,7 +79,7 @@ pub(crate) fn namespaces(r: &Repo, gate: &str) -> Vec<String> {
 /// what `pre-commit-tree-parity` requires before any tree gate may attest.
 pub(crate) fn workflow(gates: &[(&str, &str)]) -> String {
     let mut w = String::from(
-        "name: ci\njobs:\n  lint:\n    steps:\n      - id: attest\n        uses: fredericrous/attest@v1\n",
+        "name: ci\njobs:\n  lint:\n    steps:\n      - id: attest\n        uses: greenharness/greensummit@v2\n",
     );
     for (name, command) in gates {
         w.push_str(&format!(
@@ -358,7 +358,7 @@ fn remote_note(remote: &std::path::Path, commit: &str) -> String {
     let out = Command::new("git")
         .arg("--git-dir")
         .arg(remote)
-        .args(["notes", "--ref", "greengate-attest", "show", commit])
+        .args(["notes", "--ref", "greensummit", "show", commit])
         .output()
         .expect("git notes");
     String::from_utf8_lossy(&out.stdout).to_string()

@@ -32,7 +32,7 @@ don't already guard: a `debugger;` that slips past the local hook still
 has to survive the test suite and review.
 
 One thing this repository points CI at does run there, and it is deliberately
-**not greengate**: [`attest`](https://github.com/fredericrous/attest), a
+**not greengate**: [`attest`](https://github.com/greenharness/greensummit), a
 single-purpose verifier that reads a signed note and reports which checks it
 covers. It runs no checks and has no opinions to keep in sync — it verifies a
 *document about work that already happened*, which is the opposite of the
@@ -108,12 +108,12 @@ git config greengate.attest true                          # per repository
 ```
 
 With the toggle on, a push whose pre-push block gates all passed writes a
-note on each pushed tip in `refs/notes/greengate-attest` and pushes that ref
+note on each pushed tip in `refs/notes/greensummit` and pushes that ref
 alongside the branch. The note is a four-line payload plus an SSH
 signature over exactly those bytes:
 
 ```text
-greengate-attest-v2
+greensummit-v2
 tree <the tree the gates ran against>
 gates pre-push-cargo-test pre-push-audit-rust
 platform aarch64-macos
@@ -126,16 +126,16 @@ amont 1.9.0
 
 This does **not** repeal "greengate does not run in CI". CI still never
 executes greengate — the templates' `attest` step is
-[`fredericrous/attest`](https://github.com/fredericrous/attest), which needs
+[`greenharness/greensummit`](https://github.com/greenharness/greensummit), which needs
 nothing but `git` and `ssh-keygen`, and skips a test step only when *all four*
 hold:
 
 1. the signature verifies against `.forgejo/allowed_signers` (or your
    platform's path), a file **committed in the repository**, whose entry is
-   pinned to the `greengate-attest` namespace:
+   pinned to the `greensummit` namespace:
 
    ```text
-   you@example.com namespaces="greengate-attest,amont-attest" ssh-ed25519 AAAA…
+   you@example.com namespaces="greensummit" ssh-ed25519 AAAA…
    ```
 
 2. the attested **tree** is byte-for-byte the tree CI checked out — not
@@ -174,7 +174,7 @@ line that is committed and reviewed like any other:
 
 ```yaml
 - id: attest
-  uses: fredericrous/attest@v1
+  uses: greenharness/greensummit@v2
   with:
     platform: any
 ```
@@ -203,23 +203,23 @@ Everything is fail-open, and the action says why it found nothing rather than
 leaving you guessing:
 
 ```text
-attest: attested on aarch64-macos, this leg is x86_64-linux
-attest: no attestation found for tree 9f2a1c…
+greensummit: attested on aarch64-macos, this leg is x86_64-linux
+greensummit: no attestation found for tree 9f2a1c…
 ```
 
-If you would rather not depend on an action, `git-attest covered` (`cargo
-install git-attest`) is the same verifier as a binary, and `greengate attest
-covered` runs it too, through the `git_attest` library greengate links (decisions
+If you would rather not depend on an action, `greensummit covered` (`cargo
+install greensummit`) is the same verifier as a binary, and `greengate attest
+covered` runs it too, through the `greensummit` library greengate links (decisions
 ADR-0037), for CI that is neither GitHub nor Forgejo. All of them answer to
 the format in
-[`SPEC.md`](https://github.com/fredericrous/attest/blob/main/SPEC.md).
+[`SPEC.md`](https://github.com/greenharness/greensummit/blob/main/SPEC.md).
 
 Origin is the source of truth. `greengate attest covered` treats the local
-`refs/notes/greengate-attest` as a mirror of origin's: deleting that ref on
+`refs/notes/greensummit` as a mirror of origin's: deleting that ref on
 origin revokes every attestation it held — the next `covered` in any clone
 deletes its copy and prints how to undo that — and an origin that cannot be
 reached covers nothing, with the reason on stderr. The spec in
-`.github/attest-inputs` may mark a path with a leading `?` (`?build.rs`): it
+`.github/greensummit-inputs` may mark a path with a leading `?` (`?build.rs`): it
 may be absent, and the gate re-runs the day it appears.
 
 What signs is the machine that ran the tests, so the trust statement is
@@ -248,10 +248,10 @@ is the promise behind the line: every heavy gate it may defer has a CI step.
 
 Every cache above is keyed by the whole tree, so a commit that changes only
 `docs/plans/*.md` — the plan that opens a branch and the closing commit that
-records its verification — misses all of them. `.github/attest-inputs` lets a
+records its verification — misses all of them. `.github/greensummit-inputs` lets a
 repository say what each gate reads; a result is then reused on any tree whose
 declared paths are byte-identical to the ones it passed on (attest's
-[input fingerprints](https://github.com/fredericrous/attest/blob/main/SPEC.md)).
+[input fingerprints](https://github.com/greenharness/greensummit/blob/main/SPEC.md)).
 Both halves use the same fingerprint, from one module
 (`crates/greengate-runtime/src/attest_inputs.rs`):
 
@@ -279,8 +279,8 @@ is declared for every gate — a deliberate cost of a skip nobody has to trust.
 ### With no declaration: the canonical tree
 
 A repository that declares nothing needs nothing: since amont 1.56.0 the same
-reuse works with no `attest-inputs` file, on attest 1.5.0's
-[canonical tree](https://github.com/fredericrous/attest/blob/main/SPEC.md).
+reuse works with no `greensummit-inputs` file, on attest 1.5.0's
+[canonical tree](https://github.com/greenharness/greensummit/blob/main/SPEC.md).
 The canonical fingerprint is that of the tree with the *content* of the
 top-level `docs/plans/` left out and its *existence* kept, so a closing plan
 commit reuses every gate while a plan added, deleted or renamed, or any other
@@ -288,7 +288,7 @@ path changed, does not. Nothing is declared, so nothing can be under-declared
 and no completeness check is needed.
 
 - **The push** adds `canon <fp>` to the signed block and files the block under
-  the canonical key in `refs/notes/greengate-attest-inputs` (a repository with a
+  the canonical key in `refs/notes/greensummit-inputs` (a repository with a
   valid spec keeps its `input` lines and gains the `canon` line).
 - **The local hooks** file each gate's stamp under the canonical fingerprint
   too, in `refs/notes/greengate-gate-inputs`, and honour it at pre-commit and
@@ -375,7 +375,7 @@ attested as `tree-<name>`:
 
 ```yaml
 - id: attest
-  uses: fredericrous/attest@v1
+  uses: greenharness/greensummit@v2
   with:
     anywhere: tree-eslint     # formatting and lint do not depend on the platform
 
@@ -444,5 +444,5 @@ same append-and-push loop as attestations. The format is the attest SPEC's
 CI never reads it, and no step is skipped on it. `amont-agent shipped <plan>`
 does: it lists each pull request a plan shipped in, its merge commit, its
 release, and the record that went out. A repository's `allowed_signers` must
-list the namespace (`namespaces="greengate-attest,greengate-provenance,amont-attest,amont-provenance"`) for a record
+list the namespace (`namespaces="greensummit,greengate-provenance,amont-provenance"`) for a record
 to verify.

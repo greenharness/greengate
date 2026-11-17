@@ -527,6 +527,9 @@ fn next_step(record: &Pending, refusal: &BlockRefusal, namespace: &str) -> Strin
                 record.name
             )
         }
+        BlockRefusal::StaleSigner(_) => {
+            "roll the attest-signer image to this greengate release".to_string()
+        }
     }
 }
 
@@ -692,16 +695,9 @@ fn judge_block(
             "the repository has no allowed_signers".into(),
         ));
     };
+    // Only a block under greensummit's names checks (ADR-0073), so what is
+    // filed, and later published, sits under a ref whose header is its own.
     let checked = crate::attest::signer_block(block, &record.tree, signers)?;
-    // It is filed in, and published to, the written ref: a block of the other
-    // name set would sit under a ref whose header is not its own.
-    if !checked.is_publishable() {
-        return Err(BlockRefusal::Content(format!(
-            "a {} block, and this greengate publishes {} notes",
-            checked.names.format,
-            git_attest::format::WRITE.format
-        )));
-    }
     let missing: Vec<&str> = passed(record)
         .filter(|g| !checked.gates.iter().any(|named| named == g))
         .collect();
@@ -1165,22 +1161,21 @@ pub(in crate::cluster::detached) mod tests {
     use super::*;
 
     #[test]
-    fn judge_block_refuses_a_legacy_block_while_the_written_names_are_green() {
-        use crate::attest::tests::{block_with, both_names_signer, dir};
-        use git_attest::format::{GREEN, LEGACY};
+    fn judge_block_refuses_a_block_under_the_old_names() {
+        use crate::attest::tests::{block_with, both_names_signer, dir, OLD_FORMAT, OLD_NAMESPACE};
+        use greensummit::format::SUMMIT;
         let scratch = dir("judge-legacy");
         let (key, signers) = both_names_signer(&scratch);
         let tree = "0123456789012345678901234567890123456789";
         let mut record = sample("wf-legacy");
         record.tree = tree.to_string();
-        let body = block_with(LEGACY.format, LEGACY.namespace, tree, &key);
-        // It verifies (both names are bound to the signer), so the refusal
-        // is the written-names check and nothing else.
-        assert!(crate::attest::signer_block(&body, tree, &signers).is_ok());
+        // Validly signed under its own namespace, which the signers file
+        // trusts: the refusal is the one-set read and nothing else.
+        let body = block_with(OLD_FORMAT, OLD_NAMESPACE, tree, &key);
         match judge_block(&record, &body, Some(&signers)) {
-            Err(BlockRefusal::Content(why)) => {
-                assert!(why.contains(LEGACY.format), "{why}");
-                assert!(why.contains(GREEN.format), "{why}");
+            Err(BlockRefusal::StaleSigner(why)) => {
+                assert!(why.contains(OLD_FORMAT), "{why}");
+                assert!(why.contains(SUMMIT.format), "{why}");
             }
             other => panic!("expected a content refusal, got {other:?}"),
         }
@@ -1188,17 +1183,30 @@ pub(in crate::cluster::detached) mod tests {
     }
 
     #[test]
-    fn judge_block_accepts_a_green_block() {
+    fn a_stale_signer_is_told_to_roll_its_image_not_to_read_the_configmap() {
+        let record = sample("wf-stale");
+        let said = next_step(
+            &record,
+            &BlockRefusal::StaleSigner("x".into()),
+            "attest-signer",
+        );
+        assert!(said.contains("roll the attest-signer image"), "{said}");
+        assert!(!said.contains("configmap"), "{said}");
+    }
+
+    #[test]
+    fn judge_block_accepts_a_greensummit_block() {
         use crate::attest::tests::{block_with, both_names_signer, dir};
-        use git_attest::format::GREEN;
+        use greensummit::format::SUMMIT;
         let scratch = dir("judge-green");
         let (key, signers) = both_names_signer(&scratch);
         let tree = "0123456789012345678901234567890123456789";
         let mut record = sample("wf-green");
         record.tree = tree.to_string();
-        let body = block_with(GREEN.format, GREEN.namespace, tree, &key);
-        let checked = judge_block(&record, &body, Some(&signers)).expect("a green block judges");
-        assert_eq!(checked.names, GREEN);
+        let body = block_with(SUMMIT.format, SUMMIT.namespace, tree, &key);
+        let checked =
+            judge_block(&record, &body, Some(&signers)).expect("a greensummit block judges");
+        assert_eq!(checked.gates, ["suite"]);
         let _ = std::fs::remove_dir_all(&scratch); // best-effort temp cleanup; a leftover dir cannot change the verdict
     }
 

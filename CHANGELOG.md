@@ -8,6 +8,32 @@ missing here.
 
 ## Unreleased
 
+### Changed
+
+- **BREAKING: greengate signs and reads greensummit notes** (ADR-0073).
+  git-attest is renamed greensummit 2.0.0 (`greenharness/greensummit`), and
+  greengate now links it. Attestations are signed `greensummit-v2` under
+  namespace `greensummit` into `refs/notes/greensummit` and
+  `refs/notes/greensummit-inputs`. Signer blocks a collect has not pushed yet
+  are filed under `refs/notes/greensummit-local/`. The declared-inputs spec is
+  `.github/greensummit-inputs` (or `.forgejo/…`). Nothing reads the
+  `greengate-attest` or `amont-attest` notes any more, and gate stamps under
+  the old `amont-gate` names are ignored too, so every gate runs once after
+  the upgrade and its next push signs again.
+- **What to do with this release**:
+  - each repository's `allowed_signers` lists `greensummit` in `namespaces=`;
+  - its CI uses `greenharness/greensummit@v2`;
+  - its spec file moves with `git mv .github/attest-inputs .github/greensummit-inputs`;
+  - the in-cluster signer runs this greengate, because a block it signs under
+    the old header is refused by `cluster collect`.
+
+  The signing key stays at `~/.ssh/greengate-attest`. Signer blocks an older
+  greengate left unpushed under `refs/notes/attest-local/` stay there, unread;
+  delete them with `git update-ref -d` if you want them gone.
+- **`greengate attest check-inputs` prints its ok line on stderr**, as
+  `check-greensummit-inputs: ok` (was `check-attest-inputs: ok` on stdout):
+  the exit status is the answer.
+
 ## v4.10.0
 
 ### Changed

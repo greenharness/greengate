@@ -118,7 +118,7 @@ const USAGE: &str = concat!(
     "                 found but its signature did not verify, rather than 0;\n",
     "                 the rejection is named on stderr either way]\n",
     "                 `attest check-inputs --require <gate>...` — prove the\n",
-    "                 named gates declare, in .github/attest-inputs, every file\n",
+    "                 named gates declare, in .github/greensummit-inputs, every file\n",
     "                 the tree tracks (exit 1 uncovered, 2 no usable spec)\n",
     "                 [--tree <rev>, default HEAD]\n",
     "\n",
@@ -1233,7 +1233,7 @@ fn attest_check_inputs(rest: &[OsString]) -> i32 {
             2
         }
         Ok(f) if f.is_empty() => {
-            println!("check-attest-inputs: ok");
+            eprintln!("check-greensummit-inputs: ok");
             0
         }
         Ok(f) => {

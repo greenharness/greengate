@@ -1099,11 +1099,11 @@ Anything else writes one line in `greengate/cluster.log` and nothing more.
 **The in-cluster signer.** With `greengate.cluster.signer in-cluster`, collect
 also asks the signer namespace, once per cluster, for the ConfigMaps of the
 pending runs (`greengate.signer=block`). A Workflow's block is checked with
-git-attest against the repository's `allowed_signers` (the one a push
+greensummit against the repository's `allowed_signers` (the one a push
 verifies with, which must list `cluster-signer@x86_64-linux`): one block,
 `platform x86_64-linux`, the record's tree, every gate that passed, signed by
 a principal bound to `x86_64-linux`. It is then filed in the local
-`refs/notes/greengate-attest` under the tree, and the next push publishes that
+`refs/notes/greensummit` under the tree, and the next push publishes that
 block instead of signing the linux block itself. A block not written yet keeps
 the run pending (`"signer":"awaiting"`) until the Workflow's TTL; a refused or
 skipped block, a signer that never answers, or a tree with no filed block is
@@ -1135,7 +1135,7 @@ the same rules as collect's, above. Only a pod that the Workflow owns, by
 `ownerReferences` and by its own node record, counts. A Job's pod, or a pod
 wearing a borrowed run label, counts for nothing.
 
-The gates that passed go into one signed git-attest block for
+The gates that passed go into one signed greensummit block for
 `platform x86_64-linux`, with no input lines. The block is written to a
 ConfigMap named after the Workflow, under `data.block`, in the signer
 namespace. The ConfigMap is labelled `greengate.run` and
@@ -1234,11 +1234,11 @@ a plan changed.
 - Because `greengate.conf` is part of the canonical tree, adding or removing the
   line changes the fingerprint and the next push runs everything once.
 - **Deprecated as the opt-out's home** (attest 1.6.0, decisions ADR-0037): the
-  opt-out is now `@plan-exempt off` in `.github/attest-inputs` (or
+  opt-out is now `@plan-exempt off` in `.github/greensummit-inputs` (or
   `.forgejo/`), attest's own file, so attest reads no other tool's
   configuration. Until attest 2.0.0 write **both** lines: verifiers before
   attest 1.6.0 know only this one. `greengate list` says so on stderr while only
-  this line is present. A repository whose `attest-inputs` already declares
+  this line is present. A repository whose `greensummit-inputs` already declares
   gates adds the directive only once its CI pins attest 1.7.0 or later and its
   `greengate.conf` sets `minVersion 1.58.0`, because to older tools the directive
   invalidates the spec.
@@ -1269,7 +1269,7 @@ git config greengate.attest true
 
 Off by default. With it on, a push whose pre-push block gates all passed
 leaves an `ssh-keygen`-signed note on each pushed tip in
-`refs/notes/greengate-attest` — binding the pushed **tree**, the names of the
+`refs/notes/greensummit` — binding the pushed **tree**, the names of the
 gates that passed, and the greengate version — and pushes that ref to the same
 remote, so CI can verify the note and skip the test steps it names.
 `greengate.attestKey` points at the signing key; unset, it means

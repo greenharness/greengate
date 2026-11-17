@@ -116,7 +116,7 @@ lint-cross:
 check: lint test attest-inputs
 
 # Every gate whose result may be reused on a tree that differs only in files it
-# does not read must declare, in .github/attest-inputs, EVERYTHING the tree
+# does not read must declare, in .github/greensummit-inputs, EVERYTHING the tree
 # tracks (docs/plans excepted). The spec cannot exclude paths, so a new
 # top-level path would otherwise fall outside every fingerprint and a change to
 # it would be skipped wrongly. This proves the declaration is complete, per

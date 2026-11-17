@@ -10,8 +10,8 @@
 //! from a pod: a pod's labels are anyone's to set.
 //!
 //! What it writes is one ConfigMap per Workflow, in the signer namespace,
-//! named after the Workflow: the signed git-attest block of the gates that
-//! passed (ADR-0037: git-attest renders, signs and wraps it), or an empty
+//! named after the Workflow: the signed greensummit block of the gates that
+//! passed (ADR-0037: greensummit renders, signs and wraps it), or an empty
 //! block and the reason no gate passed. Either way the Workflow is done and
 //! is never judged again, on a restart, a one-shot pass or another replica.
 //!
@@ -122,7 +122,7 @@ fn named<'a>(list: Option<&'a Value>, name: &str) -> Option<&'a Value> {
 /// Whether a gate id can stand as ONE entry of a payload's `gates` line: a
 /// single non-empty token, so whitespace cannot turn one id into two gates.
 /// This is a structural guard, not the gate-name grammar: that grammar is
-/// git-attest's alone (ADR-0037, ADR-0039; `spec::valid_gate` is
+/// greensummit's alone (ADR-0037, ADR-0039; `spec::valid_gate` is
 /// crate-private there), and only fenced runner ServiceAccounts can create
 /// the Workflows these ids come from.
 fn valid_gate(name: &str) -> bool {
@@ -181,7 +181,7 @@ fn submitted(wf: &Value) -> Result<(String, Vec<Submitted>), String> {
     let metadata = wf.get("metadata");
     let tree = text(metadata.and_then(|m| m.get("annotations")), TREE_ANNOTATION)
         .ok_or("the Workflow names no tree")?;
-    if !git_attest::format::is_oid(tree) {
+    if !greensummit::format::is_oid(tree) {
         return Err("the Workflow's tree is not an object id".into());
     }
     let templates = wf.get("spec").and_then(|s| s.get("templates"));
@@ -382,20 +382,20 @@ pub(super) fn plan_pass(runners: &[(&str, Value)], signer: &Value, now: u64) -> 
     planned
 }
 
-/// The git-attest v2 payload of `gates` passed on `tree` on the cluster's
+/// The greensummit v2 payload of `gates` passed on `tree` on the cluster's
 /// platform, without input lines or a canonical tree: the signer has no
 /// repository to fingerprint. `producer` is the same as the laptop's blocks
 /// (`attest.rs`): this crate's version.
 pub(super) fn payload(tree: &str, gates: &[String]) -> String {
-    let line = git_attest::produce::gate_list(&gates.join(" "));
-    git_attest::format::payload(tree, &line, PLATFORM, &[], None, env!("CARGO_PKG_VERSION"))
+    let line = greensummit::produce::gate_list(&gates.join(" "));
+    greensummit::format::payload(tree, &line, PLATFORM, &[], None, env!("CARGO_PKG_VERSION"))
 }
 
 /// The signed block of `payload`, as a note holds it.
 fn signed_block(payload: &str, key: &Path) -> Result<String, String> {
-    let sig = git_attest::sign::sign(git_attest::format::WRITE.namespace, payload, key)
+    let sig = greensummit::sign::sign(greensummit::format::WRITE.namespace, payload, key)
         .map_err(|e| format!("signing failed: {e}"))?;
-    Ok(git_attest::format::block(payload, &sig))
+    Ok(greensummit::format::block(payload, &sig))
 }
 
 /// What a ConfigMap holds for its Workflow.
@@ -780,7 +780,7 @@ fn key_from_env() -> Result<PathBuf, String> {
         ));
     };
     let key = PathBuf::from(key);
-    git_attest::sign::public_key(&key).map_err(|e| {
+    greensummit::sign::public_key(&key).map_err(|e| {
         format!(
             "{KEY_ENV} names {}, which is not a usable private key: {e}",
             key.display()
@@ -853,6 +853,7 @@ mod tests {
     use super::super::pending::Pending;
     use super::super::workflow::{node_name, workflow_json, workflow_name, Plan};
     use super::*;
+    use crate::attest::tests::OLD_NAMESPACE;
 
     /// The first live run's tree and image: the pod fixture reports them.
     const LIVE_TREE: &str = "13b5ee2d54389399fa2738f084a1b653b5844028";
@@ -1180,16 +1181,16 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_is_git_attest_v2_and_reads_back() {
+    fn the_payload_is_greensummit_v2_and_reads_back() {
         let text = payload(LIVE_TREE, &["a".into(), "b.c".into()]);
         assert_eq!(
             text,
             format!(
-                "greengate-attest-v2\ntree {LIVE_TREE}\ngates a b.c\nplatform x86_64-linux\ngreengate {}\n",
+                "greensummit-v2\ntree {LIVE_TREE}\ngates a b.c\nplatform x86_64-linux\ngreengate {}\n",
                 env!("CARGO_PKG_VERSION")
             )
         );
-        use git_attest::format::field;
+        use greensummit::format::field;
         assert_eq!(field(&text, "tree"), Some(LIVE_TREE));
         assert_eq!(field(&text, "gates"), Some("a b.c"));
         assert_eq!(field(&text, "platform"), Some("x86_64-linux"));
@@ -1312,7 +1313,7 @@ mod tests {
     }
 
     /// A block signed with a throwaway key splits back out of the note text
-    /// and verifies for the platform-bound principal (git-attest 1.8), as
+    /// and verifies for the platform-bound principal (greensummit 1.8), as
     /// collect will read it.
     #[test]
     fn a_signed_block_verifies_for_the_platform_bound_principal() {
@@ -1333,25 +1334,25 @@ mod tests {
             eprintln!("ssh-keygen unavailable — skipping");
             return;
         }
-        let public = git_attest::sign::public_key(&key).expect("public key");
+        let public = greensummit::sign::public_key(&key).expect("public key");
         let signers = dir.join("allowed_signers");
         std::fs::write(
             &signers,
             format!(
                 "cluster-signer@x86_64-linux namespaces=\"{},{}\" {public}\n",
-                git_attest::format::GREEN.namespace,
-                git_attest::format::LEGACY.namespace
+                greensummit::format::NAMESPACE,
+                OLD_NAMESPACE
             ),
         )
         .unwrap();
         let text = payload(LIVE_TREE, &["pre-push-lint".into()]);
         let block = signed_block(&text, &key).expect("signed");
-        let (blocks, _) = git_attest::format::split_blocks(&block);
+        let (blocks, _) = greensummit::format::split_blocks(&block);
         assert_eq!(blocks.len(), 1, "{block}");
         assert_eq!(blocks[0].payload, text, "the trailing newline comes back");
         let verify = |principal: &str| {
-            git_attest::sign::verify(
-                git_attest::format::NAMESPACE,
+            greensummit::sign::verify(
+                greensummit::format::NAMESPACE,
                 &blocks[0].payload,
                 &blocks[0].signature,
                 &signers,
@@ -1361,11 +1362,12 @@ mod tests {
         };
         assert!(verify("cluster-signer@x86_64-linux"));
         assert!(!verify("someone@x86_64-linux"));
-        // The signer signs under the GREEN namespace and header, and the
-        // block does not verify under the legacy namespace.
-        assert!(text.starts_with(git_attest::format::GREEN.format), "{text}");
-        assert!(git_attest::sign::verify(
-            git_attest::format::GREEN.namespace,
+        // The signer signs under greensummit's namespace and header, and the
+        // block does not verify under the namespace greengate signed under
+        // before greensummit 2.0.
+        assert!(text.starts_with(greensummit::format::FORMAT), "{text}");
+        assert!(greensummit::sign::verify(
+            greensummit::format::NAMESPACE,
             &blocks[0].payload,
             &blocks[0].signature,
             &signers,
@@ -1373,15 +1375,15 @@ mod tests {
         )
         .is_ok());
         assert!(
-            git_attest::sign::verify(
-                git_attest::format::LEGACY.namespace,
+            greensummit::sign::verify(
+                OLD_NAMESPACE,
                 &blocks[0].payload,
                 &blocks[0].signature,
                 &signers,
                 None,
             )
             .is_err(),
-            "a green block must not verify as a legacy one"
+            "a greensummit block must not verify under the old namespace"
         );
         let _ = std::fs::remove_dir_all(&dir); // best-effort
     }

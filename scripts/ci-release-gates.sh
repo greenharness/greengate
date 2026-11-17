@@ -12,7 +12,7 @@
 # which signs them, while the tag's release is already running.
 #
 # Exit 0 when every gate is covered. Exit 1 naming each one still missing.
-# GIT_ATTEST names the git-attest binary (default: on PATH).
+# GREENSUMMIT_BIN names the greensummit binary (default: on PATH).
 set -eu
 
 wait=0
@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
     *) echo "ci-release-gates: unknown argument $1" >&2; exit 2 ;;
   esac
 done
-bin=${GIT_ATTEST:-git-attest}
+bin=${GREENSUMMIT_BIN:-greensummit}
 
 # <platform> <gate>[|<alternative>]... : every gate the release needs, the
 # platform it must have been proven on, and what else counts as the same

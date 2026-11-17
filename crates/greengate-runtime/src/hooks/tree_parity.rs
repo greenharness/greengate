@@ -694,7 +694,7 @@ mod tests {
 
     fn drift(step_run: &str) -> Vec<Problem> {
         let text = format!(
-            "name: ci\non:\n  push:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - id: attest\n        uses: fredericrous/attest@v1\n      - if: ${{{{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'pre-push-cargo-test') }}}}\n        {step_run}\n"
+            "name: ci\non:\n  push:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - id: attest\n        uses: greenharness/greensummit@v2\n      - if: ${{{{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'pre-push-cargo-test') }}}}\n        {step_run}\n"
         );
         builtin_drift_texts(&[(".github/workflows/ci.yaml".into(), text)])
     }
@@ -782,7 +782,7 @@ mod tests {
 
     fn wf(step_run: &str) -> String {
         format!(
-            "name: ci\non:\n  push:\njobs:\n  checks:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - id: attest\n        uses: fredericrous/attest@v1\n      - name: Lint\n        if: ${{{{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'tree-eslint') }}}}\n        {step_run}\n"
+            "name: ci\non:\n  push:\njobs:\n  checks:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - id: attest\n        uses: greenharness/greensummit@v2\n      - name: Lint\n        if: ${{{{ !contains(fromJSON(steps.attest.outputs.gates || '[]'), 'tree-eslint') }}}}\n        {step_run}\n"
         )
     }
 

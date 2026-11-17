@@ -952,7 +952,7 @@ fn a_changed_gate_script_at_the_tip_does_not_vouch() {
     assert_eq!(runs(&r), 2, "the twin ran: {out}");
 }
 
-/// The declared-input route (ADR-0011): with an `attest-inputs` spec, a
+/// The declared-input route (ADR-0011): with an `greensummit-inputs` spec, a
 /// tree's stamp travels by the fingerprint of the gate's declared inputs. A
 /// tip that changes only a declared input outside the trigger scope has a new
 /// fingerprint, so it vouches for nothing, and the unstamped scoped commit
@@ -967,7 +967,7 @@ fn a_changed_declared_input_at_the_tip_does_not_vouch() {
     r.stage("gate.js", "require('fs').appendFileSync('gate.log','x')\n");
     r.stage("data.in", "one\n");
     r.stage(
-        ".github/attest-inputs",
+        ".github/greensummit-inputs",
         "check *.txt data.in gate.js amont.conf\n",
     );
     r.commit("chore: base");
