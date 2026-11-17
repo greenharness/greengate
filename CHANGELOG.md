@@ -28,6 +28,9 @@ missing here.
     the old header is refused by `cluster collect`.
 
   The signing key stays at `~/.ssh/greengate-attest`.
+- **`greengate attest check-inputs` prints its ok line on stderr**, as
+  `check-greensummit-inputs: ok` (was `check-attest-inputs: ok` on stdout):
+  the exit status is the answer.
 
 ## v4.10.0
 

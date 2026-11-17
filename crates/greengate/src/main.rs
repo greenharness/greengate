@@ -1233,7 +1233,7 @@ fn attest_check_inputs(rest: &[OsString]) -> i32 {
             2
         }
         Ok(f) if f.is_empty() => {
-            println!("check-greensummit-inputs: ok");
+            eprintln!("check-greensummit-inputs: ok");
             0
         }
         Ok(f) => {
