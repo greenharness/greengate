@@ -16,3 +16,19 @@ YBCaiDmnUdMyQ1dZAAAAALZ3JlZW5zdW1taXQAAAAAAAAABnNoYTUxMgAAAFMAAAALc3No
 LWVkMjU1MTkAAABAr1wvF2VdH7M7sBpAnlWgOzYprsx+CDIYPfJJigPSLhfY5CDHuVBHbZ
 lvW7xTMpqNSgs8FVydQydcj0VAQejlAQ==
 -----END SSH SIGNATURE-----
+
+greensummit-v2
+tree 4243f1ad6cf448d2fe00f185a0c742efc10130ed
+gates ci-hooks-macos ci-load-macos
+platform aarch64-macos
+input ci-hooks-macos f2f85b8d5c7eeb0d00fce6c5d269b6edc3fa1366
+input ci-load-macos f2f85b8d5c7eeb0d00fce6c5d269b6edc3fa1366
+canon fa44f846a498f2ce5aac2a229090930b483afa7d
+greengate attest-sign-macos
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgUpKx1QTdCdwZEjcw/MK/JGWqft
+YBCaiDmnUdMyQ1dZAAAAALZ3JlZW5zdW1taXQAAAAAAAAABnNoYTUxMgAAAFMAAAALc3No
+LWVkMjU1MTkAAABAWpEc9Na6SZCUiIdLsRyASgDqvn4o7LT27KJmkWvUEB2tOPQ3cF4U3b
+OVbQD23m1gQKCixtpDDBfyR+u95PWPCA==
+-----END SSH SIGNATURE-----
