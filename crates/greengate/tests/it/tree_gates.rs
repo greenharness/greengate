@@ -185,7 +185,11 @@ fn a_slow_tree_gate_is_cancelled_at_the_slack_and_never_stamps() {
         "slow.sh",
         "#!/bin/sh\nif [ -e node_modules/slow ]; then sleep 300 & echo $! > node_modules/slow.pid; wait; fi\nexit 0\n",
     );
-    r.git(&["config", "greengate.treeLintSlack", "1"]);
+    // The slack must cover the gate's own startup (its snapshot, then `sh`),
+    // or the commit cancels it before slow.sh writes slow.pid: a slow CI
+    // runner did, at 1 s (the pid file was missing). The slack caps the wait;
+    // it does not add one, so a fast machine still finishes in seconds.
+    r.git(&["config", "greengate.treeLintSlack", "10"]);
     r.stage(".gitignore", "node_modules/\n");
     warm(&r);
     r.write("node_modules/slow", "");
