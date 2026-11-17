@@ -1,0 +1,15 @@
+greensummit-v2
+tree 582391258ae15e9048287a251a177da9cef3533d
+gates ci-hooks-macos ci-load-macos
+platform aarch64-macos
+input ci-hooks-macos dc953eb6524a1acc6fc9abebd292570e0776c04f
+input ci-load-macos dc953eb6524a1acc6fc9abebd292570e0776c04f
+canon aac5e95124e2902437815cf8a171585f2e724ce4
+greengate attest-sign-macos
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgUpKx1QTdCdwZEjcw/MK/JGWqft
+YBCaiDmnUdMyQ1dZAAAAALZ3JlZW5zdW1taXQAAAAAAAAABnNoYTUxMgAAAFMAAAALc3No
+LWVkMjU1MTkAAABAPLNlA8qpE9yRogNnLUsQmxFLccwfviGDz+HeiMB2Hnji5zRqiUoZ1J
+1MJ1rgjYDq2QTIeugn/bMse7dTQ0p8AQ==
+-----END SSH SIGNATURE-----
