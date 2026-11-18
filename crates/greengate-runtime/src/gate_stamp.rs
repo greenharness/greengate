@@ -129,11 +129,6 @@ pub(crate) const GREEN: GateNames = GateNames {
 /// held equal to `refs/notes/{short}` by a test. GREEN since greengate 4.4.
 pub(crate) const WRITE: GateNames = GREEN;
 
-/// The sets a stamp is read under: the written one alone. Kept as a list so
-/// the readers below keep their shape; the one-element loops are collapsed
-/// by the greensummit-rename census (its Phase 5), as in greensummit 2.0.x.
-pub(crate) const READ: [GateNames; 1] = [WRITE];
-
 /// First token of the marker file and of every note body. Versioned like
 /// `staged_only::FORMAT`: a future amont that changes the shape bumps this,
 /// and an old record is ignored rather than misread.
@@ -468,12 +463,10 @@ fn note_in(notes_ref: &str, key: &str) -> Note {
 }
 
 /// The stamp at `key` as a READER sees it: the note in `which` ref of the
-/// set of [`READ`] that holds one, parsed under that set's header. A note
+/// [`WRITE`] set, parsed under that set's header. A note
 /// whose header is wrong is the answer still, and vouches for nothing.
 fn stamp_in(which: fn(&GateNames) -> &'static str, key: &str) -> Note {
-    READ.iter()
-        .find_map(|set| read_in(set, which(set), key))
-        .unwrap_or_default()
+    read_in(&WRITE, which(&WRITE), key).unwrap_or_default()
 }
 
 /// The note at `key` in `notes_ref`, one of `set`'s refs, parsed under
@@ -512,12 +505,9 @@ fn input_tokens(tree: &str) -> Vec<String> {
         let Some(fp) = crate::attest_inputs::fingerprint(tree, &spec, gate) else {
             continue;
         };
-        // The set computes its own key (its input domain) and reads its own
-        // ref.
-        let note = READ.iter().find_map(|set| {
-            let key = crate::attest_inputs::input_key(&set.attest, gate, &fp)?;
-            read_in(set, set.inputs_ref, &key)
-        });
+        // The set's own key (its input domain), read in its inputs ref.
+        let note = crate::attest_inputs::input_key(&WRITE.attest, gate, &fp)
+            .and_then(|key| read_in(&WRITE, WRITE.inputs_ref, &key));
         for t in note.unwrap_or_default().tokens {
             if crate::gate_identity::base(&t) == gate.as_str() && !out.contains(&t) {
                 out.push(t);
@@ -537,11 +527,8 @@ fn canon_tokens(tree: &str) -> Vec<String> {
     let Some(canon) = crate::attest_inputs::canonical_route(tree) else {
         return Vec::new();
     };
-    READ.iter()
-        .find_map(|set| {
-            let key = crate::attest_inputs::canon_gate_key(set.canon_domain, &canon)?;
-            read_in(set, set.inputs_ref, &key)
-        })
+    crate::attest_inputs::canon_gate_key(WRITE.canon_domain, &canon)
+        .and_then(|key| read_in(&WRITE, WRITE.inputs_ref, &key))
         .map(|note| note.tokens)
         .unwrap_or_default()
 }
@@ -618,14 +605,12 @@ fn manifest_is_an_input(tree: &str, spec: &crate::attest_inputs::Spec, gate: &st
 /// stamps never passed) skip the fingerprint and canonical routes entirely on
 /// the push path.
 fn inputs_ref_exists() -> bool {
-    READ.iter().any(|set| {
-        crate::git::succeeds(&[
-            "rev-parse",
-            "-q",
-            "--verify",
-            &format!("refs/notes/{}", set.inputs_ref),
-        ])
-    })
+    crate::git::succeeds(&[
+        "rev-parse",
+        "-q",
+        "--verify",
+        &format!("refs/notes/{}", WRITE.inputs_ref),
+    ])
 }
 
 /// The stamp tokens on `tree` (a tree object id). Tree gates are read here
@@ -1085,13 +1070,7 @@ pub fn stamps_for(commits: &[String]) -> HashMap<String, Vec<String>> {
     if commits.is_empty() {
         return out;
     }
-    // Both sets' lists, unioned: a commit noted only under the green ref is
-    // a stamped commit too ([`stamp_at`] then picks which note answers).
-    let lists: Option<Vec<String>> = READ
-        .iter()
-        .map(|set| crate::git::stdout(&["notes", "--ref", set.notes_ref, "list"]))
-        .collect();
-    let Some(lists) = lists else {
+    let Some(list) = crate::git::stdout(&["notes", "--ref", WRITE.notes_ref, "list"]) else {
         // NOT the absent-ref case, whatever an older comment here claimed:
         // `notes list` exits 0 with empty output when the ref does not exist,
         // so that arrives as `Some("")` and falls through as "nothing is
@@ -1106,9 +1085,8 @@ pub fn stamps_for(commits: &[String]) -> HashMap<String, Vec<String>> {
         );
         return out;
     };
-    let noted: HashSet<&str> = lists
-        .iter()
-        .flat_map(|list| list.lines())
+    let noted: HashSet<&str> = list
+        .lines()
         .filter_map(|l| l.split_whitespace().nth(1))
         .collect();
     // Commit -> tree, in ONE spawn rather than one per commit: this is the
@@ -1195,12 +1173,10 @@ pub fn stamps_for(commits: &[String]) -> HashMap<String, Vec<String>> {
 /// which are the user's statements and are never touched.
 pub fn forget() -> bool {
     let marker = marker_path().is_some_and(|path| std::fs::remove_file(&path).is_ok());
-    // Every ref of every name set: a green note is ours too.
+    // Every ref of the name set.
     let mut deleted = false;
-    for set in READ {
-        for r in full_refs(&set) {
-            deleted |= crate::git::succeeds(&["update-ref", "-d", &r]);
-        }
+    for r in full_refs(&WRITE) {
+        deleted |= crate::git::succeeds(&["update-ref", "-d", &r]);
     }
     marker || deleted
 }
@@ -1251,10 +1227,8 @@ pub fn forget_in(repo: &std::path::Path) -> bool {
     let marker = crate::git::stdout_in(repo, &["rev-parse", "--absolute-git-dir"])
         .is_some_and(|dir| std::fs::remove_file(std::path::Path::new(&dir).join(MARKER)).is_ok());
     let mut deleted = false;
-    for set in READ {
-        for r in full_refs(&set) {
-            deleted |= crate::git::succeeds_in(repo, &["update-ref", "-d", &r]);
-        }
+    for r in full_refs(&WRITE) {
+        deleted |= crate::git::succeeds_in(repo, &["update-ref", "-d", &r]);
     }
     marker || deleted
 }
@@ -2422,51 +2396,50 @@ mod tests {
     }
 
     #[test]
-    fn a_pass_is_found_under_either_gate_ref() {
-        for (i, set) in READ.iter().enumerate() {
-            let (dir, head, tree) = unstamped(&format!("either-{i}"));
-            plant(
-                &dir,
-                set.notes_ref,
-                &head,
-                &format!("{} test@c", set.format),
+    fn a_pass_is_found_under_each_gate_ref() {
+        let set = &WRITE;
+        let (dir, head, tree) = unstamped("either-0");
+        plant(
+            &dir,
+            set.notes_ref,
+            &head,
+            &format!("{} test@c", set.format),
+        );
+        plant(
+            &dir,
+            set.notes_ref,
+            &tree,
+            &format!("{} test@t", set.format),
+        );
+        plant(
+            &dir,
+            set.cluster_ref,
+            &tree,
+            &format!("{} suite@k", set.format),
+        );
+        plant(
+            &dir,
+            set.done_ref,
+            &tree,
+            &format!("{} warned:lint@w", set.format),
+        );
+        in_repo(&dir, || {
+            let mut got = stamps_of(&head);
+            got.sort();
+            assert_eq!(got, ["test@c", "test@t"], "{}", set.notes_ref);
+            assert_eq!(tree_tokens(&tree), ["test@t"], "{}", set.notes_ref);
+            assert_eq!(cluster_tokens(&tree), ["suite@k"], "{}", set.cluster_ref);
+            assert!(
+                done_on_every(
+                    std::slice::from_ref(&head),
+                    "lint@w",
+                    crate::check::Severity::Block
+                ),
+                "{}",
+                set.done_ref
             );
-            plant(
-                &dir,
-                set.notes_ref,
-                &tree,
-                &format!("{} test@t", set.format),
-            );
-            plant(
-                &dir,
-                set.cluster_ref,
-                &tree,
-                &format!("{} suite@k", set.format),
-            );
-            plant(
-                &dir,
-                set.done_ref,
-                &tree,
-                &format!("{} warned:lint@w", set.format),
-            );
-            in_repo(&dir, || {
-                let mut got = stamps_of(&head);
-                got.sort();
-                assert_eq!(got, ["test@c", "test@t"], "{}", set.notes_ref);
-                assert_eq!(tree_tokens(&tree), ["test@t"], "{}", set.notes_ref);
-                assert_eq!(cluster_tokens(&tree), ["suite@k"], "{}", set.cluster_ref);
-                assert!(
-                    done_on_every(
-                        std::slice::from_ref(&head),
-                        "lint@w",
-                        crate::check::Severity::Block
-                    ),
-                    "{}",
-                    set.done_ref
-                );
-            });
-            let _ = std::fs::remove_dir_all(&dir); // best-effort temp cleanup; a leftover dir cannot change the verdict
-        }
+        });
+        let _ = std::fs::remove_dir_all(&dir); // best-effort temp cleanup; a leftover dir cannot change the verdict
     }
 
     /// The names amont 1.x to greengate 4.3 wrote stamps under, spelled out:
@@ -2675,24 +2648,20 @@ mod tests {
             &tree,
             &format!("{} test@g", GREEN.format),
         );
-        for set in READ {
-            plant(&dir, set.done_ref, &tree, "done");
-        }
+        plant(&dir, WRITE.done_ref, &tree, "done");
         in_repo(&dir, || {
             assert_eq!(tree_tokens(&tree).len(), 1);
             assert!(forget());
             assert!(tree_tokens(&tree).is_empty(), "{:?}", tree_tokens(&tree));
         });
-        for set in READ {
-            for r in full_refs(&set) {
-                let out = std::process::Command::new("git")
-                    .args(["-C"])
-                    .arg(&dir)
-                    .args(["rev-parse", "--verify", "-q", &r])
-                    .output()
-                    .unwrap();
-                assert!(!out.status.success(), "{r} survived forget");
-            }
+        for r in full_refs(&WRITE) {
+            let out = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&dir)
+                .args(["rev-parse", "--verify", "-q", &r])
+                .output()
+                .unwrap();
+            assert!(!out.status.success(), "{r} survived forget");
         }
         let _ = std::fs::remove_dir_all(&dir); // best-effort temp cleanup; a leftover dir cannot change the verdict
     }

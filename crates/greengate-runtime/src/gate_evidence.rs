@@ -103,11 +103,7 @@ pub fn history_in(repo: &Path) -> History {
     // The written name set only (ADR-0073): runs recorded under the old
     // `amont-gate` names are no longer evidence. A set's notes are parsed
     // under that set's own header.
-    let mut history = History::default();
-    for set in crate::gate_stamp::READ {
-        history.runs.extend(history_under(repo, &set).runs);
-    }
-    history
+    history_under(repo, &crate::gate_stamp::WRITE)
 }
 
 /// The runs recorded under one name set's notes ref.
