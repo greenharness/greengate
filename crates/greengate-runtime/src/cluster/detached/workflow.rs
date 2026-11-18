@@ -394,7 +394,8 @@ mod tests {
             config: &config(),
             record: &record,
             repo_dir: "relais",
-            url: "http://forgejo-http.forgejo.svc.cluster.local:3000/amont-snapshots/relais.git",
+            url:
+                "http://forgejo-http.forgejo.svc.cluster.local:3000/greengate-snapshots/relais.git",
         };
         let json = workflow_json(&plan);
         let doc = crate::json_read::parse(&json).expect("valid JSON");

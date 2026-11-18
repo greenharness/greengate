@@ -263,7 +263,7 @@ impl Lane {
 
     fn configure(&self) {
         let forgejo = self.forgejo().display().to_string();
-        let fetch = "http://forgejo-http.forgejo.svc.cluster.local:3000/amont-snapshots";
+        let fetch = "http://forgejo-http.forgejo.svc.cluster.local:3000/greengate-snapshots";
         self.cluster.config(
             "greengate.cluster.snapshotRemote",
             &format!("{forgejo}/{{repo}}.git"),
@@ -400,7 +400,8 @@ fn rehearse_cluster_pushes_the_snapshot_reads_it_back_and_creates_one_workflow()
     );
     assert_eq!(wf.env("EXPECTED_TREE"), l.tree);
     assert!(
-        wf.env("GATE_URL").ends_with("/amont-snapshots/remote.git"),
+        wf.env("GATE_URL")
+            .ends_with("/greengate-snapshots/remote.git"),
         "{}",
         wf.env("GATE_URL")
     );
@@ -524,7 +525,7 @@ fn a_commit_already_on_the_mirror_pushes_nothing_and_fetches_from_the_mirror() {
     let wf = l.submitted();
     assert!(
         wf.env("GATE_URL")
-            .ends_with("/amont-snapshots/remote-mirror.git"),
+            .ends_with("/greengate-snapshots/remote-mirror.git"),
         "{}",
         wf.env("GATE_URL")
     );

@@ -106,7 +106,7 @@
                             },
                             {
                                 "name": "GATE_URL",
-                                "value": "http://forgejo-http.forgejo.svc.cluster.local:3000/amont-snapshots/relais-mirror.git"
+                                "value": "http://forgejo-http.forgejo.svc.cluster.local:3000/greengate-snapshots/relais-mirror.git"
                             },
                             {
                                 "name": "GATE_REF",
@@ -191,7 +191,7 @@
             {
                 "name": "forgejo-token",
                 "secret": {
-                    "secretName": "amont-bot-read-token"
+                    "secretName": "greengate-bot-read-token"
                 }
             }
         ]

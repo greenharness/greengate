@@ -1035,11 +1035,11 @@ clone, or `set executor local` in the file.
 ### `greengate.rehearse.cluster` — a rehearsal that outlives the laptop
 
 ```sh
-# The snapshot repository keeps its 3.x name, `amont-snapshots`, until a later step.
-git config --global greengate.cluster.snapshotRemote 'git@git.example:amont-snapshots/{repo}.git'
-git config --global greengate.cluster.snapshotFetch  'http://forgejo-http.forgejo.svc.cluster.local:3000/amont-snapshots/{repo}.git'
-git config --global greengate.cluster.mirrorRemote   'git@git.example:amont-snapshots/{repo}-mirror.git'   # optional
-git config --global greengate.cluster.mirror         'http://forgejo-http.forgejo.svc.cluster.local:3000/amont-snapshots/{repo}-mirror.git'   # optional
+# One private repository per project in a snapshot org (greengate-snapshots here).
+git config --global greengate.cluster.snapshotRemote 'git@git.example:greengate-snapshots/{repo}.git'
+git config --global greengate.cluster.snapshotFetch  'http://forgejo-http.forgejo.svc.cluster.local:3000/greengate-snapshots/{repo}.git'
+git config --global greengate.cluster.mirrorRemote   'git@git.example:greengate-snapshots/{repo}-mirror.git'   # optional
+git config --global greengate.cluster.mirror         'http://forgejo-http.forgejo.svc.cluster.local:3000/greengate-snapshots/{repo}-mirror.git'   # optional
 git config --global greengate.rehearse.cluster true   # default false
 ```
 

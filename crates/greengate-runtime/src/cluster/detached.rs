@@ -777,8 +777,8 @@ mod tests {
             assert_eq!(sanitize_repo_dir(last), name, "{url}");
         }
         assert_eq!(
-            expand("git@h:amont-snapshots/{repo}.git", "relais"),
-            "git@h:amont-snapshots/relais.git"
+            expand("git@h:greengate-snapshots/{repo}.git", "relais"),
+            "git@h:greengate-snapshots/relais.git"
         );
     }
 
