@@ -56,16 +56,6 @@ const ALLOWED_DATA: &[(&str, usize, &str)] = &[
         "the old provenance header that is detected and kept, the old key path fallback, the pre-greensummit block headers named only in a stale-signer refusal (ADR-0073), and tests that spell the old names out, until the census",
     ),
     (
-        "greengate-runtime/src/cluster/detached.rs",
-        2,
-        "the amont-snapshots repository (a later step)",
-    ),
-    (
-        "greengate-runtime/src/cluster/detached/workflow.rs",
-        1,
-        "the amont-snapshots repository (a later step)",
-    ),
-    (
         "greengate-runtime/src/gate_identity.rs",
         1,
         "a test: the old cluster contract hashes to a different token (plan 3a-3)",
