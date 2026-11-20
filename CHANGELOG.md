@@ -8,6 +8,13 @@ missing here.
 
 ## Unreleased
 
+### Fixed
+
+- `pre-commit-lint-json-yaml` reads `tsconfig*.json`, `jsconfig*.json`,
+  `.vscode/` files and `devcontainer.json` as JSONC, the format their own
+  tools use. Comments and trailing commas no longer block the commit, and
+  these files are parsed in-process, so they need no node.
+
 ## v4.11.0
 
 ### Changed
