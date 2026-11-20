@@ -58,6 +58,41 @@ fn go_template_yaml_outside_a_chart_still_fails() {
     assert!(!r.hook("pre-commit-lint-json-yaml", &[]).passed());
 }
 
+// ---- lint-json-yaml: JSONC ------------------------------------------------
+
+/// TypeScript reads tsconfig as JSONC: comments and trailing commas are its
+/// own format, so the gate must not block them. Parsed in-process, so no
+/// node is needed.
+#[test]
+fn a_commented_tsconfig_passes() {
+    let r = Repo::new();
+    r.stage(
+        "web/tsconfig.json",
+        "{\n  // why strict\n  \"compilerOptions\": { \"paths\": { \"@/*\": [\"./src/*\"] }, },\n}\n",
+    );
+    r.stage(".vscode/settings.json", "{ /* editor */ \"a\": 1, }\n");
+    assert!(r.hook("pre-commit-lint-json-yaml", &[]).passed());
+}
+
+/// …a tsconfig that is broken even as JSONC still blocks.
+#[test]
+fn a_broken_tsconfig_still_fails() {
+    let r = Repo::new();
+    r.stage("tsconfig.json", "{ // ok\n  \"a\": }\n");
+    assert!(!r.hook("pre-commit-lint-json-yaml", &[]).passed());
+}
+
+/// …and strict JSON stays strict: node rejects a comment in package.json.
+#[test]
+fn a_comment_in_package_json_still_fails() {
+    if missing("node") {
+        return;
+    }
+    let r = Repo::new();
+    r.stage("package.json", "{ // no\n  \"name\": \"x\" }\n");
+    assert!(!r.hook("pre-commit-lint-json-yaml", &[]).passed());
+}
+
 // ---- ruff ---------------------------------------------------------------
 
 /// `pre-commit-ruff` declared `Fix::Rewrite` with no fixing code at all — only
