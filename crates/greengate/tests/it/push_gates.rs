@@ -866,8 +866,8 @@ fn a_could_not_check_record_expires_after_an_hour() {
     assert!(err.contains("pre-push-audit-go"), "{err}");
 }
 
-/// An unchecked record written under `writer` (None: a greengate before
-/// 4.13, whose header has no version), then a push with the network back.
+/// An unchecked record written under `writer` (None: a greengate from before
+/// the version field), then a push with the network back.
 fn push_after_unchecked_record_of(writer: Option<&str>) -> (i32, String, usize, usize) {
     let (fx, bin, log) = audit_fixture();
     fx.r.git(&["config", "greengate.pushGates", "inline"]);

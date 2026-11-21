@@ -2290,8 +2290,8 @@ fn render(concluded: &Concluded, at: i64) -> String {
     body
 }
 
-/// A record's time, the greengate that wrote it (None before 4.13), and what
-/// it concluded.
+/// A record's time, the greengate that wrote it (None in a record from before
+/// the version field), and what it concluded.
 fn parse(body: &str) -> Option<(i64, Option<String>, Concluded)> {
     let (head, rest) = body.split_once('\n').unwrap_or((body, ""));
     let mut fields = head.split_whitespace();
