@@ -1339,31 +1339,16 @@ fn has_rows_to_split(report: &Report, out: &str) -> bool {
 
 /// What one lock directory ships, asked of [`uv_production_names`] at most
 /// once, and only on a release whose batch has findings to split.
-struct Production {
-    /// The lock directory to ask in; None off a release, where every
-    /// finding is kept.
-    dir: Option<std::path::PathBuf>,
-    /// None: not asked yet. `Some(None)`: asked, and unknown.
-    names: Option<Option<std::collections::HashSet<String>>>,
+enum Production {
+    /// No release: never asked, every finding is kept.
+    Never,
+    /// A release, not asked yet: ask in this lock directory.
+    Unasked(std::path::PathBuf),
+    /// Asked; None when the export could not answer or time ran out.
+    Asked(Option<std::collections::HashSet<String>>),
 }
 
 impl Production {
-    /// A release: ask in `dir` when a batch has findings.
-    fn asked_in(dir: std::path::PathBuf) -> Production {
-        Production {
-            dir: Some(dir),
-            names: None,
-        }
-    }
-
-    /// No release: never ask, keep every finding.
-    fn never() -> Production {
-        Production {
-            dir: None,
-            names: None,
-        }
-    }
-
     /// The production names, None when this is no release, the export
     /// cannot answer, or the budget is spent before it is asked (`say`
     /// warns once): every finding is then kept.
@@ -1373,9 +1358,8 @@ impl Production {
         budget: &Budget,
         say: &dyn Fn(&str),
     ) -> Option<&std::collections::HashSet<String>> {
-        let dir = self.dir.as_ref()?;
-        if self.names.is_none() {
-            self.names = Some(if budget.spent() {
+        if let Production::Unasked(dir) = self {
+            *self = Production::Asked(if budget.spent() {
                 say(&format!(
                     "out of time before the dev-only split — every finding counts\n  {TIMEOUT_NEXT}"
                 ));
@@ -1384,7 +1368,10 @@ impl Production {
                 uv_production_names(settings, dir)
             });
         }
-        self.names.as_ref().and_then(Option::as_ref)
+        match self {
+            Production::Asked(names) => names.as_ref(),
+            Production::Never | Production::Unasked(_) => None,
+        }
     }
 }
 
@@ -1398,6 +1385,9 @@ const TMPDIR_NEXT: &str = "Next: check that $TMPDIR is writable and has space, t
 /// The next step after pip-audit could not answer, from its own reason: the
 /// network when the reason names it, else pip-audit itself.
 fn pip_audit_next(why: &str) -> &'static str {
+    // holds-until: pip-audit's English error wording is the only signal; when
+    // it reports an error class or a distinct exit code for the network,
+    // decide on that instead of these words.
     let why = why.to_ascii_lowercase();
     let network = [
         "network",
@@ -1822,12 +1812,16 @@ fn audit_uv_lock(
             ""
         };
         say(&format!(
-            "{} could not be classified{source}; not audited",
+            "{} could not be classified{source}; not audited\n  \
+             Next: check that each [[package]] in {lock_path} has a name and source",
             plural(unclassified, "package")
         ));
     }
     if pins.batches.is_empty() {
-        say("no PyPI package to audit — the audit did NOT run");
+        say(&format!(
+            "no PyPI package to audit — the audit did NOT run\n  \
+             Next: none if every package is private; else check {lock_path} sources"
+        ));
         return LockDirAudit::unchecked();
     }
     let mut audit = LockDirAudit {
@@ -1929,9 +1923,9 @@ fn python_lock_run(ctx: &crate::registry::Ctx) -> Ran {
     let (mut complete, mut waivable) = (true, true);
     for dir in &dirs {
         let production = if release {
-            Production::asked_in(root.join(dir))
+            Production::Unasked(root.join(dir))
         } else {
-            Production::never()
+            Production::Never
         };
         let audit = audit_uv_lock(settings, production, dir, &budget);
         let label = |ids: Vec<String>| -> Vec<String> {
@@ -3064,19 +3058,30 @@ requests @ https://example.com/r.whl
         };
         let said = std::cell::RefCell::new(Vec::<String>::new());
         let say = |m: &str| said.borrow_mut().push(m.to_string());
-        // A directory with no uv.lock: asking would answer None anyway, so
-        // what is checked here is the warning and the cached answer.
         let dir = std::env::temp_dir();
 
-        let mut off = Production::never();
+        let mut off = Production::Never;
         assert!(off.names(&settings, &spent, &say).is_none());
-        assert!(off.names.is_none(), "no release never asks");
+        assert!(matches!(off, Production::Never), "no release never asks");
         assert!(said.borrow().is_empty());
 
-        let mut late = Production::asked_in(dir);
+        let mut late = Production::Unasked(dir.clone());
         assert!(late.names(&settings, &spent, &say).is_none());
         assert!(late.names(&settings, &spent, &say).is_none());
-        assert_eq!(late.names, Some(None), "spent is remembered as unknown");
+        assert!(
+            matches!(late, Production::Asked(None)),
+            "spent is remembered as unknown"
+        );
+
+        // In time it asks, once: this checkout tracks no uv.lock, so the
+        // answer is unknown and stays the answer.
+        let fresh = Budget {
+            started: std::time::Instant::now(),
+            limit: None,
+        };
+        let mut asked = Production::Unasked(dir);
+        assert!(asked.names(&settings, &fresh, &say).is_none());
+        assert!(matches!(asked, Production::Asked(None)));
         let said = said.borrow();
         assert_eq!(said.len(), 1, "warned once: {said:?}");
         assert!(said[0].contains("every finding counts"), "{said:?}");
