@@ -1399,7 +1399,6 @@ fn pip_audit_next(why: &str) -> &'static str {
         "timeout",
         "resolve",
         "dns",
-        "http",
         "ssl",
         "certificate",
         "unreachable",

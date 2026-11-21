@@ -8,6 +8,15 @@ missing here.
 
 ## Unreleased
 
+### Fixed
+
+- On a release, `pre-push-audit-python` asks `uv export --no-dev` what ships
+  only when a batch has findings to split, once per lock directory, and not
+  after the time budget is spent. Out of time, every finding counts and a
+  warning says so. Its warnings now each name a next step: the network only
+  when pip-audit's reason names it, else `pip-audit --version`;
+  `greengate.timeout` when time ran out; `$TMPDIR` when a scratch file failed.
+
 ## v4.12.0
 
 ### Added
