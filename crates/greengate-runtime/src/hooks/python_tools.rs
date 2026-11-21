@@ -318,24 +318,26 @@ fn pth_paths(site: &Path) -> Vec<PathBuf> {
 /// they are compared: snapshots live under `/var/folders`, which is
 /// `/private/var/folders` once resolved.
 fn snapshot_import_roots(snapshot: &Path, root: &str) -> Vec<PathBuf> {
-    let Ok(snap) = snapshot.canonicalize() else {
+    let Ok(snapshot_dir) = snapshot.canonicalize() else {
         return Vec::new();
     };
     let mut roots: Vec<PathBuf> = Vec::new();
     for venv in borrowed_venvs(root) {
-        let Some(owner) = venv.parent().and_then(|p| p.canonicalize().ok()) else {
+        let Some(owner) = venv.parent().and_then(|parent| parent.canonicalize().ok()) else {
             continue;
         };
-        if owner == snap {
+        if owner == snapshot_dir {
             continue; // the snapshot's own venv points at the snapshot already
         }
         for site in site_packages(&venv) {
-            for p in pth_paths(&site) {
-                let Ok(p) = p.canonicalize() else { continue };
-                let Ok(rel) = p.strip_prefix(&owner) else {
+            for pth_entry in pth_paths(&site) {
+                let Ok(canonical) = pth_entry.canonicalize() else {
                     continue;
                 };
-                let mapped = snap.join(rel);
+                let Ok(relative) = canonical.strip_prefix(&owner) else {
+                    continue;
+                };
+                let mapped = snapshot_dir.join(relative);
                 if mapped.is_dir() && !roots.contains(&mapped) {
                     roots.push(mapped);
                 }
