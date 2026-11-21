@@ -987,7 +987,7 @@ fi"#,
 /// and reports `rows` as vulnerable.
 fn lock_pip_audit(r: &Repo, rows: &str) {
     let record = r.path(".git/recorded");
-    let _ = std::fs::remove_file(&record);
+    let _ = std::fs::remove_file(&record); // best effort: no record yet is the usual case
     shim(
         r,
         "pip-audit",
@@ -1115,7 +1115,7 @@ fn a_failed_export_warns_and_does_not_block() {
     assert!(out.contains("did NOT run"), "{out}");
     assert!(out.contains("lockfile needs to be updated"), "{out}");
     assert!(
-        out.contains("re-run `uv export --frozen` to see why"),
+        out.contains("Next: `uv export --frozen` at the repo root"),
         "{out}"
     );
     assert_eq!(recorded(&r), "");
@@ -1134,4 +1134,64 @@ fn a_nested_uv_lock_is_audited_from_its_own_directory() {
     assert_ne!(code, 0, "{out}");
     assert!(out.contains("audited a/uv.lock"), "{out}");
     assert!(recorded(&r).trim_end().ends_with("/a"), "{}", recorded(&r));
+}
+
+/// A lock exporting two versions of one PyPI name, so two batches. The
+/// `pip-audit` shim answers the file naming 1.0.0 (vulnerable, or clean when
+/// `first_clean`) and exits 2 with no output for the other.
+fn two_batch_repo(first_clean: bool) -> Repo {
+    let r = bare_repo();
+    r.stage("pyproject.toml", "[project]\nname = \"x\"\n");
+    let lock = [
+        PYPI_BLOCK.replace("NAME", "certifi"),
+        PYPI_BLOCK.replace("NAME", "certifi"),
+    ]
+    .concat();
+    r.stage("uv.lock", &lock);
+    r.commit("chore: uv project");
+    shim(
+        &r,
+        "uv",
+        r#"out=; prev=
+for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
+if [ -n "$out" ]; then
+  printf 'certifi==1.0.0\ncertifi==2.0.0\n' > "$out"
+else
+  printf 'certifi==1.0.0\ncertifi==2.0.0\n'
+fi"#,
+    );
+    let first = if first_clean {
+        "echo 'No known vulnerabilities found'; exit 0"
+    } else {
+        "echo 'Found 1 known vulnerability in 1 package'; echo 'Name Version ID Fix Versions'; echo 'certifi 1.0.0 PYSEC-2024-1 1.0.1'; exit 1"
+    };
+    shim(
+        &r,
+        "pip-audit",
+        &format!(
+            r#"rf=; prev=
+for a in "$@"; do [ "$prev" = -r ] && rf=$a; prev=$a; done
+if grep -q '1.0.0' "$rf"; then
+  {first}
+fi
+exit 2"#
+        ),
+    );
+    r
+}
+
+#[test]
+fn a_batch_that_could_not_answer_never_reads_as_a_clean_pass() {
+    let r = two_batch_repo(false);
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(code, 0, "the vulnerable batch refuses the tag: {out}");
+    assert!(out.contains("certifi"), "{out}");
+    assert!(out.contains("could not answer"), "{out}");
+    assert!(out.contains("(no output)"), "{out}");
+
+    let r = two_batch_repo(true);
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "unavailable never blocks: {out}");
+    assert!(out.contains("NOT fully checked"), "{out}");
+    assert!(out.contains("(no output)"), "{out}");
 }
