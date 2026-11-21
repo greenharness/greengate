@@ -1355,9 +1355,14 @@ impl PrivateDir {
     /// `path` itself, created exclusively and not recursively: it fails when
     /// anything is already there, so nothing planted is ever written through.
     fn create_at(path: std::path::PathBuf) -> std::io::Result<PrivateDir> {
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        let builder = {
+            let mut unix_builder = std::fs::DirBuilder::new();
+            std::os::unix::fs::DirBuilderExt::mode(&mut unix_builder, 0o700);
+            unix_builder
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
         builder.create(&path)?;
         Ok(PrivateDir { path })
     }
