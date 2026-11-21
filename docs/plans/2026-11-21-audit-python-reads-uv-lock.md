@@ -199,8 +199,10 @@ a due date.
   docs-only branch, using the released greengate. The audit must run on the
   lock, report at least the 10 known findings in certifi, opentelemetry-api,
   pyjwt, setuptools and urllib3 as a warning on a branch push, print "1
-  packages not from PyPI were not audited" (platform-kernel), and not print
-  "did NOT run".
+  private/non-PyPI package skipped (platform-kernel)", and not print
+  "did NOT run". (The wording was corrected at implementation. Round 2 of
+  the panel carried the change.) The run with the released binary, through
+  `greengate land`, is part of the release check in `tag-release`.
 
 ### Results (2026-11-21, commit 1ed919f5)
 
@@ -228,6 +230,24 @@ Input → expected → actual:
   - No `greengate-audit-python` directory was left under `$TMPDIR`.
   - The "audited uv.lock" line did not show, because quiet mode was on when
     the output was not a terminal. That is the plan's quiet rule.
+- Real uv, workspace member → a scratch workspace whose member `m` depends on
+  `urllib3==2.7.0`, and whose root does not depend on `m`, so `--all-packages`
+  is needed → without the flag the export has `idna` only; with it, it has
+  `idna` and `urllib3==2.7.0`.
+- Real pip-audit, forked versions → batches audit apart, and one file with
+  both versions fails.
+  - `batch-1` (`urllib3==2.7.0`, `idna`): "Found 5 known vulnerabilities in 2
+    packages".
+  - `batch-2` (`urllib3==1.26.5`): "Found 18 known vulnerabilities".
+  - One file with both versions: `ERROR … duplicate requirements`.
+- After the review fixes (commit a8c15c23), the relais run
+  run-660c7332cced0-149a4 passed every check, including a new two-batch test
+  where one batch is vulnerable and the other fails. The live pilot ran again
+  on a fresh sre-agent worktree with the same result: platform-kernel
+  skipped, 10 findings, exit 0, and no leftover directory.
+- Export failure clipping: the plan's "100 characters" became a reason line
+  clipped so the line fits 80 columns, as carried from round 2 and asked
+  again by implementation review.
 
 ## Measure
 
