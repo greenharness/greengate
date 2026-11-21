@@ -794,11 +794,12 @@ fn neither_land_variable_reaches_a_gate() {
 }
 
 /// Rewrite the header fields of every audit record with `edit`.
-fn edit_audit_headers(r: &Repo, edit: impl Fn(&mut Vec<String>)) {
-    for line in audit_records(r).lines() {
+fn edit_audit_headers(repo: &Repo, edit: impl Fn(&mut Vec<String>)) {
+    for line in audit_records(repo).lines() {
         let object = line.split_whitespace().nth(1).expect("object");
         let body = String::from_utf8_lossy(
-            &r.git(&["notes", "--ref", "greengate-audit", "show", object])
+            &repo
+                .git(&["notes", "--ref", "greengate-audit", "show", object])
                 .stdout,
         )
         .into_owned();
@@ -814,7 +815,7 @@ fn edit_audit_headers(r: &Repo, edit: impl Fn(&mut Vec<String>)) {
             .chain(body.lines().skip(1).map(str::to_string))
             .collect::<Vec<_>>()
             .join("\n");
-        r.git(&[
+        repo.git(&[
             "notes",
             "--ref",
             "greengate-audit",
@@ -828,8 +829,8 @@ fn edit_audit_headers(r: &Repo, edit: impl Fn(&mut Vec<String>)) {
 }
 
 /// Age every audit record by `secs`.
-fn age_audit_records(r: &Repo, secs: i64) {
-    edit_audit_headers(r, |fields| {
+fn age_audit_records(repo: &Repo, secs: i64) {
+    edit_audit_headers(repo, |fields| {
         let at: i64 = fields[1].parse().unwrap();
         fields[1] = (at - secs).to_string();
     });
@@ -921,7 +922,7 @@ fn a_clean_record_from_an_older_greengate_is_still_replayed() {
     let (fx, bin, log) = audit_fixture();
     let ran = crate::land::land_with(&fx, &[], Some(&bin));
     assert_eq!(ran.code, 0, "{}", ran.stderr);
-    // A record written before 4.13 has no version field.
+    // A record from before the version field has none.
     edit_audit_headers(&fx.r, |fields| {
         fields.pop();
     });
