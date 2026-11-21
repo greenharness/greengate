@@ -1136,10 +1136,15 @@ fn a_nested_uv_lock_is_audited_from_its_own_directory() {
     assert!(recorded(&r).trim_end().ends_with("/a"), "{}", recorded(&r));
 }
 
+/// The first batch's `pip-audit` answer: one vulnerable row.
+const FIRST_BATCH_VULNERABLE: &str = "echo 'Found 1 known vulnerability in 1 package'; echo 'Name Version ID Fix Versions'; echo 'certifi 1.0.0 PYSEC-2024-1 1.0.1'; exit 1";
+/// The first batch's `pip-audit` answer: clean.
+const FIRST_BATCH_CLEAN: &str = "echo 'No known vulnerabilities found'; exit 0";
+
 /// A lock exporting two versions of one PyPI name, so two batches. The
-/// `pip-audit` shim answers the file naming 1.0.0 (vulnerable, or clean when
-/// `first_clean`) and exits 2 with no output for the other.
-fn two_batch_repo(first_clean: bool) -> Repo {
+/// `pip-audit` shim answers the file naming 1.0.0 with `first_batch_answer`
+/// and exits 2 with no output for the other.
+fn two_batch_repo(first_batch_answer: &str) -> Repo {
     let r = bare_repo();
     r.stage("pyproject.toml", "[project]\nname = \"x\"\n");
     let lock = [
@@ -1160,11 +1165,6 @@ else
   printf 'certifi==1.0.0\ncertifi==2.0.0\n'
 fi"#,
     );
-    let first = if first_clean {
-        "echo 'No known vulnerabilities found'; exit 0"
-    } else {
-        "echo 'Found 1 known vulnerability in 1 package'; echo 'Name Version ID Fix Versions'; echo 'certifi 1.0.0 PYSEC-2024-1 1.0.1'; exit 1"
-    };
     shim(
         &r,
         "pip-audit",
@@ -1172,7 +1172,7 @@ fi"#,
             r#"rf=; prev=
 for a in "$@"; do [ "$prev" = -r ] && rf=$a; prev=$a; done
 if grep -q '1.0.0' "$rf"; then
-  {first}
+  {first_batch_answer}
 fi
 exit 2"#
         ),
@@ -1182,14 +1182,14 @@ exit 2"#
 
 #[test]
 fn a_batch_that_could_not_answer_never_reads_as_a_clean_pass() {
-    let r = two_batch_repo(false);
+    let r = two_batch_repo(FIRST_BATCH_VULNERABLE);
     let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
     assert_ne!(code, 0, "the vulnerable batch refuses the tag: {out}");
     assert!(out.contains("certifi"), "{out}");
     assert!(out.contains("could not answer"), "{out}");
     assert!(out.contains("(no output)"), "{out}");
 
-    let r = two_batch_repo(true);
+    let r = two_batch_repo(FIRST_BATCH_CLEAN);
     let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
     assert_eq!(code, 0, "unavailable never blocks: {out}");
     assert!(out.contains("NOT fully checked"), "{out}");
