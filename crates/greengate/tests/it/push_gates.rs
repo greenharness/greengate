@@ -793,8 +793,8 @@ fn neither_land_variable_reaches_a_gate() {
     }
 }
 
-/// Age every audit record by `secs`.
-fn age_audit_records(r: &Repo, secs: i64) {
+/// Rewrite the header fields of every audit record with `edit`.
+fn edit_audit_headers(r: &Repo, edit: impl Fn(&mut Vec<String>)) {
     for line in audit_records(r).lines() {
         let object = line.split_whitespace().nth(1).expect("object");
         let body = String::from_utf8_lossy(
@@ -809,9 +809,8 @@ fn age_audit_records(r: &Repo, secs: i64) {
             .split(' ')
             .map(str::to_string)
             .collect();
-        let at: i64 = fields[1].parse().unwrap();
-        fields[1] = (at - secs).to_string();
-        let aged = std::iter::once(fields.join(" "))
+        edit(&mut fields);
+        let edited = std::iter::once(fields.join(" "))
             .chain(body.lines().skip(1).map(str::to_string))
             .collect::<Vec<_>>()
             .join("\n");
@@ -822,10 +821,18 @@ fn age_audit_records(r: &Repo, secs: i64) {
             "add",
             "-f",
             "-m",
-            &aged,
+            &edited,
             object,
         ]);
     }
+}
+
+/// Age every audit record by `secs`.
+fn age_audit_records(r: &Repo, secs: i64) {
+    edit_audit_headers(r, |fields| {
+        let at: i64 = fields[1].parse().unwrap();
+        fields[1] = (at - secs).to_string();
+    });
 }
 
 #[test]
@@ -857,4 +864,70 @@ fn a_could_not_check_record_expires_after_an_hour() {
     let (code, _o, err) = hook_in(&fx.r, &push_line(&tip, &tip), &bin, &[]);
     assert_ne!(code, 0, "{err}");
     assert!(err.contains("pre-push-audit-go"), "{err}");
+}
+
+/// An unchecked record written under `writer` (None: a greengate before
+/// 4.13, whose header has no version), then a push with the network back.
+fn push_after_unchecked_record_of(writer: Option<&str>) -> (i32, String, usize, usize) {
+    let (fx, bin, log) = audit_fixture();
+    fx.r.git(&["config", "greengate.pushGates", "inline"]);
+    std::fs::write(fx.r.path(".git/OFFLINE"), "").expect("mark");
+    let tip = crate::land::head(&fx);
+    let (code, _o, err) = hook_in(&fx.r, &push_line(&tip, &tip), &bin, &[]);
+    assert_eq!(code, 0, "offline never blocks: {err}");
+    assert!(
+        !audit_records(&fx.r).is_empty(),
+        "an unchecked record: {err}"
+    );
+    edit_audit_headers(&fx.r, |fields| {
+        assert_eq!(fields.len(), 6, "format at tool version: {fields:?}");
+        match writer {
+            Some(v) => fields[5] = v.to_string(),
+            None => {
+                fields.pop();
+            }
+        }
+    });
+    std::fs::remove_file(fx.r.path(".git/OFFLINE")).expect("online");
+    let before = runs(&log);
+    let (code, out, err) = hook_in(&fx.r, &push_line(&tip, &tip), &bin, &[]);
+    (code, format!("{out}{err}"), before, runs(&log))
+}
+
+#[test]
+fn an_unchecked_record_from_an_older_greengate_is_not_replayed() {
+    for writer in [None, Some("4.11.0")] {
+        let (code, out, before, after) = push_after_unchecked_record_of(writer);
+        assert_eq!(code, 0, "{writer:?}: {out}");
+        assert_eq!(after, before + 1, "{writer:?}: the audit ran again: {out}");
+        assert!(
+            !out.contains("replaying the audit recorded"),
+            "{writer:?}: {out}"
+        );
+    }
+}
+
+#[test]
+fn an_unchecked_record_of_this_greengate_is_replayed_within_the_hour() {
+    let (code, out, before, after) =
+        push_after_unchecked_record_of(Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(after, before, "replayed, not run: {out}");
+    assert!(out.contains("replaying the audit recorded"), "{out}");
+}
+
+#[test]
+fn a_clean_record_from_an_older_greengate_is_still_replayed() {
+    let (fx, bin, log) = audit_fixture();
+    let ran = crate::land::land_with(&fx, &[], Some(&bin));
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    // A record written before 4.13 has no version field.
+    edit_audit_headers(&fx.r, |fields| {
+        fields.pop();
+    });
+    let before = runs(&log);
+    let tip = crate::land::head(&fx);
+    let (code, out, err) = hook_in(&fx.r, &push_line(&tip, &tip), &bin, &[]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(runs(&log), before, "the clean record answered: {err}");
 }

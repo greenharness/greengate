@@ -2080,6 +2080,10 @@ const AUDIT_MAX_AGE: &str = "greengate.auditMaxAge";
 /// A report that could not check anything answers for an hour only: an
 /// offline push is never blocked, and the audit is tried again soon.
 const UNCHECKED_MAX_AGE_SECS: i64 = 60 * 60;
+/// The greengate that writes a record, the header's last field. An
+/// unchecked record answers only to the version that wrote it: the next one
+/// may have a route that can check (f03).
+const WRITER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Is `check` one of the dependency audits?
 pub fn is_audit(check: &str) -> bool {
@@ -2272,7 +2276,7 @@ fn render(concluded: &Concluded, at: i64) -> String {
         Report::Clean | Report::CouldNotCheck => &[],
     };
     let mut body = format!(
-        "{AUDIT_FORMAT} {at} {} {} {}",
+        "{AUDIT_FORMAT} {at} {} {} {} {WRITER_VERSION}",
         class_of(&concluded.report),
         u8::from(concluded.waivable),
         concluded.tool
@@ -2286,7 +2290,9 @@ fn render(concluded: &Concluded, at: i64) -> String {
     body
 }
 
-fn parse(body: &str) -> Option<(i64, Concluded)> {
+/// A record's time, the greengate that wrote it (None before 4.13), and what
+/// it concluded.
+fn parse(body: &str) -> Option<(i64, Option<String>, Concluded)> {
     let (head, rest) = body.split_once('\n').unwrap_or((body, ""));
     let mut fields = head.split_whitespace();
     if fields.next()? != AUDIT_FORMAT {
@@ -2296,6 +2302,7 @@ fn parse(body: &str) -> Option<(i64, Concluded)> {
     let class = fields.next()?;
     let waivable = fields.next()? == "1";
     let tool = fields.next()?.to_string();
+    let writer = fields.next().map(str::to_string);
     let (items_part, full) = match rest.split_once("---\n") {
         Some((i, full)) => (i, full.to_string()),
         None => (rest.strip_suffix("---").unwrap_or(rest), String::new()),
@@ -2313,6 +2320,7 @@ fn parse(body: &str) -> Option<(i64, Concluded)> {
     };
     Some((
         at,
+        writer,
         Concluded {
             tool,
             report,
@@ -2334,8 +2342,11 @@ fn fresh_record(
         .trim()
         .to_string();
     let body = crate::git::stdout(&["notes", "--ref", AUDIT_REF, "show", &key])?;
-    let (at, concluded) = parse(&body)?;
+    let (at, writer, concluded) = parse(&body)?;
     let max_age = if matches!(concluded.report, Report::CouldNotCheck) {
+        if writer.as_deref() != Some(WRITER_VERSION) {
+            return None;
+        }
         UNCHECKED_MAX_AGE_SECS
     } else {
         crate::config::integer_or(settings, AUDIT_MAX_AGE, 24, 1..=24 * 30) * 3600

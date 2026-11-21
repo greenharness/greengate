@@ -16,6 +16,11 @@ missing here.
   warning says so. Its warnings now each name a next step: the network only
   when pip-audit's reason names it, else `pip-audit --version`;
   `greengate.timeout` when time ran out; `$TMPDIR` when a scratch file failed.
+- After an upgrade, an audit that an older greengate could not complete is
+  run again on the next push. An `unchecked` record now carries the version
+  that wrote it and answers only to that version, so a new route that can
+  check is no longer masked for up to an hour. Clean records and records with
+  findings still answer across versions.
 
 ## v4.12.0
 
