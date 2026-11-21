@@ -26,7 +26,7 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 
 2026-11-21: f04 closed on the relay's prompt (`ctx` kept, test `tmp` renamed `scratch_dir`; test-only, nothing to release). Next, in order: f02 (ADR-0055 on the venv route, due 2026-12-05), then f05. f01 and f03 still ship with the next release.
 
-2026-11-21: f05 closed on the relay's prompt (a push snapshot puts its own copies of the borrowed venv's editable `.pth` directories first on `PYTHONPATH`; unreleased, ships with f01 and f03 in the next release). Filed f06 (`uv run` in a `testPushedTree` snapshot runs a `PATH` pytest). Next, in order: f02 (ADR-0055 on the venv route, due 2026-12-05), then f06.
+2026-11-21: f05 closed on the relay's prompt (a push snapshot puts its own copies of the borrowed venv's editable `.pth` directories first on `PYTHONPATH`; unreleased, ships with f01 and f03 in the next release). Filed f07 (`uv run` in a `testPushedTree` snapshot runs a `PATH` pytest; numbered f06 at first, renumbered because #505 filed its own f06 meanwhile). Next, in order: f06 (land refuses at once when the hook runs another greengate), f02 (ADR-0055 on the venv route, due 2026-12-05), then f07.
 
 ## Not yet specified
 
