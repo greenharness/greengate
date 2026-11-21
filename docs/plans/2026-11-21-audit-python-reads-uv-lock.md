@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/audit-python-uv-lock
 repos: [amont]
 adrs: []
@@ -248,6 +248,17 @@ Input → expected → actual:
 - Export failure clipping: the plan's "100 characters" became a reason line
   clipped so the line fits 80 columns, as carried from round 2 and asked
   again by implementation review.
+
+## Implementation review
+
+- implementation-review: round 1 approve-with-changes, 3 blocking rule findings fixed (flag args, `let _` reasons, `value`); Delta approve. 80k + 41k tokens, 93 s + 24 s.
+- backend, rust: round 1 approve-with-changes (per-batch export, batch-failure test, I/O errors fixed); Delta approve-with-changes. 76k, 62k; Delta 38k each.
+- unix, tui: round 1 approve-with-changes (scrub `/private`, 80-column lines fixed); Delta unix approve-with-changes, tui approve. 66k, 57k; Delta 34k each.
+- deliberate: Delta lows and rust's medium (eager production export, one `uv export` per lock directory on a tag; Next-line wording; canonicalize once; doc wrap). Correctness unchanged, and a code change would need a third pass. Filed in the amont inbox as one follow-up.
+
+## Outcome
+
+Done on the branch. Next: merge, then a greengate minor release (`tag-release`). Before install, the sre-agent cve-lane ticket for its 10 findings must exist (due 2026-11-27). After install, run `greengate land` on a fresh sre-agent worktree with the released binary.
 
 ## Measure
 
