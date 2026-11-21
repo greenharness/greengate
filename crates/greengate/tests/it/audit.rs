@@ -26,12 +26,12 @@ fn push_check(r: &Repo, check: &str, remote_ref: &str) -> (i32, String) {
     push_check_in(r, check, remote_ref, None)
 }
 
-/// As [`push_check`], with the run's temp directory pointed at `tmp`.
+/// As [`push_check`], with the run's temp directory pointed at `scratch_dir`.
 fn push_check_in(
     r: &Repo,
     check: &str,
     remote_ref: &str,
-    tmp: Option<&std::path::Path>,
+    scratch_dir: Option<&std::path::Path>,
 ) -> (i32, String) {
     let oid = "a".repeat(40);
     let line = format!("{remote_ref} {oid} {remote_ref} {}\n", "0".repeat(40));
@@ -41,8 +41,8 @@ fn push_check_in(
         std::env::var("PATH").unwrap_or_default()
     );
     let mut command = crate::common::amont_cmd();
-    if let Some(tmp) = tmp {
-        command.env("TMPDIR", tmp);
+    if let Some(scratch_dir) = scratch_dir {
+        command.env("TMPDIR", scratch_dir);
     }
     let mut child = command
         .arg("--hooks-dir")
@@ -1021,13 +1021,13 @@ fn recorded(r: &Repo) -> String {
 }
 
 fn scratch_tmp(r: &Repo) -> std::path::PathBuf {
-    let tmp = r.path(".git/scratch-tmp");
-    std::fs::create_dir_all(&tmp).expect("mkdir");
-    tmp
+    let scratch_dir = r.path(".git/scratch-scratch_dir");
+    std::fs::create_dir_all(&scratch_dir).expect("mkdir");
+    scratch_dir
 }
 
-fn leftovers(tmp: &std::path::Path) -> Vec<String> {
-    std::fs::read_dir(tmp)
+fn leftovers(scratch_dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(scratch_dir)
         .expect("read")
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -1038,8 +1038,13 @@ fn leftovers(tmp: &std::path::Path) -> Vec<String> {
 fn a_uv_lock_without_a_venv_is_audited_and_a_vulnerable_one_refuses_a_tag() {
     let r = uv_lock_repo("");
     lock_pip_audit(&r, "certifi 1.0.0 PYSEC-2024-1 1.0.1");
-    let tmp = scratch_tmp(&r);
-    let (code, out) = push_check_in(&r, "pre-push-audit-python", "refs/tags/v1.0.0", Some(&tmp));
+    let scratch_dir = scratch_tmp(&r);
+    let (code, out) = push_check_in(
+        &r,
+        "pre-push-audit-python",
+        "refs/tags/v1.0.0",
+        Some(&scratch_dir),
+    );
     assert_ne!(code, 0, "a shipped finding must refuse the tag: {out}");
     assert!(out.contains("certifi"), "{out}");
     assert!(
@@ -1052,7 +1057,7 @@ fn a_uv_lock_without_a_venv_is_audited_and_a_vulnerable_one_refuses_a_tag() {
     );
     assert!(!out.contains("did NOT run"), "{out}");
     assert!(
-        !out.contains(tmp.to_str().unwrap()),
+        !out.contains(scratch_dir.to_str().unwrap()),
         "temp path leaked: {out}"
     );
     let sent = recorded(&r);
@@ -1063,16 +1068,21 @@ fn a_uv_lock_without_a_venv_is_audited_and_a_vulnerable_one_refuses_a_tag() {
     );
     assert!(!sent.contains(';'), "markers must be stripped: {sent}");
     assert_eq!(
-        leftovers(&tmp),
+        leftovers(&scratch_dir),
         Vec::<String>::new(),
         "temp dir must be removed"
     );
 
     lock_pip_audit(&r, "");
-    let (code, out) = push_check_in(&r, "pre-push-audit-python", "refs/tags/v1.0.0", Some(&tmp));
+    let (code, out) = push_check_in(
+        &r,
+        "pre-push-audit-python",
+        "refs/tags/v1.0.0",
+        Some(&scratch_dir),
+    );
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        leftovers(&tmp),
+        leftovers(&scratch_dir),
         Vec::<String>::new(),
         "temp dir must be removed"
     );
@@ -1138,8 +1148,13 @@ fn a_failed_export_warns_and_does_not_block() {
         "echo 'error: lockfile needs to be updated' >&2\nexit 2",
     );
     lock_pip_audit(&r, "certifi 1.0.0 PYSEC-2024-1 1.0.1");
-    let tmp = scratch_tmp(&r);
-    let (code, out) = push_check_in(&r, "pre-push-audit-python", "refs/tags/v1.0.0", Some(&tmp));
+    let scratch_dir = scratch_tmp(&r);
+    let (code, out) = push_check_in(
+        &r,
+        "pre-push-audit-python",
+        "refs/tags/v1.0.0",
+        Some(&scratch_dir),
+    );
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("did NOT run"), "{out}");
     assert!(out.contains("lockfile needs to be updated"), "{out}");
@@ -1149,7 +1164,7 @@ fn a_failed_export_warns_and_does_not_block() {
     );
     assert_eq!(recorded(&r), "");
     assert_eq!(
-        leftovers(&tmp),
+        leftovers(&scratch_dir),
         Vec::<String>::new(),
         "temp dir must be removed"
     );
