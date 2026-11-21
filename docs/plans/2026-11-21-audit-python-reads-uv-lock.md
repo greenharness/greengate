@@ -255,6 +255,7 @@ Input → expected → actual:
 - backend, rust: round 1 approve-with-changes (per-batch export, batch-failure test, I/O errors fixed); Delta approve-with-changes. 76k, 62k; Delta 38k each.
 - unix, tui: round 1 approve-with-changes (scrub `/private`, 80-column lines fixed); Delta unix approve-with-changes, tui approve. 66k, 57k; Delta 34k each.
 - deliberate: Delta lows and rust's medium (eager production export, one `uv export` per lock directory on a tag; Next-line wording; canonicalize once; doc wrap). Correctness unchanged, and a code change would need a third pass. Filed in the amont inbox as one follow-up.
+- CI fix (Windows `unused_mut` in `PrivateDir::create_at`, `make lint-cross` green on 3 targets): implementation-review, backend, rust, unix all approve (45k, 23k, 23k, 25k). deliberate: `ctx` / test `tmp` names (low, "not a blocker") filed as follow-up.
 
 ## Outcome
 
