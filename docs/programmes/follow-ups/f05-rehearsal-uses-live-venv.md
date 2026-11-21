@@ -57,4 +57,4 @@ fail on the old code with `module 'pkg' has no attribute 'NEW'`.
 Not covered: the `uv run --no-sync` branch under `testPushedTree`. The probe
 runs in the source checkout, but the suite runs in the snapshot, where `uv run`
 makes an empty `.venv` and runs whatever `pytest` is on `PATH`. Filed as
-[f06](f06-uv-run-in-push-snapshot.md).
+[f07](f07-uv-run-in-push-snapshot.md).
