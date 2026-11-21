@@ -15,7 +15,7 @@ use super::common::{
 };
 use crate::check::Outcome;
 use crate::git;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The extensions both Python checks consume. Exported so `registry.rs`
@@ -255,6 +255,111 @@ pub fn pyright(settings: &crate::config::Settings, _args: &[std::ffi::OsString])
     Outcome::Passed
 }
 
+/// The virtualenvs a snapshot's pytest can have borrowed: an activated one,
+/// the checkout's own `.venv`, the main worktree's (a linked worktree has
+/// none), and the rehearsal's source worktree's.
+fn borrowed_venvs(root: &str) -> Vec<PathBuf> {
+    let main = git::stdout(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .and_then(|common| Path::new(&common).parent().map(|p| p.join(".venv")));
+    std::env::var_os("VIRTUAL_ENV")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(std::iter::once(Path::new(root).join(".venv")))
+        .chain(main)
+        .chain(crate::rehearsal::source_worktree().map(|s| s.join(".venv")))
+        .collect()
+}
+
+/// Every `site-packages` under `venv`: `lib/python3.X/site-packages`, or
+/// Windows' `Lib/site-packages`.
+fn site_packages(venv: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(venv.join("lib"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("python"))
+        .map(|e| e.path().join("site-packages"))
+        .collect();
+    found.push(venv.join("Lib").join("site-packages"));
+    found.retain(|p| p.is_dir());
+    found
+}
+
+/// The directories an editable install in `site` adds to `sys.path`: the
+/// absolute path lines of its `.pth` files. `import` lines (setuptools'
+/// strict-mode finder, coverage hooks) carry no path and are skipped.
+fn pth_paths(site: &Path) -> Vec<PathBuf> {
+    let mut pths: Vec<PathBuf> = std::fs::read_dir(site)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "pth"))
+        .collect();
+    pths.sort();
+    pths.iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .flat_map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("import"))
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The snapshot's own copies of the directories a borrowed venv's editable
+/// install points at: `<checkout>/src` becomes `<snapshot>/src`, and a flat
+/// layout or a workspace member maps the same way. Each `.pth` path is taken
+/// relative to the checkout that owns its venv (the venv's parent), and kept
+/// only when the snapshot has that directory. Paths are canonical before
+/// they are compared: snapshots live under `/var/folders`, which is
+/// `/private/var/folders` once resolved.
+fn snapshot_import_roots(snapshot: &Path, root: &str) -> Vec<PathBuf> {
+    let Ok(snap) = snapshot.canonicalize() else {
+        return Vec::new();
+    };
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for venv in borrowed_venvs(root) {
+        let Some(owner) = venv.parent().and_then(|p| p.canonicalize().ok()) else {
+            continue;
+        };
+        if owner == snap {
+            continue; // the snapshot's own venv points at the snapshot already
+        }
+        for site in site_packages(&venv) {
+            for p in pth_paths(&site) {
+                let Ok(p) = p.canonicalize() else { continue };
+                let Ok(rel) = p.strip_prefix(&owner) else {
+                    continue;
+                };
+                let mapped = snap.join(rel);
+                if mapped.is_dir() && !roots.contains(&mapped) {
+                    roots.push(mapped);
+                }
+            }
+        }
+    }
+    roots
+}
+
+/// `roots`, then whatever `PYTHONPATH` already held. `PYTHONPATH` comes
+/// before site-packages on `sys.path`, so these win over a `.pth`, and over
+/// setuptools' editable finder, which is appended to `sys.meta_path`.
+fn python_path_with(roots: &[PathBuf]) -> Option<std::ffi::OsString> {
+    if roots.is_empty() {
+        return None;
+    }
+    let inherited = std::env::var_os("PYTHONPATH");
+    let tail = inherited
+        .as_deref()
+        .map(|v| std::env::split_paths(v).collect::<Vec<_>>())
+        .unwrap_or_default();
+    std::env::join_paths(roots.iter().cloned().chain(tail)).ok()
+}
+
 /// The Python test gate — `pre-push-pytest`, `cargo-test`'s shape for the
 /// third ecosystem. JS had a push-time suite from the start and Rust
 /// gained one; Python repositories declaring a pytest setup (a
@@ -302,11 +407,20 @@ pub fn pytest(
         };
         // Where THIS ref's suite runs decides what it is answering about —
         // the pushed commits, not whatever is open in the editor.
-        let (where_, _guard) =
-            crate::pushed_tree::where_to_run(settings, &r.local_oid, &root, gate);
+        let (where_, guard) = crate::pushed_tree::where_to_run(settings, &r.local_oid, &root, gate);
         let mut cmd = std::process::Command::new(&argv[0]);
         cmd.args(&argv[1..]);
         cmd.current_dir(&where_).stdin(std::process::Stdio::null());
+        // A snapshot has no virtualenv of its own: the pytest above belongs
+        // to the source checkout's, whose editable install points at the
+        // SOURCE `src`. Put the snapshot's own import roots first, or the
+        // suite tests the code on disk instead of the code being pushed.
+        if crate::rehearsal::in_snapshot() || guard.is_some() {
+            let roots = snapshot_import_roots(&where_, &root);
+            if let Some(path) = python_path_with(&roots) {
+                cmd.env("PYTHONPATH", path);
+            }
+        }
         super::common::strip_git_env(&mut cmd);
         if !super::common::bounded_success(settings, &mut cmd, "pytest") {
             super::common::fail("Python tests failed. Push aborted.");

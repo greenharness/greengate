@@ -632,3 +632,54 @@ fn a_push_gives_up_waiting_and_runs_the_gate_itself() {
         "having given up, it must run the gate itself:\n{out}"
     );
 }
+
+/// The rehearsal shape of `pytest_gate::the_pushed_trees_src_wins_over_an_editable_install`,
+/// the one that failed on 2026-11-19: the snapshot's pre-push resolves the
+/// MAIN worktree's `.venv` (the snapshot is a linked worktree with none),
+/// whose `.pth` names the main checkout's `src`. The snapshot's own `src`
+/// must win, or a branch-only symbol fails the rehearsal.
+#[test]
+#[cfg(unix)]
+fn a_rehearsal_imports_the_snapshots_src_not_the_editable_install() {
+    if missing("python3") {
+        return;
+    }
+    let r = Repo::new();
+    r.stage("conftest.py", "# pytest setup\n");
+    r.stage("src/pkg/__init__.py", "OLD = 1\n");
+    r.stage(".gitignore", ".venv/\n");
+    r.commit("chore: base");
+    let base = head(&r);
+    trust_and_install(&r);
+    r.git(&["checkout", "-q", "--no-track", "-b", "feat/x"]);
+    r.git(&["update-ref", "refs/remotes/origin/main", &base]);
+    r.stage("src/pkg/__init__.py", "OLD = 1\nNEW = 1\n");
+    r.stage("tests/test_new.py", "from pkg import NEW\n");
+    r.commit("feat: a new symbol");
+    // The working tree is behind the commit being rehearsed.
+    r.write("src/pkg/__init__.py", "OLD = 1\n");
+    crate::pytest_gate::editable_venv(&r);
+
+    let mut cmd = crate::common::amont_cmd();
+    cmd.args(["rehearse", "--wait"])
+        .current_dir(&r.dir)
+        .stdin(Stdio::null());
+    Repo::strip_git_env_impl(&mut cmd);
+    // No `uv`: the `.venv` branch of the resolver answers on every machine.
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env_remove("VIRTUAL_ENV")
+        .env_remove("PYTHONPATH")
+        .env("GIT_CONFIG_GLOBAL", r.dir.join("fake-gitconfig"));
+    let out = cmd.output().expect("run amont rehearse");
+    let out = format!(
+        "{}{}\nlog:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+        log(&r)
+    );
+    assert!(
+        note(&r, "HEAD").contains("pre-push-pytest"),
+        "the rehearsal ran pytest and stamped HEAD: {out}"
+    );
+    assert!(!out.contains("has no attribute 'NEW'"), "{out}");
+}

@@ -21,6 +21,13 @@ missing here.
   that wrote it and answers only to that version, so a new route that can
   check is no longer masked for up to an hour. Clean records and records with
   findings still answer across versions.
+- `pre-push-pytest` in a push snapshot (a rehearsal, `amont land`, or
+  `greengate.testPushedTree`) now imports the pushed code, not the working
+  tree's. The snapshot has no virtualenv, so the gate borrows the source
+  checkout's, whose editable install points at the source `src`. A branch
+  whose tests used a symbol the working tree did not have yet failed at land.
+  The snapshot's copies of the editable install's directories now go first on
+  `PYTHONPATH`.
 
 ## v4.12.0
 
