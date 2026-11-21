@@ -1340,17 +1340,26 @@ fn has_rows_to_split(report: &Report, out: &str) -> bool {
 /// What one lock directory ships, asked of [`uv_production_names`] at most
 /// once, and only on a release whose batch has findings to split.
 struct Production {
-    release: bool,
-    dir: std::path::PathBuf,
+    /// The lock directory to ask in; None off a release, where every
+    /// finding is kept.
+    dir: Option<std::path::PathBuf>,
     /// None: not asked yet. `Some(None)`: asked, and unknown.
     names: Option<Option<std::collections::HashSet<String>>>,
 }
 
 impl Production {
-    fn new(release: bool, dir: std::path::PathBuf) -> Production {
+    /// A release: ask in `dir` when a batch has findings.
+    fn asked_in(dir: std::path::PathBuf) -> Production {
         Production {
-            release,
-            dir,
+            dir: Some(dir),
+            names: None,
+        }
+    }
+
+    /// No release: never ask, keep every finding.
+    fn never() -> Production {
+        Production {
+            dir: None,
             names: None,
         }
     }
@@ -1364,9 +1373,7 @@ impl Production {
         budget: &Budget,
         say: &dyn Fn(&str),
     ) -> Option<&std::collections::HashSet<String>> {
-        if !self.release {
-            return None;
-        }
+        let dir = self.dir.as_ref()?;
         if self.names.is_none() {
             self.names = Some(if budget.spent() {
                 say(&format!(
@@ -1374,7 +1381,7 @@ impl Production {
                 ));
                 None
             } else {
-                uv_production_names(settings, &self.dir)
+                uv_production_names(settings, dir)
             });
         }
         self.names.as_ref().and_then(Option::as_ref)
@@ -1707,17 +1714,15 @@ impl LockDirAudit {
 /// `uv export` of the lock in `dir`, filtered to PyPI pins, audited by
 /// pip-audit without resolving anything (`--no-deps --disable-pip`).
 ///
-/// On a release, each batch's findings are split by what the lock ships,
-/// asked the first time a batch has findings; no release keeps every finding.
+/// `production` splits each batch's findings by what the lock ships, asked
+/// the first time a batch has findings.
 fn audit_uv_lock(
     settings: &crate::config::Settings,
-    release: bool,
+    mut production: Production,
     dir: &str,
     budget: &Budget,
 ) -> LockDirAudit {
-    let root = std::path::PathBuf::from(common::repo_root());
-    let dir_path = root.join(dir);
-    let mut production = Production::new(release, dir_path.clone());
+    let dir_path = std::path::PathBuf::from(common::repo_root()).join(dir);
     let lock_path = if dir.is_empty() {
         "uv.lock".to_string()
     } else {
@@ -1916,13 +1921,19 @@ fn python_lock_run(ctx: &crate::registry::Ctx) -> Ran {
     let (settings, refs) = (ctx.settings, ctx.push.get());
     let release = releasing(refs);
     let budget = Budget::new(settings);
+    let root = std::path::PathBuf::from(common::repo_root());
     let dirs = lockfile_dirs("uv.lock");
     let only_root = dirs.len() == 1 && dirs[0].is_empty();
     let (mut vulnerabilities, mut advisories) = (Vec::new(), Vec::new());
     let mut full = String::new();
     let (mut complete, mut waivable) = (true, true);
     for dir in &dirs {
-        let audit = audit_uv_lock(settings, release, dir, &budget);
+        let production = if release {
+            Production::asked_in(root.join(dir))
+        } else {
+            Production::never()
+        };
+        let audit = audit_uv_lock(settings, production, dir, &budget);
         let label = |ids: Vec<String>| -> Vec<String> {
             if dir.is_empty() {
                 ids
@@ -3057,12 +3068,12 @@ requests @ https://example.com/r.whl
         // what is checked here is the warning and the cached answer.
         let dir = std::env::temp_dir();
 
-        let mut off = Production::new(false, dir.clone());
+        let mut off = Production::never();
         assert!(off.names(&settings, &spent, &say).is_none());
         assert!(off.names.is_none(), "no release never asks");
         assert!(said.borrow().is_empty());
 
-        let mut late = Production::new(true, dir);
+        let mut late = Production::asked_in(dir);
         assert!(late.names(&settings, &spent, &say).is_none());
         assert!(late.names(&settings, &spent, &say).is_none());
         assert_eq!(late.names, Some(None), "spent is remembered as unknown");

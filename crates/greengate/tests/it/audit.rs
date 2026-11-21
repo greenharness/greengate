@@ -1079,30 +1079,30 @@ fn a_uv_lock_without_a_venv_is_audited_and_a_vulnerable_one_refuses_a_tag() {
 }
 
 /// How many `uv export --no-dev` calls the shim saw.
-fn production_exports(r: &Repo) -> usize {
-    std::fs::read_to_string(r.path(".git/uv-calls"))
+fn production_exports(repo: &Repo) -> usize {
+    std::fs::read_to_string(repo.path(".git/uv-calls"))
         .unwrap_or_default()
         .lines()
-        .filter(|l| l.contains("--no-dev"))
+        .filter(|call| call.contains("--no-dev"))
         .count()
 }
 
 #[test]
 fn a_release_asks_what_ships_only_when_a_batch_has_findings() {
-    let r = uv_lock_repo("");
-    lock_pip_audit(&r, "");
-    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    let repo = uv_lock_repo("");
+    lock_pip_audit(&repo, "");
+    let (code, out) = push_check(&repo, "pre-push-audit-python", "refs/tags/v1.0.0");
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        production_exports(&r),
+        production_exports(&repo),
         0,
         "a clean lock needs no split: {out}"
     );
 
-    lock_pip_audit(&r, "dev-tool 1.0.0 PYSEC-2024-2 1.0.1");
-    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    lock_pip_audit(&repo, "dev-tool 1.0.0 PYSEC-2024-2 1.0.1");
+    let (code, out) = push_check(&repo, "pre-push-audit-python", "refs/tags/v1.0.0");
     assert_eq!(code, 0, "{out}");
-    assert_eq!(production_exports(&r), 1, "{out}");
+    assert_eq!(production_exports(&repo), 1, "{out}");
 }
 
 #[test]
