@@ -968,10 +968,12 @@ fn uv_lock_repo(lock_dir: &str) -> Repo {
     r.commit("chore: uv project");
     // The export (with `-o`) lists everything; without `-o` it is the
     // production list the release split asks for.
+    // Each call's arguments are appended to `.git/uv-calls`.
     shim(
         &r,
         "uv",
-        r#"out=; prev=
+        r#"echo "$*" >> "$(git rev-parse --git-dir)/uv-calls"
+out=; prev=
 for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
 if [ -n "$out" ]; then
   printf 'certifi==1.0.0 ; python_full_version >= "3.8"\ndev-tool==1.0.0\nplatform-kernel==0.1.0\n' > "$out"
@@ -1074,6 +1076,33 @@ fn a_uv_lock_without_a_venv_is_audited_and_a_vulnerable_one_refuses_a_tag() {
         Vec::<String>::new(),
         "temp dir must be removed"
     );
+}
+
+/// How many `uv export --no-dev` calls the shim saw.
+fn production_exports(repo: &Repo) -> usize {
+    std::fs::read_to_string(repo.path(".git/uv-calls"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|call| call.contains("--no-dev"))
+        .count()
+}
+
+#[test]
+fn a_release_asks_what_ships_only_when_a_batch_has_findings() {
+    let repo = uv_lock_repo("");
+    lock_pip_audit(&repo, "");
+    let (code, out) = push_check(&repo, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        production_exports(&repo),
+        0,
+        "a clean lock needs no split: {out}"
+    );
+
+    lock_pip_audit(&repo, "dev-tool 1.0.0 PYSEC-2024-2 1.0.1");
+    let (code, out) = push_check(&repo, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(production_exports(&repo), 1, "{out}");
 }
 
 #[test]
@@ -1188,6 +1217,10 @@ fn a_batch_that_could_not_answer_never_reads_as_a_clean_pass() {
     assert!(out.contains("certifi"), "{out}");
     assert!(out.contains("could not answer"), "{out}");
     assert!(out.contains("(no output)"), "{out}");
+    assert!(
+        out.contains("Next: `pip-audit --version` to check the install"),
+        "a silent failure is not blamed on the network: {out}"
+    );
 
     let r = two_batch_repo(FIRST_BATCH_CLEAN);
     let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");

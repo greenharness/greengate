@@ -857,8 +857,9 @@ pub enum LockWait {
 ///
 /// It is no longer the difference between safe and destructive: a caller takes
 /// the path with an exclusive `create_dir` and refuses anything already there,
-/// rather than the `remove_dir_all`-first shape this comment used to describe. Unpredictability is now defence in depth — it means the refusal
-/// is not something an attacker can arrange on demand.
+/// rather than the `remove_dir_all`-first shape this comment used to describe.
+/// Unpredictability is now defence in depth — it means the refusal is not
+/// something an attacker can arrange on demand.
 ///
 /// No dependency for real randomness here (this crate ships dependency-free),
 /// so the tail is a hash of the wall clock and the pid through

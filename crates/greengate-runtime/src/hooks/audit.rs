@@ -1274,17 +1274,17 @@ fn python_run(ctx: &crate::registry::Ctx) -> Ran {
     let Some((exit_ok, out)) = audited(settings, &argv) else {
         return Ran::Unavailable;
     };
-    let release = releasing(refs);
     // A requirements.txt is the production list by convention (dev pins
     // live beside it, in requirements-dev.txt). A virtualenv or a lock holds
     // the dev groups too, so on a release its findings are checked against
-    // what `uv export --no-dev` says ships.
-    let production = if release {
+    // what `uv export --no-dev` says ships — asked only when there are any.
+    let report = read_pip_audit(exit_ok, &out);
+    let production = if releasing(refs) && has_rows_to_split(&report, &out) {
         uv_production_names(settings, std::path::Path::new(&root))
     } else {
         None
     };
-    let (report, waivable) = shipped_only(read_pip_audit(exit_ok, &out), &out, production.as_ref());
+    let (report, waivable) = shipped_only(report, &out, production.as_ref());
     Ran::Concluded(Concluded {
         tool: "audit-python".to_string(),
         report,
@@ -1328,6 +1328,86 @@ fn shipped_only(
         }
     }
     (report, waivable)
+}
+
+/// Would [`shipped_only`] split anything? Only a vulnerability report with
+/// rows it can read; for every other report the production names change
+/// nothing, so they are not worth a `uv export`.
+fn has_rows_to_split(report: &Report, out: &str) -> bool {
+    matches!(report, Report::Vulnerabilities(_)) && !pip_vulnerable_rows(out).is_empty()
+}
+
+/// What one lock directory ships, asked of [`uv_production_names`] at most
+/// once, and only on a release whose batch has findings to split.
+enum Production {
+    /// No release: never asked, every finding is kept.
+    Never,
+    /// A release, not asked yet: ask in this lock directory.
+    Unasked(std::path::PathBuf),
+    /// Asked; None when the export could not answer or time ran out.
+    Asked(Option<std::collections::HashSet<String>>),
+}
+
+impl Production {
+    /// The production names, None when this is no release, the export
+    /// cannot answer, or the budget is spent before it is asked (`say`
+    /// warns once): every finding is then kept.
+    fn names(
+        &mut self,
+        settings: &crate::config::Settings,
+        budget: &Budget,
+        say: &dyn Fn(&str),
+    ) -> Option<&std::collections::HashSet<String>> {
+        if let Production::Unasked(dir) = self {
+            *self = Production::Asked(if budget.spent() {
+                say(&format!(
+                    "out of time before the dev-only split — every finding counts\n  {TIMEOUT_NEXT}"
+                ));
+                None
+            } else {
+                uv_production_names(settings, dir)
+            });
+        }
+        match self {
+            Production::Asked(names) => names.as_ref(),
+            Production::Never | Production::Unasked(_) => None,
+        }
+    }
+}
+
+/// The next step after the lock route ran out of time.
+const TIMEOUT_NEXT: &str =
+    "Next: `git config greengate.timeout <secs>` (0 = no limit), then push again";
+
+/// The next step after a scratch file could not be made, written or read.
+const TMPDIR_NEXT: &str = "Next: check that $TMPDIR is writable and has space, then push again";
+
+/// The next step after pip-audit could not answer, from its own reason: the
+/// network when the reason names it, else pip-audit itself.
+fn pip_audit_next(why: &str) -> &'static str {
+    // holds-until: pip-audit's English error wording is the only signal; when
+    // it reports an error class or a distinct exit code for the network,
+    // decide on that instead of these words.
+    let why = why.to_ascii_lowercase();
+    let network = [
+        "network",
+        "connect",
+        "timed out",
+        "timeout",
+        "resolve",
+        "dns",
+        "ssl",
+        "certificate",
+        "unreachable",
+        "temporary failure",
+    ]
+    .iter()
+    .any(|word| why.contains(word));
+    if network {
+        "Next: check the network, then push again"
+    } else {
+        "Next: `pip-audit --version` to check the install, then push again"
+    }
 }
 
 /// The only registry whose packages are looked up: ADR-0055 sends public
@@ -1588,11 +1668,11 @@ fn clip(text: &str, columns: usize) -> String {
 fn scrub_private(
     text: &str,
     private: &std::path::Path,
-    canonical: Option<std::path::PathBuf>,
+    canonical: Option<&std::path::Path>,
 ) -> String {
     let plain = private.to_string_lossy();
     let mut scrubbed = text.to_string();
-    if let Some(canonical) = canonical.filter(|c| c != private) {
+    if let Some(canonical) = canonical.filter(|c| *c != private) {
         scrubbed = scrubbed.replace(canonical.to_string_lossy().as_ref(), "<tmp>");
     }
     scrubbed.replace(plain.as_ref(), "<tmp>")
@@ -1624,16 +1704,15 @@ impl LockDirAudit {
 /// `uv export` of the lock in `dir`, filtered to PyPI pins, audited by
 /// pip-audit without resolving anything (`--no-deps --disable-pip`).
 ///
-/// `production` is what the lock ships, computed once for this directory on a
-/// release; None keeps every finding.
+/// `production` splits each batch's findings by what the lock ships, asked
+/// the first time a batch has findings.
 fn audit_uv_lock(
     settings: &crate::config::Settings,
-    production: Option<&std::collections::HashSet<String>>,
+    mut production: Production,
     dir: &str,
     budget: &Budget,
 ) -> LockDirAudit {
-    let root = std::path::PathBuf::from(common::repo_root());
-    let dir_path = root.join(dir);
+    let dir_path = std::path::PathBuf::from(common::repo_root()).join(dir);
     let lock_path = if dir.is_empty() {
         "uv.lock".to_string()
     } else {
@@ -1649,23 +1728,20 @@ fn audit_uv_lock(
         Ok(private) => private,
         Err(why) => {
             say(&format!(
-                "no private directory ({}) — did NOT run",
+                "no private directory ({}) — did NOT run\n  {TMPDIR_NEXT}",
                 why.kind()
             ));
             return LockDirAudit::unchecked();
         }
     };
     // Whatever a tool prints, the temp path stays out of it.
-    let scrub = |text: &str| {
-        scrub_private(
-            text,
-            private.path(),
-            std::fs::canonicalize(private.path()).ok(),
-        )
-    };
+    let canonical = std::fs::canonicalize(private.path()).ok();
+    let scrub = |text: &str| scrub_private(text, private.path(), canonical.as_deref());
     let export = private.path().join("export.txt");
     if budget.spent() {
-        say("out of time before the export — the audit did NOT run");
+        say(&format!(
+            "out of time before the export — the audit did NOT run\n  {TIMEOUT_NEXT}"
+        ));
         return LockDirAudit::unchecked();
     }
     let argv = vec![
@@ -1705,7 +1781,7 @@ fn audit_uv_lock(
         Ok(raw) => raw,
         Err(why) => {
             say(&format!(
-                "could not read export.txt ({}) — the audit did NOT run",
+                "could not read export.txt ({}) — the audit did NOT run\n  {TMPDIR_NEXT}",
                 why.kind()
             ));
             return LockDirAudit::unchecked();
@@ -1715,7 +1791,8 @@ fn audit_uv_lock(
         Ok(lock) => lock,
         Err(why) => {
             say(&format!(
-                "could not read uv.lock ({}) — the audit did NOT run",
+                "could not read uv.lock ({}) — the audit did NOT run\n  \
+                 Next: check that {lock_path} is readable, then push again",
                 why.kind()
             ));
             return LockDirAudit::unchecked();
@@ -1735,12 +1812,16 @@ fn audit_uv_lock(
             ""
         };
         say(&format!(
-            "{} could not be classified{source}; not audited",
+            "{} could not be classified{source}; not audited\n  \
+             Next: check that each [[package]] in {lock_path} has a name and source",
             plural(unclassified, "package")
         ));
     }
     if pins.batches.is_empty() {
-        say("no PyPI package to audit — the audit did NOT run");
+        say(&format!(
+            "no PyPI package to audit — the audit did NOT run\n  \
+             Next: none if every package is private; else check {lock_path} sources"
+        ));
         return LockDirAudit::unchecked();
     }
     let mut audit = LockDirAudit {
@@ -1755,13 +1836,15 @@ fn audit_uv_lock(
         let file = private.path().join(format!("batch-{index}.txt"));
         let body: String = batch.iter().map(|(n, v)| format!("{n}=={v}\n")).collect();
         if budget.spent() {
-            say("out of time; unaudited versions remain — NOT fully checked");
+            say(&format!(
+                "out of time; unaudited versions remain — NOT fully checked\n  {TIMEOUT_NEXT}"
+            ));
             audit.complete = false;
             break;
         }
         if let Err(why) = std::fs::write(&file, body) {
             say(&format!(
-                "could not write a batch file ({}); unaudited versions remain — NOT fully checked",
+                "could not write a batch file ({}); unaudited versions remain — NOT fully checked\n  {TMPDIR_NEXT}",
                 why.kind()
             ));
             audit.complete = false;
@@ -1779,7 +1862,13 @@ fn audit_uv_lock(
             break;
         };
         let out = scrub(&out);
-        let (report, waivable) = shipped_only(read_pip_audit(exit_ok, &out), &out, production);
+        let report = read_pip_audit(exit_ok, &out);
+        let names = if has_rows_to_split(&report, &out) {
+            production.names(settings, budget, &say)
+        } else {
+            None
+        };
+        let (report, waivable) = shipped_only(report, &out, names);
         audit.waivable &= waivable;
         match report {
             Report::Vulnerabilities(found) => {
@@ -1796,8 +1885,9 @@ fn audit_uv_lock(
                 audit.complete = false;
                 let why = failure_line(&out).unwrap_or_else(|| "(no output)".to_string());
                 say(&format!(
-                    "pip-audit could not answer — NOT fully checked\n  {}\n  Next: check the network, then push again",
-                    clip(&why, WARNING_COLUMNS - 2)
+                    "pip-audit could not answer — NOT fully checked\n  {}\n  {}",
+                    clip(&why, WARNING_COLUMNS - 2),
+                    pip_audit_next(&why)
                 ));
             }
         }
@@ -1825,7 +1915,7 @@ fn python_lock_run(ctx: &crate::registry::Ctx) -> Ran {
     let (settings, refs) = (ctx.settings, ctx.push.get());
     let release = releasing(refs);
     let budget = Budget::new(settings);
-    let root = common::repo_root();
+    let root = std::path::PathBuf::from(common::repo_root());
     let dirs = lockfile_dirs("uv.lock");
     let only_root = dirs.len() == 1 && dirs[0].is_empty();
     let (mut vulnerabilities, mut advisories) = (Vec::new(), Vec::new());
@@ -1833,11 +1923,11 @@ fn python_lock_run(ctx: &crate::registry::Ctx) -> Ran {
     let (mut complete, mut waivable) = (true, true);
     for dir in &dirs {
         let production = if release {
-            uv_production_names(settings, &std::path::Path::new(&root).join(dir))
+            Production::Unasked(root.join(dir))
         } else {
-            None
+            Production::Never
         };
-        let audit = audit_uv_lock(settings, production.as_ref(), dir, &budget);
+        let audit = audit_uv_lock(settings, production, dir, &budget);
         let label = |ids: Vec<String>| -> Vec<String> {
             if dir.is_empty() {
                 ids
@@ -2948,7 +3038,7 @@ requests @ https://example.com/r.whl
     #[test]
     fn scrub_names_the_canonical_private_path_too() {
         let plain = std::path::Path::new("/var/folders/a/audit-1");
-        let canonical = Some(std::path::PathBuf::from("/private/var/folders/a/audit-1"));
+        let canonical = Some(std::path::Path::new("/private/var/folders/a/audit-1"));
         assert_eq!(
             scrub_private(
                 "x /private/var/folders/a/audit-1/b and /var/folders/a/audit-1/c",
@@ -2957,6 +3047,78 @@ requests @ https://example.com/r.whl
             ),
             "x <tmp>/b and <tmp>/c"
         );
+    }
+
+    #[test]
+    fn production_names_are_never_asked_off_a_release_or_out_of_time() {
+        let settings = crate::config::Settings::default();
+        let spent = Budget {
+            started: std::time::Instant::now(),
+            limit: Some(std::time::Duration::ZERO),
+        };
+        let said = std::cell::RefCell::new(Vec::<String>::new());
+        let say = |m: &str| said.borrow_mut().push(m.to_string());
+        let dir = std::env::temp_dir();
+
+        let mut off = Production::Never;
+        assert!(off.names(&settings, &spent, &say).is_none());
+        assert!(matches!(off, Production::Never), "no release never asks");
+        assert!(said.borrow().is_empty());
+
+        let mut late = Production::Unasked(dir.clone());
+        assert!(late.names(&settings, &spent, &say).is_none());
+        assert!(late.names(&settings, &spent, &say).is_none());
+        assert!(
+            matches!(late, Production::Asked(None)),
+            "spent is remembered as unknown"
+        );
+
+        // In time it asks, once: this checkout tracks no uv.lock, so the
+        // answer is unknown and stays the answer.
+        let fresh = Budget {
+            started: std::time::Instant::now(),
+            limit: None,
+        };
+        let mut asked = Production::Unasked(dir);
+        assert!(asked.names(&settings, &fresh, &say).is_none());
+        assert!(matches!(asked, Production::Asked(None)));
+        let said = said.borrow();
+        assert_eq!(said.len(), 1, "warned once: {said:?}");
+        assert!(said[0].contains("every finding counts"), "{said:?}");
+        assert!(said[0].contains("greengate.timeout"), "{said:?}");
+    }
+
+    #[test]
+    fn a_pip_audit_failure_names_the_network_only_when_its_reason_does() {
+        for why in [
+            "ConnectionError: Max retries exceeded",
+            "error: request timed out",
+            "SSL: CERTIFICATE_VERIFY_FAILED",
+            "Temporary failure in name resolution",
+        ] {
+            assert!(pip_audit_next(why).contains("the network"), "{why}");
+        }
+        for why in [
+            "(no output)",
+            "ModuleNotFoundError: No module named 'pip_audit'",
+        ] {
+            assert!(pip_audit_next(why).contains("pip-audit --version"), "{why}");
+        }
+    }
+
+    #[test]
+    fn only_readable_vulnerability_rows_need_the_split() {
+        let rows = "Name Version ID Fix Versions\ncertifi 1.0.0 PYSEC-2024-1 1.0.1\n";
+        assert!(has_rows_to_split(
+            &Report::Vulnerabilities(vec!["certifi".into()]),
+            rows
+        ));
+        assert!(!has_rows_to_split(
+            &Report::Vulnerabilities(vec!["x".into()]),
+            "Found 1\n"
+        ));
+        assert!(!has_rows_to_split(&Report::Clean, rows));
+        assert!(!has_rows_to_split(&Report::CouldNotCheck, rows));
     }
 
     #[test]
