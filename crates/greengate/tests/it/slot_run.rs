@@ -232,11 +232,13 @@ fn a_detached_daemon_does_not_keep_the_slot() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
 
-const WIDTH_KEYS: [&str; 4] = [
+const WIDTH_KEYS: [&str; 6] = [
     "MAKEFLAGS",
     "CARGO_BUILD_JOBS",
     "RUST_TEST_THREADS",
     "NEXTEST_TEST_THREADS",
+    "VITEST_MAX_WORKERS",
+    "GOMAXPROCS",
 ];
 
 /// `amont slot run -- env` with `cap` slots, the width keys cleared first
@@ -268,7 +270,7 @@ fn cores() -> u32 {
     8
 }
 
-/// A held command runs `weight × cores / cap` wide, through all four keys,
+/// A held command runs `weight × cores / cap` wide, through every key,
 /// and `amont slots` shows the width beside the holder.
 #[test]
 fn a_held_command_is_bounded_to_its_share_of_the_cores() {
@@ -288,6 +290,16 @@ fn a_held_command_is_bounded_to_its_share_of_the_cores() {
         );
         assert_eq!(
             var(&env, "NEXTEST_TEST_THREADS"),
+            Some(jobs.to_string().as_str()),
+            "{env}"
+        );
+        assert_eq!(
+            var(&env, "VITEST_MAX_WORKERS"),
+            Some(jobs.to_string().as_str()),
+            "{env}"
+        );
+        assert_eq!(
+            var(&env, "GOMAXPROCS"),
             Some(jobs.to_string().as_str()),
             "{env}"
         );

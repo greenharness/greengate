@@ -165,10 +165,18 @@ one runs. Left alone, `cargo` builds and its test harness runs on every
 core, so `cap` holders ran `cap × cores` jobs at once. A holder of `weight`
 slots therefore runs `jobs = max(1, weight × cores / cap)` wide, with `cores`
 as [Cores](#cores) counts them. greengate sets
-`MAKEFLAGS=-j{jobs}`, `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS` and
-`NEXTEST_TEST_THREADS` on every heavy hook check and every `greengate slot run`
-command (`amont_slots::bound_width`). relais uses the same formula for its
+`MAKEFLAGS=-j{jobs}`, `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`,
+`NEXTEST_TEST_THREADS`, `VITEST_MAX_WORKERS` and `GOMAXPROCS` on every heavy
+hook check and every `greengate slot run` command
+(`amont_slots::bound_width`). relais uses the same formula for its
 verification commands.
+
+vitest reads `VITEST_MAX_WORKERS` after its config, so the slot's width
+outranks a project's `maxWorkers` and also its `fileParallelism: false`. A
+suite that must run its files one at a time sets `VITEST_MAX_WORKERS=1` in its
+own `test` script, which greengate keeps (see Precedence). `go build` and
+`go test` default `-p` to `GOMAXPROCS`, and each test binary inherits it, so it
+caps `-parallel` as well.
 
 - **Precedence:** the check's own environment first, then the parent's
   environment, then greengate's computed width. A key already set to a

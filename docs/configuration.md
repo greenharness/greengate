@@ -898,7 +898,8 @@ empty host always gets one. A number fixes the count, with no load test.
 
 Each holder is also bounded in width: a heavy check or `greengate slot run`
 command runs `max(1, weight × cores / cap)` jobs, through `MAKEFLAGS`,
-`CARGO_BUILD_JOBS`, `RUST_TEST_THREADS` and `NEXTEST_TEST_THREADS`. The
+`CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`,
+`VITEST_MAX_WORKERS` and `GOMAXPROCS`. The
 check's own environment wins, then the parent's, then greengate's computed
 width. See [docs/host-slots.md](host-slots.md#width).
 

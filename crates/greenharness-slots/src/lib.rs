@@ -173,12 +173,20 @@ impl Machine {
 
 /// The variables that bound how wide a heavy job runs. A holder that ran at
 /// the tool's default width — `cargo` and its test harness use every core —
-/// made `cap` holders run `cap × cores` jobs at once.
-pub const WIDTH_KEYS: [&str; 4] = [
+/// made `cap` holders run `cap × cores` jobs at once. vitest 4 starts
+/// `availableParallelism() - 1` workers unless `VITEST_MAX_WORKERS` says
+/// otherwise; the variable outranks the project's `maxWorkers` and its
+/// `fileParallelism: false`, so a suite that must run its files one at a time
+/// sets `VITEST_MAX_WORKERS=1` itself (a set key is kept, see [`width_env`]).
+/// `GOMAXPROCS` bounds Go: `go build` and `go test` default `-p` to it, and
+/// each test binary inherits it, which caps `-parallel` too.
+pub const WIDTH_KEYS: [&str; 6] = [
     "MAKEFLAGS",
     "CARGO_BUILD_JOBS",
     "RUST_TEST_THREADS",
     "NEXTEST_TEST_THREADS",
+    "VITEST_MAX_WORKERS",
+    "GOMAXPROCS",
 ];
 
 /// How many jobs a holder of `weight` slots may start:
@@ -1729,9 +1737,9 @@ mod tests {
         }
     }
 
-    /// Nothing set: all four keys at the width.
+    /// Nothing set: every key at the width.
     #[test]
-    fn an_unset_environment_gets_all_four_keys() {
+    fn an_unset_environment_gets_every_key() {
         let set = width_env(2, env_of(&[]));
         assert_eq!(
             set,
@@ -1740,6 +1748,8 @@ mod tests {
                 ("CARGO_BUILD_JOBS", "2".to_string()),
                 ("RUST_TEST_THREADS", "2".to_string()),
                 ("NEXTEST_TEST_THREADS", "2".to_string()),
+                ("VITEST_MAX_WORKERS", "2".to_string()),
+                ("GOMAXPROCS", "2".to_string()),
             ]
         );
     }
