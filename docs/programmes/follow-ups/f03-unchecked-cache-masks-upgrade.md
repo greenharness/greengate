@@ -41,3 +41,11 @@ out. An older greengate reading a new record ignores the extra field.
   replay line is printed. With the version check disabled it fails (the
   record replays, 1 run). Control: a same-version unchecked record replays;
   a clean record with no version still replays.
+
+## Implementation review
+
+- Round 1: approve (43k tokens, 37 s). Its by-hand note, doc comments
+  naming "4.13" before that release is decided, was fixed.
+- Delta: approve-with-changes (25k tokens, 18 s). Fixed: one more
+  release-pinned test comment, and `r` renamed to `repo` in the two header
+  helpers. Delta 2: approve (26k tokens, 6 s).
