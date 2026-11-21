@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v4.12.0
+
 ### Added
 
 - `pre-push-audit-python` audits a uv project that has no
