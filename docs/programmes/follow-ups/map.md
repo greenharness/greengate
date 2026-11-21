@@ -1,0 +1,20 @@
+# Follow-ups
+
+## Destination
+
+Work noticed while doing something else in greengate is a ticket here, and each one is closed, or knowingly dropped, by a merged change.
+
+## Notes
+
+- Lines filed from the repository inbox at a session boundary (worktree-task Handoff).
+- One pull request per ticket, unless two tickets touch the same function.
+
+## Decisions so far
+
+## Handoff
+
+2026-11-21, boundary: greengate 4.12.0 released (PR #498, release #499), with `pre-push-audit-python` reading `uv.lock` when there is no virtualenv. It is installed on this machine and verified on a fresh sre-agent clone: 1 private package skipped, 10 known findings. sre-agent's own findings are its ticket t32, due 2026-11-27. The four tickets below came from that work. Next, in order: f03 (the cache masks an upgrade, the one users hit), then f02 (ADR-0055 on the venv route, due 2026-12-05), then f01, then f04.
+
+## Not yet specified
+
+## Out of scope
