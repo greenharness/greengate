@@ -1,7 +1,7 @@
 +++
 type = "task"
 mode = "afk"
-status = "open"
+status = "closed"
 blocked_by = []
 repos = ["amont"]
 +++
@@ -23,3 +23,13 @@ Implementation review of greengate PR #498 left these, all deliberate there:
 ## Answer looks like
 
 The production names are computed lazily, only when a batch has findings and the budget is not spent. Each warning's Next line says what to run. The canonical path is computed once. Tests in `crates/greengate/tests/it/audit.rs` still pass.
+
+## Resolution
+
+On a release, each lock directory asks `uv export --no-dev` at most once, and
+only when a batch has vulnerability rows to split and the budget is not spent.
+Out of time, every finding counts and one warning says so. The venv route asks
+only when it has findings too. pip-audit's Next line names the network only
+when its reason does, else `pip-audit --version`. The budget-spent warnings
+name `greengate.timeout`, and the scratch-file failures name `$TMPDIR`. The
+private directory is canonicalised once per lock directory.
