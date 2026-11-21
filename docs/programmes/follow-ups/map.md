@@ -14,6 +14,7 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 - [f01 lock-route polish](f01-lock-route-polish.md): the production export is asked lazily, once per lock directory and only on findings; every lock-route warning names its Next step. greengate#501, unreleased.
 - [f03 unchecked cache masks an upgrade](f03-unchecked-cache-masks-upgrade.md): an `unchecked` record carries the version that wrote it and answers only to that version; clean and findings records still answer across versions. Unreleased.
 - [f04 lock-route names](f04-lock-route-names.md): the registry parameter stays `ctx` in all 15 checks (one name for one type); the test scratch directories are `scratch_dir`.
+- [f05 rehearsal uses the live venv](f05-rehearsal-uses-live-venv.md): a push snapshot puts its own copies of the borrowed venv's editable `.pth` directories first on `PYTHONPATH`. Unreleased.
 
 ## Handoff
 
@@ -24,6 +25,8 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 2026-11-21: f03 closed (unchecked records carry their writer's version; unreleased, ships with f01 in the next release). Next, in order: f02 (ADR-0055 on the venv route, due 2026-12-05), f04, then f05.
 
 2026-11-21: f04 closed on the relay's prompt (`ctx` kept, test `tmp` renamed `scratch_dir`; test-only, nothing to release). Next, in order: f02 (ADR-0055 on the venv route, due 2026-12-05), then f05. f01 and f03 still ship with the next release.
+
+2026-11-21: f05 closed on the relay's prompt (a push snapshot puts its own copies of the borrowed venv's editable `.pth` directories first on `PYTHONPATH`; unreleased, ships with f01 and f03 in the next release). Filed f06 (`uv run` in a `testPushedTree` snapshot runs a `PATH` pytest). Next, in order: f02 (ADR-0055 on the venv route, due 2026-12-05), then f06.
 
 ## Not yet specified
 
