@@ -202,6 +202,33 @@ a due date.
   packages not from PyPI were not audited" (platform-kernel), and not print
   "did NOT run".
 
+### Results (2026-11-21, commit 1ed919f5)
+
+Input → expected → actual:
+- Full suite, via relais run run-660c6948e4bff-6501 → the default profile
+  passes → `cargo-fmt`, `clippy`, `cargo-test`, `check-no-deps.sh` and
+  `attest-inputs` all exited 0, and the pre-commit gate passed 29 checks.
+- Lock with only private packages → "did NOT run", no block →
+  `an_all_private_lock_did_not_run_and_never_blocks` passes.
+- Mirror lock → known gap, "did NOT run", no block → the same test. A mirror
+  URL is not `pypi.org/simple`, so it is skipped like a private one.
+- Lock route, vulnerable tag, dev-only tag, export failure and nested lock →
+  `a_uv_lock_without_a_venv_is_audited_and_a_vulnerable_one_refuses_a_tag`,
+  `a_dev_only_finding_in_the_lock_passes_a_tag`,
+  `a_failed_export_warns_and_does_not_block` and
+  `a_nested_uv_lock_is_audited_from_its_own_directory` all pass.
+- Unit tests → the lock scan, marker batching, the skipped line and the 0700
+  private directory → all four pass.
+- Live, piloted → the branch build, not the release, on a fresh sre-agent
+  worktree with no `.venv`, through `greengate run pre-push-audit-python`:
+  - It printed "1 private/non-PyPI package skipped (platform-kernel)" and
+    "Found 10 known vulnerabilities in 5 packages — this will BLOCK a v* tag
+    push". `--all-groups` found the same 10 as the hand run.
+  - No "did NOT run". Exit 0 on a branch.
+  - No `greengate-audit-python` directory was left under `$TMPDIR`.
+  - The "audited uv.lock" line did not show, because quiet mode was on when
+    the output was not a terminal. That is the plan's quiet rule.
+
 ## Measure
 
 - 7 days after install: count audit-python "did NOT run" warnings in uv repos
