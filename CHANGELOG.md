@@ -8,6 +8,16 @@ missing here.
 
 ## Unreleased
 
+### Added
+
+- `pre-push-audit-python` audits a uv project that has no
+  `requirements.txt` and no virtualenv from its `uv.lock`. It exports the lock
+  (all packages, groups and extras), sends pip-audit only packages locked from
+  PyPI, and runs pip-audit with `--no-deps --disable-pip` so nothing is
+  resolved or installed. Private and non-PyPI packages are counted, not sent. An export that fails,
+  or a lock with nothing public to audit, says "did NOT run" and is never
+  reported as clean.
+
 ### Fixed
 
 - `pre-commit-lint-json-yaml` reads `tsconfig*.json`, `jsconfig*.json`,

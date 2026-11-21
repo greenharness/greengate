@@ -914,7 +914,7 @@ fn ids_with_specs(out: &str) -> Vec<(String, Option<String>)> {
 fn warn_dev_only(tool: &str, dev_only: &[String]) {
     if !dev_only.is_empty() {
         common::warn(&format!(
-            "{tool}: only in development dependencies, which the release does not ship — not blocking: {}",
+            "{tool}: dev-only, only in development dependencies, which the release does not ship — not blocking: {}",
             dev_only.join("; ")
         ));
     }
@@ -1244,45 +1244,76 @@ fn python_run(ctx: &crate::registry::Ctx) -> Ran {
             waivable,
         });
     }
-    let argv = if let Some(site_packages) = venv_site_packages(&root, ctx.source_worktree) {
-        // A uv/PEP-621 project has no requirements.txt, and EXPORTING one
-        // does not work either: `uv export` emits the workspace's own
-        // members and any private-index dependency, and pip-audit resolves
-        // a requirements file in a throwaway venv that can reach neither —
-        // it dies on "No matching distribution found". Auditing the
-        // INSTALLED tree resolves nothing, and is the truer question
-        // anyway: these are the versions actually imported.
-        vec![
-            common::program("pip-audit"),
-            "--path".into(),
-            site_packages,
-            // Workspace members are installed editable and are not on
-            // PyPI; without this each one is a line of noise.
-            "--skip-editable".into(),
-        ]
-    } else {
-        common::warn(
-            "audit-python: no requirements.txt, and no virtualenv to audit \
-             (looked at $VIRTUAL_ENV and .venv) — the audit did NOT run",
-        );
-        return Ran::Unavailable;
-    };
+    let (argv, installed_or_locked) =
+        if let Some(site_packages) = venv_site_packages(&root, ctx.source_worktree) {
+            // A uv/PEP-621 project has no requirements.txt, and EXPORTING one
+            // does not work either: `uv export` emits the workspace's own
+            // members and any private-index dependency, and pip-audit resolves
+            // a requirements file in a throwaway venv that can reach neither —
+            // it dies on "No matching distribution found". Auditing the
+            // INSTALLED tree resolves nothing, and is the truer question
+            // anyway: these are the versions actually imported.
+            (
+                vec![
+                    common::program("pip-audit"),
+                    "--path".into(),
+                    site_packages,
+                    // Workspace members are installed editable and are not on
+                    // PyPI; without this each one is a line of noise.
+                    "--skip-editable".into(),
+                ],
+                true,
+            )
+        } else if has_lockfile("uv.lock") && common::which("uv").is_some() {
+            // No virtualenv: the lock says what would be installed.
+            return python_lock_run(ctx);
+        } else {
+            common::warn(
+                "audit-python: the audit did NOT run — found no requirements.txt,\n  \
+             no virtualenv ($VIRTUAL_ENV, .venv), and no uv.lock with uv on PATH.\n  \
+             Next: `uv sync`, or install uv so uv.lock can be audited.",
+            );
+            return Ran::Unavailable;
+        };
     let Some((exit_ok, out)) = audited(settings, &argv) else {
         return Ran::Unavailable;
     };
     let release = releasing(refs);
-    let mut report = read_pip_audit(exit_ok, &out);
     // A requirements.txt is the production list by convention (dev pins
-    // live beside it, in requirements-dev.txt). A virtualenv holds the dev
-    // groups too, so on a release its findings are checked against what
-    // `uv export --no-dev` says ships.
-    let venv_mode = argv.iter().any(|a| a == "--path");
-    // A row whose advisory id is not one a waiver can name (MAL-, a new
-    // scheme) makes the whole report unwaivable, in every mode.
-    let mut waivable = pip_rows_all_named(&out);
-    if release && venv_mode && matches!(report, Report::Vulnerabilities(_)) {
-        let rows = pip_vulnerable_rows(&out);
-        if let (false, Some(prod)) = (rows.is_empty(), uv_production_names(settings)) {
+    // live beside it, in requirements-dev.txt). A virtualenv or a lock holds
+    // the dev groups too, so on a release its findings are checked against
+    // what `uv export --no-dev` says ships.
+    let (report, waivable) = shipped_only(
+        settings,
+        std::path::Path::new(&root),
+        release && installed_or_locked,
+        read_pip_audit(exit_ok, &out),
+        &out,
+    );
+    Ran::Concluded(Concluded {
+        tool: "audit-python".to_string(),
+        report,
+        full: out,
+        waivable,
+    })
+}
+
+/// On a release, split pip-audit's findings into what ships and what only
+/// the dev groups carry; the latter warn and do not block. `(report,
+/// waivable)`: a row whose advisory id is not one a waiver can name (MAL-, a
+/// new scheme) makes the whole report unwaivable. When the production names
+/// are unknown every finding is kept: an unknown is not a pass.
+fn shipped_only(
+    settings: &crate::config::Settings,
+    dir: &std::path::Path,
+    split: bool,
+    mut report: Report,
+    out: &str,
+) -> (Report, bool) {
+    let mut waivable = pip_rows_all_named(out);
+    if split && matches!(report, Report::Vulnerabilities(_)) {
+        let rows = pip_vulnerable_rows(out);
+        if let (false, Some(prod)) = (rows.is_empty(), uv_production_names(settings, dir)) {
             let (shipped, dev_only): (Vec<String>, Vec<String>) = rows
                 .into_iter()
                 .map(|(name, id)| (prod.contains(&name), format!("{name} {id}")))
@@ -1303,11 +1334,480 @@ fn python_run(ctx: &crate::registry::Ctx) -> Ran {
             };
         }
     }
+    (report, waivable)
+}
+
+/// The only registry whose packages are looked up: ADR-0055 sends public
+/// names to OSV and pip-audit asks PyPI, and nothing else may be sent.
+const PYPI_REGISTRY: &str = "https://pypi.org/simple";
+
+/// Columns a warning line may use.
+const WARNING_COLUMNS: usize = 80;
+
+/// How many names a count in a warning spells out.
+const NAMES_SHOWN: usize = 3;
+
+/// A directory only this process can enter, removed on every return and
+/// panic. A signal leaves it behind, as `capture.rs` notes for its own.
+struct PrivateDir {
+    path: std::path::PathBuf,
+}
+
+impl PrivateDir {
+    /// A fresh directory under the temp dir, mode 0700, named unpredictably.
+    fn create() -> std::io::Result<PrivateDir> {
+        Self::create_at(std::env::temp_dir().join(common::unique_name("greengate-audit-python")))
+    }
+
+    /// `path` itself, created exclusively and not recursively: it fails when
+    /// anything is already there, so nothing planted is ever written through.
+    fn create_at(path: std::path::PathBuf) -> std::io::Result<PrivateDir> {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&path)?;
+        Ok(PrivateDir { path })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for PrivateDir {
+    fn drop(&mut self) {
+        // Best effort: a leftover temp directory holds no secret, and a
+        // failure here must not turn a finished audit into a panic.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// One time budget for the whole lock route, however many directories and
+/// batches it audits.
+struct Budget {
+    started: std::time::Instant,
+    secs: u64,
+}
+
+impl Budget {
+    fn new(settings: &crate::config::Settings) -> Budget {
+        Budget {
+            started: std::time::Instant::now(),
+            secs: common::check_timeout(settings),
+        }
+    }
+
+    /// `greengate.timeout 0` disables the ceiling.
+    fn spent(&self) -> bool {
+        self.secs > 0 && self.started.elapsed().as_secs() >= self.secs
+    }
+}
+
+/// Which `uv.lock` packages come from PyPI, by PEP 503 name.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LockSources {
+    /// Every `[[package]]` block of the name has the PyPI registry.
+    pypi: std::collections::BTreeSet<String>,
+    /// Blocks with no name: counted, never classified.
+    nameless: usize,
+}
+
+/// `source = { registry = "<url>" }` naming PyPI, trailing slash or not.
+fn is_pypi_source(value: &str) -> bool {
+    value
+        .split_once("registry = \"")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .is_some_and(|url| url.trim_end_matches('/') == PYPI_REGISTRY)
+}
+
+/// A std-only line scan of `uv.lock`'s `[[package]]` blocks (no TOML crate:
+/// `scripts/check-no-deps.sh`). Only top-level `name` and `source` keys of a
+/// block count; a name qualifies only when all its blocks come from PyPI.
+fn scan_uv_lock(text: &str) -> LockSources {
+    struct Block {
+        name: Option<String>,
+        pypi: bool,
+    }
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut top_level = false;
+    for line in text.lines() {
+        if line.starts_with('[') {
+            top_level = line.trim() == "[[package]]";
+            if top_level {
+                blocks.push(Block {
+                    name: None,
+                    pypi: false,
+                });
+            }
+            continue;
+        }
+        let (true, Some(block)) = (top_level, blocks.last_mut()) else {
+            continue;
+        };
+        if let Some(value) = line.strip_prefix("name = ") {
+            if block.name.is_none() {
+                block.name = value.split('"').nth(1).map(normalise);
+            }
+        } else if let Some(value) = line.strip_prefix("source = ") {
+            block.pypi = is_pypi_source(value);
+        }
+    }
+    let mut sources = LockSources::default();
+    let mut rejected = std::collections::BTreeSet::new();
+    for block in blocks {
+        match block.name.filter(|n| !n.is_empty()) {
+            None => sources.nameless += 1,
+            Some(name) if block.pypi => {
+                sources.pypi.insert(name);
+            }
+            Some(name) => {
+                rejected.insert(name);
+            }
+        }
+    }
+    sources.pypi.retain(|name| !rejected.contains(name));
+    sources
+}
+
+/// What of an export may be sent to pip-audit.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ExportPins {
+    /// Audit inputs: `name -> version`, one version per name in each batch,
+    /// because pip-audit rejects conflicting pins in one requirements input.
+    batches: Vec<std::collections::BTreeMap<String, String>>,
+    /// Distinct (name, version) pairs across the batches.
+    versions: usize,
+    /// Exported names that are not PyPI's: never sent.
+    skipped: std::collections::BTreeSet<String>,
+    /// PyPI names whose line is not an exact `name==version` pin.
+    unclassified: std::collections::BTreeSet<String>,
+}
+
+/// `name==version` of one export line with its environment marker stripped,
+/// so every platform and Python-version variant is audited whatever the host.
+fn exact_pin(line: &str) -> Option<(String, String)> {
+    let spec = line.split(';').next()?.trim();
+    let (name, version) = spec.split_once("==")?;
+    let name = name.split('[').next()?.trim();
+    let version = version.trim();
+    let name_ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    let version_ok = !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.+!".contains(c));
+    (name_ok && version_ok).then(|| (normalise(name), version.to_string()))
+}
+
+fn filter_export(raw: &str, pypi: &std::collections::BTreeSet<String>) -> ExportPins {
+    let mut pins = ExportPins::default();
+    let mut pairs = std::collections::BTreeSet::new();
+    for line in raw.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
+            continue;
+        }
+        let name = normalise(
+            line.split(|c: char| "=<>!~;[ @".contains(c))
+                .next()
+                .unwrap_or_default(),
+        );
+        if name.is_empty() {
+            continue;
+        }
+        if !pypi.contains(&name) {
+            pins.skipped.insert(name);
+            continue;
+        }
+        match exact_pin(line) {
+            Some(pair) => {
+                pairs.insert(pair);
+            }
+            None => {
+                pins.unclassified.insert(name);
+            }
+        }
+    }
+    pins.versions = pairs.len();
+    for (name, version) in pairs {
+        let slot = pins
+            .batches
+            .iter()
+            .position(|batch| !batch.contains_key(&name));
+        match slot {
+            Some(index) => pins.batches[index].insert(name, version),
+            None => {
+                pins.batches
+                    .push(std::collections::BTreeMap::from([(name, version)]));
+                None
+            }
+        };
+    }
+    pins
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// "N private/non-PyPI package(s) skipped (a, b, c +K more)", with as many
+/// names as keep the line within the columns.
+fn skipped_line(prefix: &str, names: &[&String]) -> String {
+    let head = format!(
+        "audit-python: {prefix}{} skipped",
+        plural(names.len(), "private/non-PyPI package")
+    );
+    for shown in (0..=NAMES_SHOWN.min(names.len())).rev() {
+        let list: Vec<&str> = names.iter().take(shown).map(|n| n.as_str()).collect();
+        let more = names.len() - shown;
+        let detail = match (list.is_empty(), more) {
+            (true, 0) => String::new(),
+            (true, _) => format!(" (+{more} more)"),
+            (false, 0) => format!(" ({})", list.join(", ")),
+            (false, _) => format!(" ({} +{more} more)", list.join(", ")),
+        };
+        let line = format!("{head}{detail}");
+        if line.chars().count() <= WARNING_COLUMNS || shown == 0 {
+            return line;
+        }
+    }
+    head
+}
+
+/// What auditing one `uv.lock` found.
+struct LockDirAudit {
+    vulnerabilities: Vec<String>,
+    advisories: Vec<String>,
+    full: String,
+    /// False when any part of the lock went unchecked (export or batch
+    /// failed, time ran out): never Clean, never waivable.
+    complete: bool,
+    waivable: bool,
+}
+
+impl LockDirAudit {
+    fn unchecked() -> LockDirAudit {
+        LockDirAudit {
+            vulnerabilities: Vec::new(),
+            advisories: Vec::new(),
+            full: String::new(),
+            complete: false,
+            waivable: false,
+        }
+    }
+}
+
+/// `uv export` of the lock in `dir`, filtered to PyPI pins, audited by
+/// pip-audit without resolving anything (`--no-deps --disable-pip`).
+fn audit_uv_lock(
+    settings: &crate::config::Settings,
+    release: bool,
+    dir: &str,
+    budget: &Budget,
+) -> LockDirAudit {
+    let installed_or_locked = true;
+    let root = std::path::PathBuf::from(common::repo_root());
+    let dir_path = root.join(dir);
+    let lock_path = if dir.is_empty() {
+        "uv.lock".to_string()
+    } else {
+        format!("{dir}/uv.lock")
+    };
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{lock_path}: ")
+    };
+    let say = |message: &str| common::warn(&format!("audit-python: {prefix}{message}"));
+    let private = match PrivateDir::create() {
+        Ok(private) => private,
+        Err(why) => {
+            say(&format!(
+                "no private directory ({}) — did NOT run",
+                why.kind()
+            ));
+            return LockDirAudit::unchecked();
+        }
+    };
+    // Whatever a tool prints, the temp path stays out of it.
+    let scrub = |text: &str| text.replace(&private.path().to_string_lossy().into_owned(), "<tmp>");
+    let export = private.path().join("export.txt");
+    if budget.spent() {
+        say("out of time before the export — the audit did NOT run");
+        return LockDirAudit::unchecked();
+    }
+    let argv = vec![
+        common::program("uv"),
+        "export".into(),
+        "--frozen".into(),
+        "--all-packages".into(),
+        "--all-groups".into(),
+        "--all-extras".into(),
+        "--no-hashes".into(),
+        "--no-emit-workspace".into(),
+        "--format".into(),
+        "requirements-txt".into(),
+        "-o".into(),
+        export.to_string_lossy().into_owned(),
+    ];
+    let exported = audited_in(settings, &argv, &dir_path);
+    if !matches!(exported, Some((true, _))) {
+        let why = exported
+            .and_then(|(_, out)| failure_line(&scrub(&out)))
+            .map(|line| line.chars().take(60).collect::<String>())
+            .unwrap_or_else(|| "uv did not answer".to_string());
+        say(&format!(
+            "uv export failed ({why}) — did NOT run; re-run `uv export --frozen` to see why"
+        ));
+        return LockDirAudit::unchecked();
+    }
+    let raw = std::fs::read_to_string(&export);
+    // The raw export has served; only the filtered pins stay on disk.
+    let _ = std::fs::remove_file(&export); // best effort: the guard removes the directory
+    let lock = std::fs::read_to_string(dir_path.join("uv.lock"));
+    let (Ok(raw), Ok(lock)) = (raw, lock) else {
+        say("could not read the export or uv.lock — the audit did NOT run");
+        return LockDirAudit::unchecked();
+    };
+    let sources = scan_uv_lock(&lock);
+    let pins = filter_export(&raw, &sources.pypi);
+    if !pins.skipped.is_empty() {
+        let names: Vec<&String> = pins.skipped.iter().collect();
+        common::warn(&skipped_line(&prefix, &names));
+    }
+    let unclassified = pins.unclassified.len() + sources.nameless;
+    if unclassified > 0 {
+        say(&format!(
+            "{} could not be classified from uv.lock; not audited",
+            plural(unclassified, "package")
+        ));
+    }
+    if pins.batches.is_empty() {
+        say("no PyPI package to audit — the audit did NOT run");
+        return LockDirAudit::unchecked();
+    }
+    let mut audit = LockDirAudit {
+        vulnerabilities: Vec::new(),
+        advisories: Vec::new(),
+        full: String::new(),
+        complete: true,
+        waivable: true,
+    };
+    let mut audited = 0;
+    for (index, batch) in pins.batches.iter().enumerate() {
+        let file = private.path().join(format!("batch-{index}.txt"));
+        let body: String = batch.iter().map(|(n, v)| format!("{n}=={v}\n")).collect();
+        if budget.spent() || std::fs::write(&file, body).is_err() {
+            say("out of time or space; unaudited versions remain — NOT fully checked");
+            audit.complete = false;
+            break;
+        }
+        let argv = vec![
+            common::program("pip-audit"),
+            "-r".into(),
+            file.to_string_lossy().into_owned(),
+            "--no-deps".into(),
+            "--disable-pip".into(),
+        ];
+        let Some((exit_ok, out)) = audited_in(settings, &argv, &dir_path) else {
+            audit.complete = false;
+            break;
+        };
+        let out = scrub(&out);
+        let (report, waivable) = shipped_only(
+            settings,
+            &dir_path,
+            release && installed_or_locked,
+            read_pip_audit(exit_ok, &out),
+            &out,
+        );
+        audit.waivable &= waivable;
+        match report {
+            Report::Vulnerabilities(found) => {
+                audit.vulnerabilities.extend(found);
+                audit.full.push_str(&out);
+                audited += batch.len();
+            }
+            Report::Advisories(found) => {
+                audit.advisories.extend(found);
+                audited += batch.len();
+            }
+            Report::Clean => audited += batch.len(),
+            Report::CouldNotCheck => {
+                audit.complete = false;
+                if let Some(why) = failure_line(&out) {
+                    say(&format!("pip-audit could not answer ({why})"));
+                }
+            }
+        }
+    }
+    if !audit.complete {
+        audit.waivable = false;
+    }
+    if audited > 0 {
+        common::ok(
+            settings,
+            &format!(
+                "audit-python: audited {lock_path} ({audited} package versions, {} skipped)",
+                pins.skipped.len()
+            ),
+        );
+    }
+    audit
+}
+
+/// The lock route: each tracked `uv.lock` audited from its own directory.
+/// The result is the worst directory's: findings block as ever, and a
+/// directory that went unchecked is never hidden by a clean one.
+fn python_lock_run(ctx: &crate::registry::Ctx) -> Ran {
+    let (settings, refs) = (ctx.settings, ctx.push.get());
+    let release = releasing(refs);
+    let budget = Budget::new(settings);
+    let dirs = lockfile_dirs("uv.lock");
+    let only_root = dirs.len() == 1 && dirs[0].is_empty();
+    let (mut vulnerabilities, mut advisories) = (Vec::new(), Vec::new());
+    let mut full = String::new();
+    let (mut complete, mut waivable) = (true, true);
+    for dir in &dirs {
+        let audit = audit_uv_lock(settings, release, dir, &budget);
+        let label = |ids: Vec<String>| -> Vec<String> {
+            if dir.is_empty() {
+                ids
+            } else {
+                ids.into_iter().map(|id| format!("{dir}: {id}")).collect()
+            }
+        };
+        vulnerabilities.extend(label(audit.vulnerabilities));
+        advisories.extend(label(audit.advisories));
+        if !audit.full.is_empty() {
+            if only_root {
+                full.push_str(&audit.full);
+            } else {
+                full.push_str(&format!("── audit-python in {dir}\n{}\n", audit.full));
+            }
+        }
+        complete &= audit.complete;
+        waivable &= audit.waivable;
+    }
+    let report = if !vulnerabilities.is_empty() {
+        Report::Vulnerabilities(vulnerabilities)
+    } else if !complete {
+        return Ran::Unavailable;
+    } else if !advisories.is_empty() {
+        Report::Advisories(advisories)
+    } else {
+        Report::Clean
+    };
     Ran::Concluded(Concluded {
         tool: "audit-python".to_string(),
         report,
-        full: out,
-        waivable,
+        full,
+        waivable: waivable && complete,
     })
 }
 
@@ -1376,11 +1876,12 @@ fn pip_rows_all_named(out: &str) -> bool {
     })
 }
 
-/// What a uv project ships: `uv export --no-dev` of its lock, names only.
-/// None when there is no `uv.lock`, no `uv`, or the export fails — the
+/// What a uv project ships: `uv export --no-dev` of its lock in `dir`, names
+/// only. None when there is no `uv.lock`, no `uv`, or the export fails — the
 /// caller then keeps every finding, because an unknown is not a pass.
 fn uv_production_names(
     settings: &crate::config::Settings,
+    dir: &std::path::Path,
 ) -> Option<std::collections::HashSet<String>> {
     if !has_lockfile("uv.lock") || common::which("uv").is_none() {
         return None;
@@ -1389,7 +1890,11 @@ fn uv_production_names(
         common::program("uv"),
         "export".into(),
         "--frozen".into(),
+        // The same members the audit exported, so scope and classification
+        // cover one workspace.
+        "--all-packages".into(),
         "--no-dev".into(),
+        "--no-default-groups".into(),
         // Optional extras ship: a consumer who asks for one installs it.
         "--all-extras".into(),
         "--no-hashes".into(),
@@ -1397,7 +1902,7 @@ fn uv_production_names(
         "--format".into(),
         "requirements-txt".into(),
     ];
-    let (ok, out) = audited(settings, &argv)?;
+    let (ok, out) = audited_in(settings, &argv, dir)?;
     if !ok {
         return None;
     }
@@ -2294,5 +2799,102 @@ mod tests {
             read_pip_audit(false, "ERROR: could not resolve\n"),
             Report::CouldNotCheck
         );
+    }
+
+    fn lock_block(name: Option<&str>, source: &str) -> String {
+        let mut block = String::from("[[package]]\n");
+        if let Some(name) = name {
+            block.push_str(&format!("name = \"{name}\"\n"));
+        }
+        block.push_str(&format!("version = \"1.0\"\nsource = {source}\n\n"));
+        block
+    }
+
+    #[test]
+    fn the_lock_scan_admits_only_names_whose_every_block_is_pypi() {
+        let pypi = "{ registry = \"https://pypi.org/simple\" }";
+        let lock = [
+            lock_block(Some("Requests"), pypi),
+            lock_block(
+                Some("slashed"),
+                "{ registry = \"https://pypi.org/simple/\" }",
+            ),
+            lock_block(
+                Some("mirror"),
+                "{ registry = \"https://mirror.example/simple\" }",
+            ),
+            lock_block(Some("gitdep"), "{ git = \"https://example.com/x.git\" }"),
+            lock_block(Some("pathdep"), "{ path = \"../x\" }"),
+            lock_block(Some("edit"), "{ editable = \".\" }"),
+            lock_block(Some("virt"), "{ virtual = \".\" }"),
+            lock_block(Some("twice"), pypi),
+            lock_block(Some("twice"), "{ git = \"https://example.com/t.git\" }"),
+            lock_block(None, pypi),
+            "[package.metadata]\nname = \"ignored\"\n".to_string(),
+        ]
+        .concat();
+        let sources = scan_uv_lock(&lock);
+        let admitted: Vec<&str> = sources.pypi.iter().map(String::as_str).collect();
+        assert_eq!(admitted, ["requests", "slashed"]);
+        assert_eq!(sources.nameless, 1);
+    }
+
+    #[test]
+    fn markers_are_stripped_and_versions_of_one_name_are_batched_apart() {
+        let pypi: std::collections::BTreeSet<String> =
+            ["numpy", "idna", "requests"].map(String::from).into();
+        let raw = "\
+# generated
+numpy==1.26.4 ; python_full_version < '3.12'
+numpy==2.1.0 ; python_full_version >= '3.12'
+numpy==2.1.0 ; sys_platform == 'win32'
+idna==3.7
+platform-kernel==0.1.0
+requests @ https://example.com/r.whl
+";
+        let pins = filter_export(raw, &pypi);
+        assert_eq!(pins.versions, 3);
+        assert_eq!(pins.batches.len(), 2);
+        assert_eq!(
+            pins.batches[0].get("numpy").map(String::as_str),
+            Some("1.26.4")
+        );
+        assert_eq!(
+            pins.batches[1].get("numpy").map(String::as_str),
+            Some("2.1.0")
+        );
+        assert_eq!(pins.batches[0].get("idna").map(String::as_str), Some("3.7"));
+        assert!(pins.skipped.contains("platform-kernel"));
+        assert!(pins.unclassified.contains("requests"));
+    }
+
+    #[test]
+    fn the_skipped_line_names_three_and_counts_the_rest() {
+        let names: Vec<String> = ["a", "b", "c", "d", "e"].map(String::from).into();
+        let refs: Vec<&String> = names.iter().collect();
+        assert_eq!(
+            skipped_line("", &refs),
+            "audit-python: 5 private/non-PyPI packages skipped (a, b, c +2 more)"
+        );
+        assert_eq!(
+            skipped_line("", &refs[..1]),
+            "audit-python: 1 private/non-PyPI package skipped (a)"
+        );
+    }
+
+    #[test]
+    fn a_private_directory_is_0700_removed_on_drop_and_never_reused() {
+        let path = std::env::temp_dir().join(common::unique_name("audit-private-test"));
+        let guard = PrivateDir::create_at(path.clone()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        assert!(PrivateDir::create_at(path.clone()).is_err());
+        assert!(path.is_dir(), "the refused attempt must leave it alone");
+        drop(guard);
+        assert!(!path.exists());
     }
 }

@@ -849,6 +849,37 @@ pub enum LockWait {
     UntilCeiling,
 }
 
+/// `<prefix>-<pid>-<hash>`: the pid stays for a human correlating a leftover
+/// directory with a hung process, but the pid ALONE made the name guessable —
+/// `ps` hands it to anyone on the box — and a pre-planted directory or
+/// symlink at a predictable path in a world-writable `/tmp` is somebody
+/// else's decision about where our checkout goes.
+///
+/// It is no longer the difference between safe and destructive: a caller's exclusive
+/// `create_dir` takes the path with an exclusive `create_dir` and refuses anything already
+/// there, rather than the `remove_dir_all`-first shape this comment used to
+/// describe. Unpredictability is now defence in depth — it means the refusal
+/// is not something an attacker can arrange on demand.
+///
+/// No dependency for real randomness here (this crate ships dependency-free),
+/// so the tail is a hash of the wall clock and the pid through
+/// `RandomState`'s own OS-seeded key — enough that guessing it in advance is
+/// impractical, not a cryptographic promise.
+pub fn unique_name(prefix: &str) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+
+    let pid = std::process::id();
+    let mut hasher = RandomState::new().build_hasher();
+    pid.hash(&mut hasher);
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    format!("{prefix}-{pid}-{:016x}", hasher.finish())
+}
+
 /// `secs` as people read it: `12s`, `8m12s`, `1h02m`.
 pub fn human_secs(secs: u64) -> String {
     match secs {
