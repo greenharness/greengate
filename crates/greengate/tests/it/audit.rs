@@ -23,6 +23,16 @@ fn shim(r: &Repo, name: &str, body: &str) {
 
 /// Run ONE audit check with a single pushed ref, fake tools first on PATH.
 fn push_check(r: &Repo, check: &str, remote_ref: &str) -> (i32, String) {
+    push_check_in(r, check, remote_ref, None)
+}
+
+/// As [`push_check`], with the run's temp directory pointed at `tmp`.
+fn push_check_in(
+    r: &Repo,
+    check: &str,
+    remote_ref: &str,
+    tmp: Option<&std::path::Path>,
+) -> (i32, String) {
     let oid = "a".repeat(40);
     let line = format!("{remote_ref} {oid} {remote_ref} {}\n", "0".repeat(40));
     let path = format!(
@@ -30,7 +40,11 @@ fn push_check(r: &Repo, check: &str, remote_ref: &str) -> (i32, String) {
         r.path(".git/toolshims").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut child = crate::common::amont_cmd()
+    let mut command = crate::common::amont_cmd();
+    if let Some(tmp) = tmp {
+        command.env("TMPDIR", tmp);
+    }
+    let mut child = command
         .arg("--hooks-dir")
         .arg(r.path(".git/hooks"))
         .arg(check)
@@ -926,4 +940,258 @@ fn a_branch_push_names_the_waiver() {
         "{out}"
     );
     assert!(!out.contains("will BLOCK"), "{out}");
+}
+
+const PYPI_BLOCK: &str = "[[package]]\nname = \"NAME\"\nversion = \"1.0.0\"\nsource = { registry = \"https://pypi.org/simple\" }\n\n";
+const PRIVATE_BLOCK: &str = "[[package]]\nname = \"platform-kernel\"\nversion = \"0.1.0\"\nsource = { registry = \"https://git.example.test/simple\" }\n\n";
+
+/// A uv project with no `.venv`: committed `pyproject.toml` and `uv.lock`
+/// (one shipped PyPI package, one dev-only PyPI package, one private one).
+fn uv_lock_repo(lock_dir: &str) -> Repo {
+    let r = bare_repo();
+    let prefix = if lock_dir.is_empty() {
+        String::new()
+    } else {
+        format!("{lock_dir}/")
+    };
+    r.stage(
+        &format!("{prefix}pyproject.toml"),
+        "[project]\nname = \"x\"\n",
+    );
+    let lock = [
+        PYPI_BLOCK.replace("NAME", "certifi"),
+        PYPI_BLOCK.replace("NAME", "dev-tool"),
+        PRIVATE_BLOCK.to_string(),
+    ]
+    .concat();
+    r.stage(&format!("{prefix}uv.lock"), &lock);
+    r.commit("chore: uv project");
+    // The export (with `-o`) lists everything; without `-o` it is the
+    // production list the release split asks for.
+    shim(
+        &r,
+        "uv",
+        r#"out=; prev=
+for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
+if [ -n "$out" ]; then
+  printf 'certifi==1.0.0 ; python_full_version >= "3.8"\ndev-tool==1.0.0\nplatform-kernel==0.1.0\n' > "$out"
+else
+  printf 'certifi==1.0.0\n'
+fi"#,
+    );
+    r
+}
+
+/// A `pip-audit` that answers only to `--no-deps`, `--disable-pip` and
+/// `-r <file>` in any order, records the file and the directory it ran in,
+/// and reports `rows` as vulnerable.
+fn lock_pip_audit(r: &Repo, rows: &str) {
+    let record = r.path(".git/recorded");
+    let _ = std::fs::remove_file(&record); // best effort: no record yet is the usual case
+    shim(
+        r,
+        "pip-audit",
+        &format!(
+            r#"nd=0; di=0; rf=; prev=
+for a in "$@"; do
+  case "$a" in --no-deps) nd=1;; --disable-pip) di=1;; esac
+  [ "$prev" = -r ] && rf=$a
+  prev=$a
+done
+if [ $nd = 1 ] && [ $di = 1 ] && [ -n "$rf" ]; then :; else echo "wrong invocation: $*"; exit 2; fi
+cat "$rf" >> {record}
+pwd >> {record}
+if [ -n '{rows}' ]; then
+  echo 'Found 1 known vulnerability in 1 package'
+  echo 'Name Version ID Fix Versions'
+  echo '{rows}'
+  exit 1
+fi
+echo 'No known vulnerabilities found'"#,
+            record = record.display(),
+            rows = rows
+        ),
+    );
+}
+
+fn recorded(r: &Repo) -> String {
+    std::fs::read_to_string(r.path(".git/recorded")).unwrap_or_default()
+}
+
+fn scratch_tmp(r: &Repo) -> std::path::PathBuf {
+    let tmp = r.path(".git/scratch-tmp");
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    tmp
+}
+
+fn leftovers(tmp: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(tmp)
+        .expect("read")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn a_uv_lock_without_a_venv_is_audited_and_a_vulnerable_one_refuses_a_tag() {
+    let r = uv_lock_repo("");
+    lock_pip_audit(&r, "certifi 1.0.0 PYSEC-2024-1 1.0.1");
+    let tmp = scratch_tmp(&r);
+    let (code, out) = push_check_in(&r, "pre-push-audit-python", "refs/tags/v1.0.0", Some(&tmp));
+    assert_ne!(code, 0, "a shipped finding must refuse the tag: {out}");
+    assert!(out.contains("certifi"), "{out}");
+    assert!(
+        out.contains("audit-python: audited uv.lock (2 package versions, 1 skipped)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("1 private/non-PyPI package skipped (platform-kernel)"),
+        "{out}"
+    );
+    assert!(!out.contains("did NOT run"), "{out}");
+    assert!(
+        !out.contains(tmp.to_str().unwrap()),
+        "temp path leaked: {out}"
+    );
+    let sent = recorded(&r);
+    assert!(sent.contains("certifi==1.0.0"), "{sent}");
+    assert!(
+        !sent.contains("platform-kernel"),
+        "a private name was sent: {sent}"
+    );
+    assert!(!sent.contains(';'), "markers must be stripped: {sent}");
+    assert_eq!(
+        leftovers(&tmp),
+        Vec::<String>::new(),
+        "temp dir must be removed"
+    );
+
+    lock_pip_audit(&r, "");
+    let (code, out) = push_check_in(&r, "pre-push-audit-python", "refs/tags/v1.0.0", Some(&tmp));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        leftovers(&tmp),
+        Vec::<String>::new(),
+        "temp dir must be removed"
+    );
+}
+
+#[test]
+fn a_dev_only_finding_in_the_lock_passes_a_tag() {
+    let r = uv_lock_repo("");
+    lock_pip_audit(&r, "dev-tool 1.0.0 PYSEC-2024-2 1.0.1");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("dev-only"), "{out}");
+}
+
+#[test]
+fn an_all_private_lock_did_not_run_and_never_blocks() {
+    let r = bare_repo();
+    r.stage("pyproject.toml", "[project]\nname = \"x\"\n");
+    r.stage("uv.lock", PRIVATE_BLOCK);
+    r.commit("chore: private-only uv project");
+    shim(&r, "uv", "o=; p=; for a in \"$@\"; do [ \"$p\" = -o ] && o=$a; p=$a; done\n[ -n \"$o\" ] && echo 'platform-kernel==0.1.0' > \"$o\"");
+    lock_pip_audit(&r, "certifi 1.0.0 PYSEC-2024-1 1.0.1");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "unavailable never blocks: {out}");
+    assert!(out.contains("did NOT run"), "{out}");
+    assert!(out.contains("1 private/non-PyPI package skipped"), "{out}");
+    assert_eq!(recorded(&r), "", "pip-audit must not have been called");
+}
+
+#[test]
+fn a_failed_export_warns_and_does_not_block() {
+    let r = uv_lock_repo("");
+    shim(
+        &r,
+        "uv",
+        "echo 'error: lockfile needs to be updated' >&2\nexit 2",
+    );
+    lock_pip_audit(&r, "certifi 1.0.0 PYSEC-2024-1 1.0.1");
+    let tmp = scratch_tmp(&r);
+    let (code, out) = push_check_in(&r, "pre-push-audit-python", "refs/tags/v1.0.0", Some(&tmp));
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("did NOT run"), "{out}");
+    assert!(out.contains("lockfile needs to be updated"), "{out}");
+    assert!(
+        out.contains("Next: `uv export --frozen` at the repo root"),
+        "{out}"
+    );
+    assert_eq!(recorded(&r), "");
+    assert_eq!(
+        leftovers(&tmp),
+        Vec::<String>::new(),
+        "temp dir must be removed"
+    );
+}
+
+#[test]
+fn a_nested_uv_lock_is_audited_from_its_own_directory() {
+    let r = uv_lock_repo("a");
+    lock_pip_audit(&r, "certifi 1.0.0 PYSEC-2024-1 1.0.1");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("audited a/uv.lock"), "{out}");
+    assert!(recorded(&r).trim_end().ends_with("/a"), "{}", recorded(&r));
+}
+
+/// The first batch's `pip-audit` answer: one vulnerable row.
+const FIRST_BATCH_VULNERABLE: &str = "echo 'Found 1 known vulnerability in 1 package'; echo 'Name Version ID Fix Versions'; echo 'certifi 1.0.0 PYSEC-2024-1 1.0.1'; exit 1";
+/// The first batch's `pip-audit` answer: clean.
+const FIRST_BATCH_CLEAN: &str = "echo 'No known vulnerabilities found'; exit 0";
+
+/// A lock exporting two versions of one PyPI name, so two batches. The
+/// `pip-audit` shim answers the file naming 1.0.0 with `first_batch_answer`
+/// and exits 2 with no output for the other.
+fn two_batch_repo(first_batch_answer: &str) -> Repo {
+    let r = bare_repo();
+    r.stage("pyproject.toml", "[project]\nname = \"x\"\n");
+    let lock = [
+        PYPI_BLOCK.replace("NAME", "certifi"),
+        PYPI_BLOCK.replace("NAME", "certifi"),
+    ]
+    .concat();
+    r.stage("uv.lock", &lock);
+    r.commit("chore: uv project");
+    shim(
+        &r,
+        "uv",
+        r#"out=; prev=
+for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
+if [ -n "$out" ]; then
+  printf 'certifi==1.0.0\ncertifi==2.0.0\n' > "$out"
+else
+  printf 'certifi==1.0.0\ncertifi==2.0.0\n'
+fi"#,
+    );
+    shim(
+        &r,
+        "pip-audit",
+        &format!(
+            r#"rf=; prev=
+for a in "$@"; do [ "$prev" = -r ] && rf=$a; prev=$a; done
+if grep -q '1.0.0' "$rf"; then
+  {first_batch_answer}
+fi
+exit 2"#
+        ),
+    );
+    r
+}
+
+#[test]
+fn a_batch_that_could_not_answer_never_reads_as_a_clean_pass() {
+    let r = two_batch_repo(FIRST_BATCH_VULNERABLE);
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(code, 0, "the vulnerable batch refuses the tag: {out}");
+    assert!(out.contains("certifi"), "{out}");
+    assert!(out.contains("could not answer"), "{out}");
+    assert!(out.contains("(no output)"), "{out}");
+
+    let r = two_batch_repo(FIRST_BATCH_CLEAN);
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "unavailable never blocks: {out}");
+    assert!(out.contains("NOT fully checked"), "{out}");
+    assert!(out.contains("(no output)"), "{out}");
 }
