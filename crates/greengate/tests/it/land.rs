@@ -679,3 +679,82 @@ fn land_waits_for_a_passing_warn_gate_on_a_busy_host() {
 fn land_waits_for_a_failing_warn_gate_on_a_busy_host() {
     land_with_a_warn_gate_on_a_busy_host(1);
 }
+
+/// f06: the pre-push hook runs another greengate than land. Land's stamps
+/// carry its own version and the hook looks for its own, so the push would
+/// end `evidence-missing` with advice that loops. Land refuses before its
+/// pre-stage instead, naming both versions; nothing runs, nothing is pushed,
+/// and the other binary is asked its version and nothing else.
+#[test]
+#[cfg(unix)]
+fn land_refuses_before_the_prestage_when_the_hook_runs_another_version() {
+    let fx = fixture("feat/split");
+    let log = fx.r.path(".git/gate.log");
+    fx.r.stage(
+        "gate.sh",
+        &format!("printf x >> '{}'\n", log.to_str().expect("utf8")),
+    );
+    fx.r.stage(
+        "amont.conf",
+        "set timeout 600\npre-push  gate  *.txt  block  heavy sh gate.sh\n",
+    );
+    fx.r.commit("chore: the gate");
+    crate::tree_gates::trust_and_install(&fx.r);
+
+    // The other binary: answers `--version` as 0.0.1, logs anything else.
+    let other = fx.r.path(".git/other-greengate");
+    let calls = fx.r.path(".git/other.log");
+    common::fixture_exec(
+        &other,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'greengate 0.0.1'; exit 0; fi\n\
+             echo \"$@\" >> '{}'\nexit 0\n",
+            calls.to_str().expect("utf8")
+        ),
+    );
+    let shim = fx.r.path(".git/hooks/pre-push");
+    let text = std::fs::read_to_string(&shim).expect("pre-push shim");
+    let baked: String = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("BAKED=\"") {
+                format!("BAKED=\"{}\"", other.display())
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(baked, text, "no BAKED= line in the shim");
+    common::fixture_exec(&shim, &format!("{baked}\n"));
+
+    let before = tip(&fx, "main");
+    let ran = land(&fx, &["--json"]);
+    let said = format!("{}{}", ran.stdout, ran.stderr);
+
+    assert_eq!(ran.code, 1, "{said}");
+    assert_eq!(status_of(&ran), "refused", "{said}");
+    assert!(
+        said.contains(&format!(
+            "the pre-push hook runs greengate 0.0.1 ({}), this land is greengate {}",
+            other.display(),
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{said}"
+    );
+    assert!(said.contains(" init"), "no re-bake named: {said}");
+    assert!(!said.contains("evidence-missing"), "{said}");
+    assert!(!log.exists(), "the gate ran: {said}");
+    assert!(
+        !calls.exists(),
+        "the other binary ran: {:?}",
+        std::fs::read_to_string(&calls)
+    );
+    assert_eq!(tip(&fx, "main"), before);
+    let pushed = Command::new("git")
+        .args(["rev-parse", "--verify", "-q", "refs/heads/feat/split"])
+        .current_dir(&fx.bare)
+        .output()
+        .expect("git");
+    assert!(!pushed.status.success(), "the branch was pushed: {said}");
+}

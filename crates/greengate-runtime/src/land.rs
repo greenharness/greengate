@@ -1022,6 +1022,16 @@ fn prestage(
             )
         }
     };
+    // Before the pre-stage: stamps this binary makes do not count at a hook
+    // that runs another greengate version (f06).
+    if let Some(split) = crate::land_hook::split() {
+        let next = split.next(&exe, &again);
+        return Staged::ended(
+            owed,
+            PrestageState::Refused,
+            Prestage::Refused(split.why(), next),
+        );
+    }
     let names: Vec<&str> = owed.iter().map(String::as_str).collect();
     eprintln!(
         "{BIN}: land: {} push gate{} to check before git connects:",

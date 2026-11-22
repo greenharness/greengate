@@ -69,6 +69,7 @@ pub mod json_read;
 pub mod land;
 #[cfg(unix)]
 pub(crate) mod land_detach;
+pub(crate) mod land_hook;
 pub mod live;
 pub mod load;
 pub mod manifest;

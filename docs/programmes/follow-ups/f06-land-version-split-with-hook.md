@@ -1,7 +1,7 @@
 +++
 type = "task"
 mode = "afk"
-status = "open"
+status = "closed"
 blocked_by = []
 repos = ["amont"]
 +++
@@ -40,3 +40,41 @@ A land whose hook would run a different greengate version refuses before the pre
 one line naming both versions and the re-bake command (or the pre-stage runs the hook's binary,
 so both agree). A test reproduces the split: two binaries, stamp from one, push through the other.
 The decision on `init` from a worktree's `node_modules` is recorded.
+
+## Resolution
+
+Land compares before its pre-stage, inside `prestage` (so `land --tag` gets it
+too), after the early returns for a push that owes no gate or has stamp reuse
+off. `land_hook::split` reads the repository's pre-push shim through
+`install::installed_here` (which follows `core.hooksPath` and the shared hooks
+of a linked worktree), resolves the binary the shim would exec in the shim's
+own order (`$GIT_HOOKS_BIN`, the baked path, `~/.local/bin`, `PATH`), and when
+that binary is not land's own file, asks it `--version` under the 5-second
+probe bound. A different version string refuses with one line naming both
+versions and the hook's binary, then three next steps: `<land's binary> init`
+(re-bake the hooks), `greengate land` again, or `<the hook's binary> land`.
+
+The versions are compared as strings: `builtin_token` seals
+`CARGO_PKG_VERSION` verbatim, so any difference is a split. Every question it
+cannot answer lets land go on as before: a hook that is not our shim (none, or
+hand-written), a binary that does not answer, an answer that is not
+`greengate X.Y` or `amont X.Y`. Running the pre-stage with the hook's binary
+was not taken: an older binary may not know land's pre-stage contract
+(`GREENGATE_LAND_PRESTAGE`), and a refusal names the fix where a silent switch
+would hide it.
+
+The test, `land::land_refuses_before_the_prestage_when_the_hook_runs_another_version`,
+bakes a second binary into the shim that answers `greengate 0.0.1` and logs
+every other call: land exits 1 with both versions named, the gate never ran,
+the other binary was asked its version only, and nothing was pushed.
+
+**`greengate init` from a worktree's `node_modules`: unchanged.** git shares
+one hooks directory across a repository's worktrees, so a re-bake from any of
+them is a re-bake for all, and the binary `init` bakes is the repository's own
+pinned devDependency, which is the version the team means (ADR-0019: a
+repository pins its tools). Making `init` stand down in a linked worktree would
+leave a fresh clone's first worktree install unable to repair the hooks. The
+harm was never the bake itself but the silent split at the push, which land now
+names. A shared hook pointing into a removed worktree's `node_modules` falls
+through the shim's chain to `~/.local/bin` and `PATH`, which land's resolver
+follows the same way.

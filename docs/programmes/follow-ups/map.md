@@ -15,6 +15,7 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 - [f03 unchecked cache masks an upgrade](f03-unchecked-cache-masks-upgrade.md): an `unchecked` record carries the version that wrote it and answers only to that version; clean and findings records still answer across versions. Unreleased.
 - [f04 lock-route names](f04-lock-route-names.md): the registry parameter stays `ctx` in all 15 checks (one name for one type); the test scratch directories are `scratch_dir`.
 - [f05 rehearsal uses the live venv](f05-rehearsal-uses-live-venv.md): a push snapshot puts its own copies of the borrowed venv's editable `.pth` directories first on `PYTHONPATH`. Unreleased.
+- [f06 land version split](f06-land-version-split-with-hook.md): land refuses before its pre-stage when the pre-push hook would run another greengate version, naming both and the re-bake; `greengate init` from a worktree's `node_modules` keeps re-baking the shared hooks (the repository's pinned version). Unreleased.
 
 ## Handoff
 
@@ -27,6 +28,8 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 2026-11-21: f04 closed on the relay's prompt (`ctx` kept, test `tmp` renamed `scratch_dir`; test-only, nothing to release). Next, in order: f02 (ADR-0055 on the venv route, due 2026-12-05), then f05. f01 and f03 still ship with the next release.
 
 2026-11-21: f05 closed on the relay's prompt (a push snapshot puts its own copies of the borrowed venv's editable `.pth` directories first on `PYTHONPATH`; unreleased, ships with f01 and f03 in the next release). Filed f07 (`uv run` in a `testPushedTree` snapshot runs a `PATH` pytest; numbered f06 at first, renumbered because #505 filed its own f06 meanwhile). Next, in order: f06 (land refuses at once when the hook runs another greengate), f02 (ADR-0055 on the venv route, due 2026-12-05), then f07.
+
+2026-11-22: f06 closed on the relay's prompt (land refuses at once on a hook/land version split; `init` unchanged; unreleased, ships with f01, f03 and f05 in the next release). Next, in order: f02 (ADR-0055 on the venv route, due 2026-12-05), then f07.
 
 ## Not yet specified
 
