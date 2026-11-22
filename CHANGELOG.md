@@ -28,6 +28,12 @@ missing here.
   whose tests used a symbol the working tree did not have yet failed at land.
   The snapshot's copies of the editable install's directories now go first on
   `PYTHONPATH`.
+- `greengate land` refuses at once when the repository's pre-push hook would
+  run another greengate version, naming both versions and the hook's binary.
+  A built-in gate's stamp carries the version that made it, so the push used
+  to end `evidence-missing` while `rehearse --wait` said there was nothing to
+  rehearse. The refusal names the re-bake (`greengate init` from land's
+  binary) and the land through the hook's binary.
 
 ## v4.12.0
 
