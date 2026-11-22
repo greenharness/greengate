@@ -151,6 +151,7 @@ pub(crate) fn parse_version(out: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn scratch(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("greengate-land-hook-{tag}-{}", std::process::id()));
