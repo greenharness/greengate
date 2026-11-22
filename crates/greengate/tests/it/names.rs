@@ -36,6 +36,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         8,
         "test fixtures: cargo tree output naming the old crate",
     ),
+    (
+        "greengate-runtime/src/land_hook.rs",
+        1,
+        "a test: the --version line an old amont binary prints",
+    ),
 ];
 
 /// Per file: how many old DATA-name literals it may hold, and why.
