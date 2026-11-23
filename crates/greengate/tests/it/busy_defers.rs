@@ -263,7 +263,7 @@ fn quiet_mode_still_says_a_check_was_deferred() {
         "quiet mode is on (passes rolled up into a count): {out}"
     );
     assert!(
-        out.contains("check(s) deferred to CI, no host slot freed: pre-commit-gate"),
+        out.contains("check(s) deferred to CI, the host was busy: pre-commit-gate"),
         "{out}"
     );
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
@@ -617,9 +617,10 @@ fn a_heavy_check_out_of_scope_never_waits() {
 }
 
 /// A heavy hook check runs at its share of the cores: with the slot free it
-/// is held, and on a busy host under `onBusy wait` it runs unqueued after
-/// the wait. Both get `CARGO_BUILD_JOBS` = cores / 1 slot, and every width
-/// key, because the busiest moment is exactly when an unbounded run hurts.
+/// is held, and on a busy host under `GREENGATE_ON_BUSY=now` it runs
+/// unqueued at once (ADR-0022: a wait that ends never runs it). Both get
+/// `CARGO_BUILD_JOBS` = cores / 1 slot, and every width key, because the
+/// busiest moment is exactly when an unbounded run hurts.
 #[test]
 fn a_heavy_hook_check_is_bounded_held_or_unqueued() {
     let repo = Repo::new();
@@ -656,7 +657,12 @@ fn a_heavy_hook_check_is_bounded_held_or_unqueued() {
     let busy = slot_dir("width-busy");
     let _holder = Holder::hold(&busy.join("slot-0"));
     repo.stage("b.txt", "two\n");
-    let (code, out) = hook(&repo, "pre-commit", &[], &busy, "", &clear);
+    let now: Vec<(&str, &str)> = clear
+        .iter()
+        .copied()
+        .chain([("GREENGATE_ON_BUSY", "now")])
+        .collect();
+    let (code, out) = hook(&repo, "pre-commit", &[], &busy, "", &now);
     assert_eq!(code, 0, "{out}");
     let log = std::fs::read_to_string(repo.dir.join("width.log")).unwrap_or_default();
     assert_eq!(
@@ -1260,7 +1266,7 @@ const PRESTAGE: [(&str, &str); 2] = [
 ];
 
 /// In land's pre-stage a warn gate waits at most `greengate.warnSlotWait`, then
-/// runs unqueued and says which key cut the wait.
+/// defers to CI (ADR-0022): it never runs unqueued because its wait ended.
 #[test]
 fn a_prestage_warn_gate_stops_waiting_at_warn_slot_wait() {
     let slots = slot_dir("ceiling");
@@ -1271,10 +1277,12 @@ fn a_prestage_warn_gate_stops_waiting_at_warn_slot_wait() {
     let (code, out) = hook(&repo, "pre-push", &[], &slots, &line, &PRESTAGE);
     let took = started.elapsed();
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("running it anyway"), "{out}");
-    assert!(out.contains("greengate.warnSlotWait"), "{out}");
-    assert!(!out.contains("deferred to CI"), "{out}");
-    assert!(marker.exists(), "{out}");
+    assert!(!out.contains("running it anyway"), "{out}");
+    assert!(out.contains("deferred to CI"), "{out}");
+    assert!(
+        !marker.exists(),
+        "a wait that ended never runs the gate: {out}"
+    );
     assert!(
         took < std::time::Duration::from_secs(20),
         "took {took:?}\n{out}"
@@ -1330,5 +1338,84 @@ fn a_prestage_block_gate_has_no_ceiling() {
         "took {took:?}\n{out}"
     );
     holder.join().unwrap();
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
+}
+
+/// ADR-0022: under the default `onBusy wait`, a heavy check whose line
+/// stalls defers to CI rather than run unqueued after the timeout, says why,
+/// and leaves the `onBusy wait` hint out, since it would stop nothing.
+#[test]
+fn a_stalled_line_defers_under_onbusy_wait() {
+    let repo = Repo::new();
+    repo.stage("gate.sh", "printf x >> gate.log\n");
+    repo.stage(
+        "amont.conf",
+        "pre-commit  gate  *.txt  block  heavy sh gate.sh\n",
+    );
+    repo.commit("chore: base");
+    trust(&repo);
+    let slots = slot_dir("stall-wait");
+    let _holder = Holder::hold(&slots.join("slot-0"));
+    repo.stage("a.txt", "one\n");
+    let (code, out) = hook(
+        &repo,
+        "pre-commit",
+        &[],
+        &slots,
+        "",
+        &[("GREENHARNESS_SLOT_STALL_S", "1")],
+    );
+    assert_eq!(code, 0, "a deferred block gate must not block: {out}");
+    assert!(out.contains("deferred to CI"), "{out}");
+    assert!(
+        out.contains("GREENGATE_ON_BUSY=now"),
+        "the skip is offered: {out}"
+    );
+    assert!(
+        !out.contains("set onBusy wait"),
+        "the hint stops nothing here: {out}"
+    );
+    assert_eq!(runs(&repo, "gate.log"), 0, "never run unqueued: {out}");
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert!(
+        waits.contains("\"outcome\":\"deferred\",\"end\":\"stalled\""),
+        "{waits}"
+    );
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
+}
+
+/// `GREENGATE_ON_BUSY=now` runs a heavy check at once beside a holder,
+/// unqueued, says so, and journals `now`.
+#[test]
+fn now_runs_a_heavy_check_at_once_and_journals_it() {
+    let repo = Repo::new();
+    repo.stage("gate.sh", "printf x >> gate.log\n");
+    repo.stage(
+        "amont.conf",
+        "pre-commit  gate  *.txt  block  heavy sh gate.sh\n",
+    );
+    repo.commit("chore: base");
+    trust(&repo);
+    let slots = slot_dir("now");
+    let _holder = Holder::hold(&slots.join("slot-0"));
+    repo.stage("a.txt", "one\n");
+    let started = std::time::Instant::now();
+    let (code, out) = hook(
+        &repo,
+        "pre-commit",
+        &[],
+        &slots,
+        "",
+        &[("GREENGATE_ON_BUSY", "now")],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "now waited: {out}"
+    );
+    assert_eq!(runs(&repo, "gate.log"), 1, "now runs it: {out}");
+    assert!(out.contains("skips the host slot queue"), "{out}");
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert!(waits.contains("\"outcome\":\"now\""), "{waits}");
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }

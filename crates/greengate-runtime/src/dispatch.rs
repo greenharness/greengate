@@ -1875,10 +1875,21 @@ pub fn pre_push(ctx: &Ctx) -> Verdict {
                 }
             }
             // Not run, never fatal, never passed: CI runs it (ADR-0013).
-            Outcome::Deferred => announce_deferred(&[(
-                check.name(),
-                severity_read.unwrap_or_else(|| crate::registry::severity_of(ctx.settings, *check)),
-            )]),
+            // Recorded as a completion for an hour (ADR-0022), so land's push
+            // after a pre-stage deferral does not refuse it as missing.
+            Outcome::Deferred => {
+                if stamped_push_gate(*check) {
+                    completed_otherwise.push((
+                        check.name().to_string(),
+                        crate::gate_stamp::Completion::Deferred,
+                    ));
+                }
+                announce_deferred(&[(
+                    check.name(),
+                    severity_read
+                        .unwrap_or_else(|| crate::registry::severity_of(ctx.settings, *check)),
+                )])
+            }
             // Nothing to judge: not passed (nothing to stamp or attest), not
             // a gap (nothing is missing). The dispatcher asked the registry's
             // opt-in question above; this is a check answering it for itself.
@@ -2099,7 +2110,7 @@ fn announce_skipped(names: &[&str], blocked_by: &[&str]) {
 /// offered only for `block` checks, since a `warn` check never waits on a
 /// commit or a push and the hint cannot stop it deferring there.
 fn announce_deferred(deferred: &[(&str, Severity)]) {
-    for line in deferral_advice(deferred) {
+    for line in deferral_advice(deferred, crate::host_slots::deferred_by_slot_wait()) {
         println!("{line}");
     }
 }
@@ -2109,10 +2120,10 @@ fn announce_deferred(deferred: &[(&str, Severity)]) {
 /// `--raw` run waits for its slot under `GREENGATE_ON_BUSY=wait`, warn or block),
 /// then the `onBusy wait` hint only when a `block` check is in the list,
 /// since only a `block` check stops deferring under it.
-fn deferral_advice(deferred: &[(&str, Severity)]) -> Vec<String> {
+fn deferral_advice(deferred: &[(&str, Severity)], by_slot_wait: bool) -> Vec<String> {
     let names: Vec<&str> = deferred.iter().map(|(name, _)| *name).collect();
     let mut lines = vec![format!(
-        "{} {} check(s) deferred to CI, no host slot freed: {}",
+        "{} {} check(s) deferred to CI, the host was busy: {}",
         warning_sign(),
         names.len(),
         names.join(", ")
@@ -2128,7 +2139,16 @@ fn deferral_advice(deferred: &[(&str, Severity)]) -> Vec<String> {
             highlight(&format!("GREENGATE_ON_BUSY=wait {BIN} run --raw {name}"))
         ));
     }
-    if any_block {
+    // Skipping the queue is the person's choice, offered second (ADR-0022).
+    if let Some((name, _)) = deferred.first() {
+        lines.push(format!(
+            "  skip the queue (the host is busy): {}",
+            highlight(&format!("GREENGATE_ON_BUSY=now {BIN} run --raw {name}"))
+        ));
+    }
+    // `set onBusy wait` stops only a `slotWait` deferral: a stall defers
+    // under either policy.
+    if any_block && by_slot_wait {
         lines.push(format!(
             "  stop deferring the block checks: {}",
             highlight("set onBusy wait")
@@ -2967,10 +2987,13 @@ mod tests {
     /// gate, and the hint is never offered.
     #[test]
     fn deferred_warn_gates_are_each_advised_the_command_that_waits() {
-        let lines = deferral_advice(&[
-            ("pre-push-probe", Severity::Warn),
-            ("pre-push-lint", Severity::Warn),
-        ]);
+        let lines = deferral_advice(
+            &[
+                ("pre-push-probe", Severity::Warn),
+                ("pre-push-lint", Severity::Warn),
+            ],
+            true,
+        );
         let said = lines.join("\n");
         assert!(said.contains("2 check(s) deferred to CI"), "{said}");
         for gate in ["pre-push-probe", "pre-push-lint"] {
@@ -2986,10 +3009,13 @@ mod tests {
     /// and the `onBusy wait` hint says it stops only the block checks.
     #[test]
     fn a_mixed_deferral_names_every_gate_and_scopes_the_hint() {
-        let lines = deferral_advice(&[
-            ("pre-push-probe", Severity::Warn),
-            ("pre-push-cargo-test", Severity::Block),
-        ]);
+        let lines = deferral_advice(
+            &[
+                ("pre-push-probe", Severity::Warn),
+                ("pre-push-cargo-test", Severity::Block),
+            ],
+            true,
+        );
         let said = lines.join("\n");
         for gate in ["pre-push-probe", "pre-push-cargo-test"] {
             assert!(
@@ -3002,6 +3028,24 @@ mod tests {
             .find(|l| l.contains("set onBusy wait"))
             .expect("the hint, for the block gate");
         assert!(hint.contains("block checks"), "{hint}");
-        assert_eq!(lines.len(), 4, "roll-up, two commands, one hint: {said}");
+        assert_eq!(
+            lines.len(),
+            5,
+            "roll-up, two commands, the skip line, one hint: {said}"
+        );
+    }
+
+    /// ADR-0022: a stall defers under `onBusy wait` too, so the `onBusy wait`
+    /// hint would stop nothing and is left out; skipping the queue is offered
+    /// second, after the command that waits.
+    #[test]
+    fn a_stall_deferral_offers_the_wait_then_the_skip_and_no_hint() {
+        let lines = deferral_advice(&[("pre-push-cargo-test", Severity::Block)], false);
+        let said = lines.join("\n");
+        assert!(!said.contains("set onBusy wait"), "{said}");
+        assert!(lines[1].contains("GREENGATE_ON_BUSY=wait"), "{said}");
+        assert!(lines[2].contains("skip the queue"), "{said}");
+        assert!(lines[2].contains("GREENGATE_ON_BUSY=now"), "{said}");
+        assert_eq!(lines.len(), 3, "{said}");
     }
 }

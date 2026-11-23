@@ -42,6 +42,20 @@ pub const DIR_ENV: &str = "GREENHARNESS_SLOT_DIR";
 /// holder's load, so a burst of waiters on an idle host would all pile in.
 pub const RAMP: Duration = Duration::from_secs(60);
 
+/// How much one-minute load each running job of a holder brings, for the
+/// load test (ADR-0022): a further slot is taken while `load1 < cores +
+/// LOAD_PER_JOB × Σjobs(holders)`. One holder at `jobs 2` measured 12.3
+/// against an idle baseline of about 4 (t01), so about 4 per job; counting
+/// only the cores, the holders' own load kept every other slot shut.
+pub const LOAD_PER_JOB: u32 = 4;
+
+/// A wait whose line made no progress for this long has stalled (ADR-0022):
+/// no admission anywhere and no change of this waiter's position.
+pub const STALL: Duration = Duration::from_secs(300);
+
+/// A test seam beside [`DIR_ENV`]: the stall window in whole seconds.
+pub const STALL_ENV: &str = "GREENHARNESS_SLOT_STALL_S";
+
 /// How many slots THIS process holds, across its threads.
 static HELD: AtomicUsize = AtomicUsize::new(0);
 
@@ -609,23 +623,35 @@ pub enum WaitReason {
     Behind { ahead: usize },
     /// Every slot is held.
     SlotsFull { held: usize, cap: u32 },
-    /// A slot is free, but the one-minute load is at or above the core count.
-    /// The load is in tenths (`310` is 31.0), so the queue stays `Eq`.
-    Load { load_tenths: u32, cores: u32 },
+    /// A slot is free, but the one-minute load is at or above the limit,
+    /// `cores + LOAD_PER_JOB × holder_jobs` (ADR-0022). The load is in tenths
+    /// (`310` is 31.0), so the queue stays `Eq`.
+    Load {
+        load_tenths: u32,
+        cores: u32,
+        /// The jobs of the holders, which raise the limit.
+        holder_jobs: u32,
+    },
     /// A slot is free, but a holder was admitted under a minute ago.
     Ramp,
 }
 
 impl WaitReason {
-    /// `load 31.0 >= 6 cores`, `slots full 3/3`, `2 ahead`, `ramp`.
+    /// `load 31.0 >= 14 (6 cores + 4×2 holder jobs)`, `slots full 3/3`,
+    /// `2 ahead`, `ramp`.
     pub fn describe(&self) -> String {
         match self {
             WaitReason::Behind { ahead } => format!("{ahead} ahead"),
             WaitReason::SlotsFull { held, cap } => format!("slots full {held}/{cap}"),
-            WaitReason::Load { load_tenths, cores } => format!(
-                "load {}.{} >= {cores} cores",
+            WaitReason::Load {
+                load_tenths,
+                cores,
+                holder_jobs,
+            } => format!(
+                "load {}.{} >= {} ({cores} cores + {LOAD_PER_JOB}×{holder_jobs} holder jobs)",
                 load_tenths / 10,
-                load_tenths % 10
+                load_tenths % 10,
+                load_limit(*cores, *holder_jobs)
             ),
             WaitReason::Ramp => "one new holder per minute".to_string(),
         }
@@ -759,13 +785,21 @@ impl Waiter {
         let cap = self.sizing.cap_for(probe.cores);
         let Probed { free, held } = probe_slots(&self.dir, cap)?;
         let weight = self.weight.min(cap) as usize;
+        // The holders' jobs raise the load limit (ADR-0022): their own load
+        // must not keep the next slot shut. Read only when a load test runs.
+        let holder_jobs = if held.is_empty() || matches!(self.sizing, Sizing::Fixed(_)) {
+            0
+        } else {
+            held_jobs(&self.dir, &held, parallelism(1, probe.cores, cap))
+        };
+        let limit = f64::from(load_limit(probe.cores, holder_jobs));
         let admit = position == 0 && free.len() >= weight && {
             let floor = held.is_empty();
             match self.sizing {
                 Sizing::Fixed(_) => true,
                 Sizing::Auto => {
                     floor || {
-                        let below = probe.load1.map_or(true, |l| l < f64::from(probe.cores));
+                        let below = probe.load1.map_or(true, |l| l < limit);
                         let since = probe.now_ms.saturating_sub(admitted_at(&self.dir));
                         // A sibling of a holder in this process (one commit's
                         // own checks) skips the ramp: the ramp spaces
@@ -789,11 +823,12 @@ impl Waiter {
                 }
             } else {
                 match probe.load1 {
-                    Some(load1) if load1 >= f64::from(probe.cores) => WaitReason::Load {
+                    Some(load1) if load1 >= limit => WaitReason::Load {
                         // In tenths, without a lossy cast: a load is a small
                         // non-negative number, and anything else saturates.
                         load_tenths: format!("{:.0}", load1 * 10.0).parse().unwrap_or(u32::MAX),
                         cores: probe.cores,
+                        holder_jobs,
                     },
                     _ => WaitReason::Ramp,
                 }
@@ -874,6 +909,148 @@ pub fn acquire(
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// The load limit a further slot is taken under: `cores + LOAD_PER_JOB ×
+/// holder_jobs`, saturating (ADR-0022).
+pub fn load_limit(cores: u32, holder_jobs: u32) -> u32 {
+    cores.saturating_add(LOAD_PER_JOB.saturating_mul(holder_jobs))
+}
+
+/// Whether a wait's line has stopped moving (ADR-0022): one rule, so every
+/// caller (greengate's hooks, `slot run`, relais) ends a wait the same way.
+///
+/// The idle time is the shorter of two: the time since this waiter joined or
+/// last changed place, on a monotonic clock, so a laptop's sleep or a clock
+/// step cannot make a moving line look stalled; and the time since the last
+/// admission anywhere, from the machine-wide `admitted-at` stamp, which other
+/// processes write on the wall clock. A stamp ahead of now counts as just now,
+/// never as a panic or an instant stall. A poll that missed the admission lock
+/// (`Queue::reason` is `None`) moves no mark: it saw nothing.
+#[derive(Debug, Clone)]
+pub struct Stall {
+    window: Duration,
+    joined: Instant,
+    /// When this waiter last changed place, as time since `joined`.
+    moved: Duration,
+    position: Option<usize>,
+}
+
+impl Stall {
+    /// A clock for a wait that starts now, ending after `window` without
+    /// progress.
+    pub fn new(window: Duration) -> Stall {
+        Stall {
+            window,
+            joined: Instant::now(),
+            moved: Duration::ZERO,
+            position: None,
+        }
+    }
+
+    /// The window to stall after: [`STALL`], or [`STALL_ENV`] (whole seconds
+    /// from 1). An empty, zero or unreadable value gives [`STALL`] and a
+    /// warning for the caller to print once.
+    pub fn window() -> (Duration, Option<String>) {
+        stall_window_from(std::env::var(STALL_ENV).ok().as_deref())
+    }
+
+    /// Feed one poll's answer, at the real clocks: whether the line has now
+    /// made no progress for the window.
+    pub fn observe(&mut self, waiter: &Waiter, queue: &Queue) -> bool {
+        self.observe_at(
+            queue,
+            self.joined.elapsed(),
+            now_ms(),
+            admitted_at(&waiter.dir),
+        )
+    }
+
+    /// [`Stall::observe`] against given clocks: `elapsed` since the wait
+    /// began (monotonic), `now_ms` and the last admission `admitted_ms` (wall).
+    pub fn observe_at(
+        &mut self,
+        queue: &Queue,
+        elapsed: Duration,
+        now_ms: u128,
+        admitted_ms: u128,
+    ) -> bool {
+        if queue.reason.is_some() {
+            if self.position.is_some_and(|p| p != queue.position) {
+                self.moved = elapsed;
+            }
+            self.position = Some(queue.position);
+        }
+        self.idle_at(elapsed, now_ms, admitted_ms) >= self.window
+    }
+
+    /// How long the line has made no progress, at the given clocks.
+    pub fn idle_at(&self, elapsed: Duration, now_ms: u128, admitted_ms: u128) -> Duration {
+        let own = elapsed.saturating_sub(self.moved);
+        let since_admission = u64::try_from(now_ms.saturating_sub(admitted_ms))
+            .map_or(Duration::MAX, Duration::from_millis);
+        own.min(since_admission)
+    }
+
+    /// The window this clock stalls after.
+    pub fn limit(&self) -> Duration {
+        self.window
+    }
+}
+
+fn stall_window_from(value: Option<&str>) -> (Duration, Option<String>) {
+    match value {
+        None => (STALL, None),
+        Some(v) => match v.trim().parse::<u64>() {
+            Ok(s) if s >= 1 => (Duration::from_secs(s), None),
+            _ => (
+                STALL,
+                Some(format!(
+                    "{STALL_ENV}={v:?} is not a whole number of seconds from 1; using {}",
+                    STALL.as_secs()
+                )),
+            ),
+        },
+    }
+}
+
+/// The jobs one holder record adds to Σjobs, once per lease: its `jobs`, or
+/// `missing` for a record that names none (an older writer). The one count
+/// both the load test and the journal's `holder_jobs` use.
+fn lease_jobs(
+    text: &str,
+    holder: &Holder,
+    missing: u32,
+    leases: &mut std::collections::BTreeSet<String>,
+) -> u32 {
+    let lease = raw(text, "lease").unwrap_or_else(|| holder.to_json());
+    if leases.insert(lease) {
+        holder.jobs.unwrap_or(missing)
+    } else {
+        0
+    }
+}
+
+/// Σjobs over the held slots `held`, for the load test: a held slot with no
+/// live record (an old client, a record being renamed) counts `missing`.
+fn held_jobs(dir: &Path, held: &[u32], missing: u32) -> u32 {
+    let mut leases = std::collections::BTreeSet::new();
+    let mut jobs = 0u32;
+    for index in held {
+        let path = dir.join("holders").join(format!("slot-{index}.who"));
+        let text = fs::read_to_string(&path).ok();
+        let add = match text
+            .as_deref()
+            .and_then(|t| Holder::from_json(t).map(|h| (t, h)))
+        {
+            Some((text, holder)) if platform::alive(holder.pid) => {
+                lease_jobs(text, &holder, missing, &mut leases)
+            }
+            _ => missing,
+        };
+        jobs = jobs.saturating_add(add);
+    }
+    jobs
 }
 
 /// The host's slots right now, for `amont slots`.
@@ -964,6 +1141,28 @@ pub struct WaitContext<'a> {
     /// The core count the waiter was sized for, when the caller knows it;
     /// written as `"cores"`. `None` writes the detected count.
     pub cores: Option<u32>,
+    /// Why a wait that did not admit ended, written as `"end"` (ADR-0022).
+    pub end: Option<WaitEnd>,
+}
+
+/// Why a wait ended without a slot: the line stalled, the caller's hard
+/// ceiling ran out, or the slot files failed after the queue was joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitEnd {
+    Stalled,
+    Ceiling,
+    IoError,
+}
+
+impl WaitEnd {
+    /// The journal word: `stalled`, `ceiling`, `io_error`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WaitEnd::Stalled => "stalled",
+            WaitEnd::Ceiling => "ceiling",
+            WaitEnd::IoError => "io_error",
+        }
+    }
 }
 
 /// Where an acquisition happened: a plain push, a push rehearsal in a
@@ -1015,16 +1214,28 @@ pub fn record_wait_named(
         WaitPlace::Rehearsal => (",\"rehearsal\":true", ""),
         WaitPlace::Prestage => (",\"rehearsal\":true", ",\"prestage\":true"),
     };
-    let held = occupancy(dir).map_or(
+    let line_cores = context.cores.unwrap_or_else(cores);
+    // A record naming no jobs counts as one slot's width, as the load test
+    // counts it, so `holder_jobs` is the Σjobs the admission decided with.
+    let missing = parallelism(
+        1,
+        line_cores,
+        context
+            .cap
+            .unwrap_or_else(|| Sizing::Auto.cap_for(line_cores)),
+    );
+    let held = occupancy(dir, missing).map_or(
         ",\"holders\":null,\"holder_jobs\":null".to_string(),
         |(slots, jobs)| format!(",\"holders\":{slots},\"holder_jobs\":{jobs}"),
     );
+    let end = context
+        .end
+        .map_or(String::new(), |e| format!(",\"end\":\"{}\"", e.as_str()));
     let line = format!(
-        "{{\"at_ms\":{},\"tool\":\"{}\"{name},\"pid\":{}{session},\"weight\":{weight}{jobs}{cap},\"cores\":{}{held},\"waited_ms\":{waited_ms},\"load1\":{load},\"outcome\":\"{}\"{rehearsal}{prestage}}}\n",
+        "{{\"at_ms\":{},\"tool\":\"{}\"{name},\"pid\":{}{session},\"weight\":{weight}{jobs}{cap},\"cores\":{line_cores}{held},\"waited_ms\":{waited_ms},\"load1\":{load},\"outcome\":\"{}\"{end}{rehearsal}{prestage}}}\n",
         now_ms(),
         escape(tool),
         std::process::id(),
-        context.cores.unwrap_or_else(cores),
         escape(outcome)
     );
     append_journal(dir, &line);
@@ -1048,10 +1259,11 @@ fn append_journal(dir: &Path, line: &str) {
 /// an observation, not an atomic count. A record whose writer is dead is
 /// skipped, as is one removed while it was read (a release). Leases are told
 /// apart by their `"lease"` id; a record without one (an older writer) is
-/// deduplicated by equality. A slot held by a client that writes no record is
-/// not seen. `None` when the directory or a record could not be read or
-/// parsed: unknown, never zero.
-fn occupancy(dir: &Path) -> Option<(usize, u32)> {
+/// deduplicated by equality, and one naming no `jobs` counts `missing`
+/// ([`lease_jobs`], the load test's count). A slot held by a client that
+/// writes no record is not seen. `None` when the directory or a record could
+/// not be read or parsed: unknown, never zero.
+fn occupancy(dir: &Path, missing: u32) -> Option<(usize, u32)> {
     let entries = match fs::read_dir(dir.join("holders")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Some((0, 0)),
@@ -1075,10 +1287,7 @@ fn occupancy(dir: &Path) -> Option<(usize, u32)> {
             continue;
         }
         slots += 1;
-        let lease = raw(&text, "lease").unwrap_or_else(|| holder.to_json());
-        if leases.insert(lease) {
-            jobs = jobs.saturating_add(holder.jobs.unwrap_or(0));
-        }
+        jobs = jobs.saturating_add(lease_jobs(&text, &holder, missing, &mut leases));
     }
     Some((slots, jobs))
 }
@@ -1497,10 +1706,14 @@ mod tests {
             load.reason,
             Some(WaitReason::Load {
                 load_tenths: 200,
-                cores: 12
+                cores: 12,
+                holder_jobs: 2
             })
         );
-        assert_eq!(load.reason.unwrap().describe(), "load 20.0 >= 12 cores");
+        assert_eq!(
+            load.reason.unwrap().describe(),
+            "load 20.0 >= 20 (12 cores + 4×2 holder jobs)"
+        );
         let _second = granted(b.poll_with(idle(t0 + 61_000)).unwrap());
     }
 
@@ -1871,8 +2084,9 @@ mod tests {
         .unwrap();
         assert_eq!(w.probe().cores, 4);
         let mut w = w;
+        // One holder at jobs 2 on 4 cores: the limit is 4 + 4×2 = 12.
         let at_four = Probe {
-            load1: Some(4.0),
+            load1: Some(12.0),
             now_ms: 1_000_000 + 61_000,
             ..w.probe()
         };
@@ -1880,8 +2094,9 @@ mod tests {
         assert_eq!(
             q.reason,
             Some(WaitReason::Load {
-                load_tenths: 40,
-                cores: 4
+                load_tenths: 120,
+                cores: 4,
+                holder_jobs: 2
             })
         );
         let _ = fs::remove_dir_all(&d); // best-effort: scratch
@@ -2046,6 +2261,7 @@ mod tests {
                 place: WaitPlace::Prestage,
                 cap: Some(3),
                 cores: Some(5),
+                end: None,
             },
             1,
             Some(3),
@@ -2136,7 +2352,7 @@ mod tests {
         let holder = with_jobs("sibling", 2);
         let _a = take(&dir, 1, holder.clone());
         let _b = take(&dir, 1, holder);
-        assert_eq!(occupancy(&dir), Some((2, 4)));
+        assert_eq!(occupancy(&dir, 2), Some((2, 4)));
     }
 
     #[test]
@@ -2147,20 +2363,20 @@ mod tests {
         // the two writes of `Lease::rename`.
         let after = with_jobs("after", 2);
         write_record(&lease.who[0], &record_json(&after, &lease.id)).unwrap();
-        assert_eq!(occupancy(&dir), Some((2, 2)));
+        assert_eq!(occupancy(&dir, 2), Some((2, 2)));
     }
 
     #[test]
     fn an_empty_directory_holds_nothing_and_an_unreadable_record_is_unknown() {
         let dir = scratch("empty");
         fs::create_dir_all(&dir).unwrap();
-        assert_eq!(occupancy(&dir), Some((0, 0)), "no holders/ at all");
+        assert_eq!(occupancy(&dir, 2), Some((0, 0)), "no holders/ at all");
         fs::create_dir_all(dir.join("holders")).unwrap();
-        assert_eq!(occupancy(&dir), Some((0, 0)));
+        assert_eq!(occupancy(&dir, 2), Some((0, 0)));
         record_wait(&dir, "t", 1, 0, "admitted");
         assert!(last_wait(&dir).contains("\"holders\":0,\"holder_jobs\":0"));
         fs::write(dir.join("holders/slot-0.who"), "{").unwrap();
-        assert_eq!(occupancy(&dir), None);
+        assert_eq!(occupancy(&dir, 2), None);
         record_wait(&dir, "t", 1, 0, "timeout");
         assert!(last_wait(&dir).contains("\"holders\":null,\"holder_jobs\":null"));
     }
@@ -2235,5 +2451,225 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
         drop(lease);
         assert!(!dir.exists());
+    }
+
+    // --- ADR-0022: admission counts the holders, waits end on a stall ---
+
+    /// On 6 cores, one holder at `jobs 2`, past the ramp.
+    fn one_holder_at(load1: f64, tag: &str) -> (PathBuf, Lease, Waiter) {
+        let d = scratch(tag);
+        let t0 = 30_000_000;
+        let six = |load1, now_ms| Probe {
+            load1: Some(load1),
+            cores: 6,
+            now_ms,
+            own_held: 0,
+        };
+        let mut a = Waiter::new_in(&d, Sizing::Auto, 1, with_jobs("a", 2)).unwrap();
+        let lease = granted(a.poll_with(six(1.0, t0)).unwrap());
+        let mut b = Waiter::new_in(&d, Sizing::Auto, 1, with_jobs("b", 2)).unwrap();
+        let _ = b.poll_with(six(load1, t0 + 61_000)); // the decision under test
+        (d, lease, b)
+    }
+
+    /// t01: one holder at jobs 2 measured 12.3 by itself; the limit is
+    /// 6 + 4×2 = 14, so the next job is admitted (it was refused at >= 6).
+    #[test]
+    fn a_holders_own_load_does_not_shut_the_next_slot() {
+        let d = scratch("t01-admit");
+        let t0 = 30_000_000;
+        let six = |load1, now_ms| Probe {
+            load1: Some(load1),
+            cores: 6,
+            now_ms,
+            own_held: 0,
+        };
+        let mut a = Waiter::new_in(&d, Sizing::Auto, 1, with_jobs("a", 2)).unwrap();
+        let _a = granted(a.poll_with(six(1.0, t0)).unwrap());
+        let mut b = Waiter::new_in(&d, Sizing::Auto, 1, with_jobs("b", 2)).unwrap();
+        let _b = granted(b.poll_with(six(12.3, t0 + 61_000)).unwrap());
+    }
+
+    /// t01's pair: outside load of 300 still holds the job back, and says
+    /// the limit it was held to.
+    #[test]
+    fn outside_load_still_holds_the_next_job_back() {
+        let (_d, _lease, mut b) = one_holder_at(1.0, "t01-refuse");
+        let q = waiting(
+            b.poll_with(Probe {
+                load1: Some(300.0),
+                cores: 6,
+                now_ms: 30_000_000 + 62_000,
+                own_held: 0,
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            q.reason,
+            Some(WaitReason::Load {
+                load_tenths: 3000,
+                cores: 6,
+                holder_jobs: 2
+            })
+        );
+        assert_eq!(
+            q.reason.unwrap().describe(),
+            "load 300.0 >= 14 (6 cores + 4×2 holder jobs)"
+        );
+    }
+
+    /// A held slot whose record names no jobs (an older writer) counts one
+    /// slot's width, in the load test and in the journal alike.
+    #[test]
+    fn a_record_without_jobs_counts_one_slots_width_everywhere() {
+        let d = scratch("missing-jobs");
+        let lease = take(
+            &d,
+            1,
+            Holder {
+                jobs: None,
+                ..Holder::here("t", "old")
+            },
+        );
+        // `take` sized it; strip `jobs` from the record as an older writer would.
+        let text = fs::read_to_string(&lease.who[0]).unwrap();
+        let stripped = text.replace(&format!(",\"jobs\":{}", lease_jobs_of(&text)), "");
+        assert!(!stripped.contains("\"jobs\""), "{stripped}");
+        fs::write(&lease.who[0], stripped).unwrap();
+        assert_eq!(held_jobs(&d, &[0], 2), 2);
+        assert_eq!(occupancy(&d, 2), Some((1, 2)));
+        // A held slot with no record at all counts the same in the load test.
+        fs::remove_file(&lease.who[0]).unwrap();
+        assert_eq!(held_jobs(&d, &[0], 2), 2);
+    }
+
+    fn lease_jobs_of(text: &str) -> String {
+        raw(text, "jobs").expect("a sized record names its jobs")
+    }
+
+    fn at(position: usize) -> Queue {
+        Queue {
+            position,
+            waiting: position + 1,
+            reason: Some(WaitReason::Behind { ahead: position }),
+            ..Queue::default()
+        }
+    }
+
+    /// t02's red test: at position 10, one admission every 60 s and a 90 s
+    /// budget, the line is moving, so after 400 s the wait has not stalled.
+    #[test]
+    fn a_wait_in_a_moving_line_never_stalls() {
+        let wall0: u128 = 1_800_000_000_000;
+        let mut stall = Stall::new(STALL);
+        let mut admitted = wall0;
+        for step in 0..=40u64 {
+            let elapsed = Duration::from_secs(step * 10);
+            if step > 0 && step % 6 == 0 {
+                admitted = wall0 + u128::from(step) * 10_000; // one admission a minute
+            }
+            let position = 10 - (step / 6) as usize;
+            let now = wall0 + u128::from(step) * 10_000;
+            assert!(
+                !stall.observe_at(&at(position), elapsed, now, admitted),
+                "stalled at {}s while the line moved",
+                step * 10
+            );
+        }
+    }
+
+    /// t02's pair: no admission and no change of place for the window stalls.
+    #[test]
+    fn a_line_with_no_progress_for_the_window_stalls() {
+        let wall0: u128 = 1_800_000_000_000;
+        let mut stall = Stall::new(STALL);
+        assert!(!stall.observe_at(&at(3), Duration::ZERO, wall0, wall0 - 5_000));
+        assert!(!stall.observe_at(
+            &at(3),
+            Duration::from_secs(299),
+            wall0 + 299_000,
+            wall0 - 5_000
+        ));
+        assert!(stall.observe_at(
+            &at(3),
+            Duration::from_secs(300),
+            wall0 + 300_000,
+            wall0 - 5_000
+        ));
+    }
+
+    /// Moving up one place is progress, even with no admission seen (the one
+    /// ahead left the queue).
+    #[test]
+    fn a_change_of_place_restarts_the_clock() {
+        let wall0: u128 = 1_800_000_000_000;
+        let mut stall = Stall::new(STALL);
+        stall.observe_at(&at(3), Duration::ZERO, wall0, 0);
+        assert!(!stall.observe_at(&at(2), Duration::from_secs(250), wall0 + 250_000, 0));
+        assert!(!stall.observe_at(&at(2), Duration::from_secs(500), wall0 + 500_000, 0));
+        assert!(stall.observe_at(&at(2), Duration::from_secs(550), wall0 + 550_000, 0));
+    }
+
+    /// A poll that missed the admission lock saw nothing: its zero position
+    /// is not a change of place.
+    #[test]
+    fn a_lock_miss_poll_moves_no_mark() {
+        let mut stall = Stall::new(Duration::from_secs(10));
+        stall.observe_at(&at(4), Duration::ZERO, 1_000_000, 0);
+        stall.observe_at(&Queue::default(), Duration::from_secs(5), 1_005_000, 0);
+        assert!(stall.observe_at(&at(4), Duration::from_secs(10), 1_010_000, 0));
+    }
+
+    /// A stamp ahead of now (another process's clock, a step back) counts as
+    /// an admission just now: no panic, no instant stall.
+    #[test]
+    fn a_future_admission_stamp_is_no_stall_and_no_panic() {
+        let stall = Stall::new(STALL);
+        let idle = stall.idle_at(Duration::from_secs(400), 1_000_000, 9_000_000);
+        assert_eq!(idle, Duration::ZERO);
+    }
+
+    /// The wall clock jumping forward (a laptop's sleep, a clock step) cannot
+    /// stall a waiter whose own place changed recently: that clock is
+    /// monotonic.
+    #[test]
+    fn a_forward_wall_clock_jump_does_not_stall_a_moving_waiter() {
+        let mut stall = Stall::new(STALL);
+        stall.observe_at(&at(5), Duration::ZERO, 1_000_000, 900_000);
+        stall.observe_at(&at(4), Duration::from_secs(60), 1_060_000, 900_000);
+        // An hour of wall time, 30 s of monotonic time.
+        assert!(!stall.observe_at(&at(4), Duration::from_secs(90), 4_690_000, 900_000));
+    }
+
+    #[test]
+    fn the_stall_window_is_three_hundred_seconds_unless_the_seam_sets_it() {
+        assert_eq!(stall_window_from(None), (STALL, None));
+        assert_eq!(stall_window_from(Some("5")), (Duration::from_secs(5), None));
+        for bad in ["", "0", "-1", "5m"] {
+            let (window, warning) = stall_window_from(Some(bad));
+            assert_eq!(window, STALL, "{bad:?}");
+            assert!(warning.is_some_and(|w| w.contains(STALL_ENV)), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_wait_that_ended_says_why() {
+        let dir = scratch("end");
+        fs::create_dir_all(&dir).unwrap();
+        record_wait_named(
+            &dir,
+            "t",
+            WaitContext {
+                end: Some(WaitEnd::Stalled),
+                ..WaitContext::default()
+            },
+            1,
+            None,
+            300_000,
+            "timeout",
+        );
+        assert!(last_wait(&dir).contains("\"outcome\":\"timeout\",\"end\":\"stalled\""));
+        record_wait(&dir, "t", 1, 0, "admitted");
+        assert!(!last_wait(&dir).contains("\"end\""));
     }
 }
