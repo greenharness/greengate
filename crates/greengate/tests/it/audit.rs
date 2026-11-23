@@ -294,6 +294,50 @@ fn pip_audit_sentence_decides() {
     assert_eq!(code, 0, "{out}");
 }
 
+/// A pip-compiled requirements.txt (every pin hashed) is audited without a
+/// resolve, and the packages pip-audit skips are named. Resolving it on the
+/// host failed on a pin with no wheel there (torch 2.14.0+cpu on Intel
+/// macOS), so the file was reported NOT checked on every push (decisions
+/// f108). A file without hashes still resolves.
+#[test]
+fn a_hashed_requirements_file_is_audited_without_a_resolve() {
+    let r = repo();
+    let hashed =
+        "six==1.16.0 \\\n    --hash=sha256:aaaa\ntorch==2.14.0+cpu \\\n    --hash=sha256:bbbb\n";
+    std::fs::write(r.path("requirements.txt"), hashed).expect("write");
+    let shim_body = r#"case " $* " in
+  *" --no-deps --disable-pip "*) ;;
+  *) echo "ERROR: resolved: $*" >&2; exit 1 ;;
+esac
+echo 'No known vulnerabilities found'
+echo 'Name  Skip Reason'
+echo '----- -----------'
+echo 'torch Dependency not found on PyPI and could not be audited: torch (2.14.0+cpu)'
+exit 0"#;
+    shim(&r, "pip-audit", shim_body);
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("resolved:"), "{out}");
+    assert!(
+        out.contains("1 private/non-PyPI package skipped (torch)"),
+        "{out}"
+    );
+
+    // Every pin skipped: nothing was audited, which is never clean.
+    std::fs::write(
+        r.path("requirements.txt"),
+        "torch==2.14.0+cpu \\\n    --hash=sha256:bbbb\n",
+    )
+    .expect("write");
+    let (_, out) = push_check(&r, "pre-push-audit-python", "refs/heads/feat/x");
+    assert!(out.contains("NOT checked"), "{out}");
+
+    // `==` pins without hashes name the top level only: they resolve.
+    std::fs::write(r.path("requirements.txt"), "six==1.16.0\n").expect("write");
+    let (_, out) = push_check(&r, "pre-push-audit-python", "refs/heads/feat/x");
+    assert!(out.contains("resolved: -r requirements.txt"), "{out}");
+}
+
 /// A uv project has no `requirements.txt` — it has a venv. Before this, the
 /// check looked only for the file, found none, and reported "the audit did
 /// NOT run" on every push forever; a whole fleet of Python repositories was
