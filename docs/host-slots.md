@@ -21,8 +21,57 @@ why.
 | `admission` | the one admission lock. Every admission decision is made under it, taken with `LOCK_NB` and retried inside the caller's own deadline, so a stopped holder of it never holds a hook past its own deadline. |
 | `admitted-at` | the time of the last admission, in ms since the epoch, for the ramp. |
 | `queue/<nanos>-<pid>-<n>` | a waiter's ticket, flocked for as long as it waits. It is created hidden (`.new-…`), locked, then renamed into place, so a visible ticket is never unlocked. A visible ticket whose lock is free belongs to a waiter that died, and is removed. |
-| `holders/slot-N.who` | who holds slot N, as a JSON object (`pid`, `tool`, `repo`, `command`, `session`, `started_ms`, and `jobs` when the writer knows it). It is written after the slot is won and removed before it is released. A reader trusts it only while `pid` is alive. A hidden `.slot-N.who.<pid>.tmp` beside it is a rename in flight; when a slot is granted, those whose `pid` is dead are removed, as dead queue tickets are. It lives in a subdirectory so an old client counting `slot-*` files never mistakes it for a slot. |
-| `waits.jsonl` | one line per acquisition: `at_ms`, `tool`, `weight`, `waited_ms`, `load1`, `outcome` (`admitted`, `deferred`, `unqueued`, `timeout`, `handed`), `pid`, and `jobs` when the writer knows it. Lines written by greengate's checks also carry `name` (the check), `session` when one is known, and `"rehearsal":true` / `"prestage":true` inside a rehearsal snapshot / land's pre-stage. |
+| `holders/slot-N.who` | who holds slot N, as a JSON object (`lease`, `pid`, `tool`, `repo`, `command`, `session`, `started_ms`, and `jobs` when the writer knows it). `lease` (`<pid>-<n>`, from 4.13) is the same in every record of one lease and survives a rename, so a reader counts a lease once. It is written after the slot is won, through a hidden temp file and a rename and removed before it is released. A reader trusts it only while `pid` is alive. A hidden `.slot-N.who.<pid>.tmp` beside it is a rename in flight; when a slot is granted, those whose `pid` is dead are removed, as dead queue tickets are. It lives in a subdirectory so an old client counting `slot-*` files never mistakes it for a slot. |
+| `waits.jsonl` | one line per acquisition and, from 4.13, one per released lease; see [The journal](#the-journal). |
+
+## The journal
+
+`waits.jsonl` is appended by every writer, one line per write.
+
+**Wait lines**, one per acquisition: `at_ms`, `tool`, `pid`, `weight`,
+`cores`, `waited_ms`, `load1`, `outcome` (`admitted`, `deferred`,
+`unqueued`, `timeout`, `handed`), `jobs` and `cap` when the writer knows
+them. Lines written by greengate's checks also carry `name` (the check),
+`session` when one is known, and `"rehearsal":true` / `"prestage":true`
+inside a rehearsal snapshot / land's pre-stage.
+
+From 4.13 every wait line also carries `holders` (slots held when the line
+was written) and `holder_jobs` (the `jobs` of the distinct leases holding
+them). They are read from the live holder records without a lock: an
+observation, not an atomic count. Callers write the line after the grant, so
+an `admitted` or `handed` line counts its own lease (subtract its `weight`
+and `jobs`), while `timeout`, `unqueued` and `deferred` lines count only the
+others. Both are `null` when a record could not be read. A line without them
+comes from an older writer: its occupancy is unknown, not 0.
+
+**Release lines**, one per lease when it is dropped, from 4.13: `at_ms`,
+`tool`, `pid`, `session`, `command` and `jobs` (the grant's), `weight`,
+`granted_ms` (wall clock), `held_ms` (monotonic, grant to drop) and
+`"outcome":"released"`. A lease greengate hands from gate to gate leaves one
+release line for its `admitted` line and all its `handed` lines. A holder
+that exits without unwinding (a kill, or `land` interrupted by a signal)
+leaves none, so an `admitted` line that carries `holders` and has no release
+is an interrupted holder, not a lost write. A release line is appended after
+the slot is freed, so a successor's line can come before it: order by
+`at_ms`, not by line.
+
+Wait lines only (a release line has no `waited_ms`; `-R` with `fromjson?`
+skips a half-appended last line):
+
+```sh
+jq -cR 'fromjson? | select(has("waited_ms"))' /tmp/greenharness-slots-$(id -u)/waits.jsonl
+```
+
+Each release with the first `admitted` line of the same `pid` and `tool` at
+or after its `granted_ms`:
+
+```sh
+jq -sR '[split("\n")[] | fromjson? ] | sort_by(.at_ms) as $rows
+  | $rows[] | select(.outcome == "released") as $r
+  | {release: $r, admitted: ([$rows[] | select(.outcome == "admitted"
+      and .pid == $r.pid and .tool == $r.tool and .at_ms >= $r.granted_ms)][0])}' \
+  /tmp/greenharness-slots-$(id -u)/waits.jsonl
+```
 
 ## Admission
 
