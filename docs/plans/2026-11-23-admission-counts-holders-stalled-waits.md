@@ -176,7 +176,7 @@ through a new `WaitContext::end` field. relais builds `WaitContext` with
 ### greenbelay (`heavy-build-unqueued`)
 
 `slot run --now` counts as unqueued, as `--on-timeout=run` did. A
-`--on-timeout=run` clause is still recognised: under greengate 4.14 it runs
+`--on-timeout=run` clause is still recognised: under greengate 5.0 it runs
 nothing, so it is no longer advised as unqueued, and the advice names
 `--now`.
 
@@ -201,13 +201,13 @@ nothing, so it is no longer advised as unqueued, and the advice names
   `hooks.host-concurrency` (ADR-0021) and `hooks.busy-policy` (ADR-0013), naming
   ADR-0009's lineage, and the head of `hooks.gates-before-connection`
   (ADR-0018) to add the hour-long deferral completion, taking effect with the
-  greengate 4.14.0 install; `aval heads --write`:
+  greengate 5.0.0 install; `aval heads --write`:
   `adr/0022-waits-end-on-a-stalled-line.md`, `adr/HEADS.md`,
   `docs/host-slots.md`, `CHANGELOG.md`
-- [ ] Phase 4 — release greengate 4.14.0 (crates.io included) and install it
+- [ ] Phase 4 — release greengate 5.0.0 (crates.io included) and install it
   on this machine, only after t14's 24-hour window has closed and t14 is
   recorded: `Cargo.toml`, `CHANGELOG.md`
-- [ ] Phase 5 — relais: bump `greenharness-slots = "4.14"`, `Stall` in
+- [ ] Phase 5 — relais: bump `greenharness-slots = "5"`, `Stall` in
   `take()`, `admission_overrun`, tests (a moving line outlives the admission
   budget, and the run is not ended after the grant; a stalled line blocks at
   300 s), a relais record replacing `execution.resource-budgets` (ADR-0010 row `admission_wait_seconds`: a moving line outlives it, overrun charged to the total only) with `aval heads --check`, pointer plan, release and install:
@@ -221,7 +221,7 @@ nothing, so it is no longer advised as unqueued, and the advice names
   `docs/rules.md`, `CHANGELOG.md`
 
 Phases 1–3 are one amont PR, merged now; no amont release is cut from main until t14 closes. Phase 4 waits for t14 (due
-2026-11-24). Phases 5 and 6 need the crate on crates.io and greengate 4.14
+2026-11-24). Phases 5 and 6 need the crate on crates.io and greengate 5.0
 installed.
 
 ## Decision log
@@ -250,7 +250,7 @@ installed.
   says both. `WaitEnd` is new, so `#[non_exhaustive]` on it breaks nothing.
 - 2026-11-23 — A fleet grep finds one `--on-timeout` caller outside amont:
   greenbelay's `heavy-build-unqueued` rule, which Phase 6 migrates.
-- 2026-11-23 — The install waits for t14: a 4.14 writer inside t14's 24-hour
+- 2026-11-23 — The install waits for t14: a 5.0 writer inside t14's 24-hour
   window would change the admissions and outcomes that t14 measures.
 - 2026-11-23 — Built differently from the Behaviour text, after the
   implementation review: the crate owns the one wait loop, `wait_in_line(waiter,
@@ -309,16 +309,24 @@ installed.
 - Phase 3: `aval heads --check` exits 0. `aval resolve` names ADR-0022 for
   `hooks.busy-policy`, `hooks.host-concurrency` and
   `hooks.gates-before-connection`.
-- Phase 4: `greengate --version` reads 4.14.0, and crates.io lists it.
+- Phase 4: `greengate --version` reads 5.0.0, and crates.io lists it.
 - Phase 5: a relais command in a moving line past `admission_wait_seconds` is
   granted, and the run is not blocked.
 - Phase 6: `slot run --now` triggers `heavy-build-unqueued`, and the advice
   names `--now`.
-- After the 4.14 install, count the journal at 24 h and 7 d against the
+- After the 5.0 install, count the journal at 24 h and 7 d against the
   baseline since 2026-11-21 18:00: hook unqueued 34, hook defer 103, `slot run`
   timeouts 50, relais deferred 21. The targets are 0 unqueued rows after a wait
   (outside `now`) and 0 runs blocked `admission_wait_exhausted` after a grant.
   Roll back if the hook deferral rate passes 2× the baseline. This count is
   t08's workday measure, and t08 is told so.
+
+## Implementation review
+
+- implementation-review: approve-with-changes, three passes (round 1, delta, fresh round 1). It fixed the flags, the `&mut` parameter, names, the discard, the exhaustive matches, the seam, the reset test and the plan text. About 497k tokens, 31 min.
+- lang:rust: approve. It fixed the stall window shown as 0 s, the typed sources, `WaitPlan` and the shared loop. Deliberate: load tenths (a pre-existing line). Carried: the second `clock()` read and the scratch cleanup. About 173k tokens, 24 min.
+- unix: approve. It fixed the release, now 5.0.0 under `cli.compat.interface-is-public`, exit 74 and the deprecation text. About 146k tokens, 13 min.
+- backend: approve. It fixed the skip message, the pre-stage-only completion, 3 polls and the sibling test. Carried: the exit-74 path has no test. About 137k tokens, 30 min.
+- architect: approve. The crate owns `wait_in_line`, and the environment is read at the edge. Carried to Phase 5: relais calls the loop with its own bounds and reads the variable itself. About 120k tokens, 30 min.
 
 <!-- panel: repos=amont,relais,greenbelay adds=contract reviewers=architect,backend,lang:rust,po,tui,unix,codex body-sha=7220cf1a32a9 -->
