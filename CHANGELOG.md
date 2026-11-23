@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v4.13.0
+
 ### Added
 
 - The host-slot journal, `waits.jsonl`, now says how busy the host was and

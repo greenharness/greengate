@@ -2178,7 +2178,7 @@ mod tests {
         assert_eq!(raw(&text, "lease"), Some(lease.id.clone()));
         let holder = Holder::from_json(&text).unwrap();
         assert!(
-            !holder.to_json().contains("lease"),
+            !holder.to_json().contains("\"lease\""),
             "slots --json unchanged"
         );
         lease.rename(&Holder::here("t", "renamed")).unwrap();
