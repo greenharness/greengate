@@ -1122,23 +1122,27 @@ fn live_tickets(dir: &Path, mine: Option<&Path>) -> io::Result<Vec<PathBuf>> {
 /// removed: the hidden `.slot-N.who.<pid>.tmp` a write leaves when its
 /// process dies between the write and the rename, and the `slot-N.who` record
 /// of a holder that exited without dropping its lease (a kill, or
-/// `process::exit` on a signal). Left in place, such a record would count as
-/// a holder again once its pid is reused. Called under the admission lock,
-/// so no grant writes a record meanwhile; a dead holder's slot is free, so no
-/// rename does either.
+/// `process::exit` on a signal). Such a record is told by its slot's flock
+/// being free, not by its pid: a reused pid, or one from another pid
+/// namespace, says nothing about the slot, and the free flock proves the
+/// holder is gone. Left in place, it would count as a holder again. Called
+/// under the admission lock, so no grant writes a record meanwhile, and a
+/// lease renames only the slots it holds.
 fn remove_dead_holder_files(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir.join("holders")) else {
         return;
     };
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("slot-") && name.ends_with(".who") {
-            let pid = fs::read_to_string(entry.path())
-                .ok()
-                .and_then(|text| raw(&text, "pid"))
-                .and_then(|pid| pid.parse::<u32>().ok());
-            if pid.is_some_and(|pid| !platform::alive(pid)) {
-                let _ = fs::remove_file(entry.path()); // best-effort: a dead holder's record
+        if let Some(slot) = name
+            .strip_prefix("slot-")
+            .and_then(|rest| rest.strip_suffix(".who"))
+            .filter(|index| index.parse::<u32>().is_ok())
+        {
+            let lock = dir.join(format!("slot-{slot}"));
+            // Only a slot file that exists is probed: probing creates it.
+            if lock.exists() && matches!(platform::try_lock(&lock), Ok(Some(_))) {
+                let _ = fs::remove_file(entry.path()); // best-effort: a gone holder's record
             }
             continue;
         }
@@ -1959,24 +1963,20 @@ mod tests {
     /// A holder that exited without dropping its lease leaves its record; the
     /// next grant removes it, so a reused pid never makes it count again.
     #[test]
-    fn a_dead_holders_record_is_removed_at_the_next_grant() {
+    fn a_gone_holders_record_is_removed_at_the_next_grant() {
         let dir = scratch("dead-record");
         let mut first = Waiter::new_in(&dir, Sizing::Fixed(3), 1, Holder::here("t", "a")).unwrap();
         let held = granted(first.poll_with(idle(0)).unwrap());
-        let dead = Holder {
-            pid: i32::MAX as u32,
-            tool: "t".into(),
-            jobs: Some(2),
-            ..Holder::default()
-        };
-        // Slot 2 is free: its holder died with its lease held. The grant
-        // below takes slot 1, so only the sweep can remove this record.
+        // Slot 2 is free: its holder died with its lease held, and its pid
+        // is in use again (this process's), so only the free flock tells.
+        // The grant below takes slot 1, so only the sweep removes this.
+        let reused = with_jobs("gone", 2);
         let stale = dir.join("holders/slot-2.who");
-        fs::write(&stale, dead.to_json_with(Some("dead-0"))).unwrap();
+        fs::write(&stale, reused.to_json_with(Some("gone-0"))).unwrap();
         let mut second = Waiter::new_in(&dir, Sizing::Fixed(3), 1, Holder::here("t", "b")).unwrap();
         let also = granted(second.poll_with(idle(0)).unwrap());
         assert_eq!(also.who[0], dir.join("holders/slot-1.who"));
-        assert!(!stale.exists(), "the dead holder's record is gone");
+        assert!(!stale.exists(), "the gone holder's record is removed");
         assert!(held.who[0].exists(), "a live holder's record stays");
     }
 
