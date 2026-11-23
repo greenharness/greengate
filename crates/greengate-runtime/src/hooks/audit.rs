@@ -1219,18 +1219,50 @@ fn python_run(ctx: &crate::registry::Ctx) -> Ran {
     // A requirements.txt is the production list by convention, audited in
     // its own directory — wherever the repository keeps one (amont#305).
     if !lockfile_dirs("requirements.txt").is_empty() {
-        let argv = vec![
-            common::program("pip-audit"),
-            "-r".into(),
-            "requirements.txt".into(),
-        ];
+        let root_path = std::path::PathBuf::from(&root);
         let Some(merged) = audit_each_dir(
             settings,
             "audit-python",
             "requirements.txt",
-            |_| Some(argv.clone()),
+            |dir| {
+                let mut argv = vec![
+                    common::program("pip-audit"),
+                    "-r".into(),
+                    "requirements.txt".into(),
+                ];
+                // A fully hashed file is a closed set: nothing to resolve,
+                // and resolving it on this host can fail on a pin with no
+                // wheel here (torch 2.14.0+cpu on Intel macOS, decisions f108).
+                if hashed_pin_count(dir).is_some() {
+                    argv.extend(["--no-deps".into(), "--disable-pip".into()]);
+                }
+                Some(argv)
+            },
             read_pip_audit,
-            |_, report, _| report,
+            |dir, report, out| {
+                let skipped = pip_skipped_names(out);
+                if skipped.is_empty() {
+                    return report;
+                }
+                let rel = dir
+                    .strip_prefix(&root_path)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let prefix = if rel.is_empty() {
+                    String::new()
+                } else {
+                    format!("{rel}/requirements.txt: ")
+                };
+                let names: Vec<&str> = skipped.iter().map(String::as_str).collect();
+                common::warn(&skipped_line(&prefix, &names));
+                // Every pin skipped: nothing was audited, which is not clean.
+                let all_skipped = hashed_pin_count(dir).is_some_and(|n| skipped.len() >= n);
+                if all_skipped && !matches!(report, Report::Vulnerabilities(_)) {
+                    Report::CouldNotCheck
+                } else {
+                    report
+                }
+            },
         ) else {
             return Ran::Unavailable;
         };
@@ -1624,6 +1656,85 @@ fn filter_export(raw: &str, pypi: &std::collections::BTreeSet<String>) -> Export
     pins
 }
 
+/// The number of requirements in `dir/requirements.txt` when every one is an
+/// exact `name==version` pin carrying a `--hash`, else None.
+///
+/// Hashes are pip-compile's signal (and pip's `--require-hashes` mode): every
+/// dependency is listed, so there is nothing to resolve. A file of `==` pins
+/// without hashes lists its top-level packages only (homelab's rag-api,
+/// websearch) and must still resolve; so must any option line (`-r`, `-c`,
+/// `-e`, an index URL), a URL or path requirement, a pin with an environment
+/// marker, and an empty file.
+fn hashed_pin_count(dir: &std::path::Path) -> Option<usize> {
+    let text = std::fs::read_to_string(dir.join("requirements.txt")).ok()?;
+    hashed_pins_in(&text)
+}
+
+fn hashed_pins_in(text: &str) -> Option<usize> {
+    let mut logical = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                current.push_str(head);
+                current.push(' ');
+            }
+            None => {
+                current.push_str(line);
+                logical.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    logical.push(current);
+    let mut count = 0;
+    for line in &logical {
+        // pip reads `#` as a comment only at the start or after whitespace.
+        let line = match line.find(" #") {
+            Some(cut) => &line[..cut],
+            None => line.as_str(),
+        };
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('-') {
+            return None;
+        }
+        let (spec, options) = line.split_at(line.find(" --").unwrap_or(line.len()));
+        let hashed = options
+            .split_whitespace()
+            .any(|option| option.starts_with("--hash"));
+        // pip-audit evaluates a marker against this host and drops a pin it
+        // does not match, silently: `jinja2==2.10 ; sys_platform == 'linux'`
+        // vanished from a Mac's report. A file with markers resolves.
+        if !hashed || spec.contains(';') || exact_pin(spec).is_none() {
+            return None;
+        }
+        count += 1;
+    }
+    (count > 0).then_some(count)
+}
+
+/// The names in pip-audit's `Name  Skip Reason` table: packages it could not
+/// audit (not on PyPI, or a local version such as `2.14.0+cpu`).
+fn pip_skipped_names(out: &str) -> Vec<String> {
+    let mut lines = out.lines().map(str::trim);
+    let mut names = Vec::new();
+    while let Some(line) = lines.next() {
+        if !(line.starts_with("Name") && line.contains("Skip Reason")) {
+            continue;
+        }
+        let rows = lines
+            .by_ref()
+            .skip_while(|l| l.starts_with('-'))
+            .take_while(|l| !l.is_empty());
+        names.extend(rows.filter_map(|row| row.split_whitespace().next().map(normalise)));
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
         format!("{count} {noun}")
@@ -1633,13 +1744,15 @@ fn plural(count: usize, noun: &str) -> String {
 }
 
 /// "N private/non-PyPI package(s) skipped (a, b, c +K more)", with as many
-/// names as keep the line within the columns.
+/// names as keep the line within the columns, and always at least one: a
+/// long directory prefix once left "(+1 more)" naming nothing (f108).
 fn skipped_line(prefix: &str, names: &[&str]) -> String {
     let head = format!(
         "audit-python: {prefix}{} skipped",
         plural(names.len(), "private/non-PyPI package")
     );
-    for shown in (0..=NAMES_SHOWN.min(names.len())).rev() {
+    let fewest = names.len().min(1);
+    for shown in (fewest..=NAMES_SHOWN.min(names.len())).rev() {
         let list: Vec<&str> = names.iter().take(shown).copied().collect();
         let more = names.len() - shown;
         let detail = match (list.is_empty(), more) {
@@ -1649,7 +1762,7 @@ fn skipped_line(prefix: &str, names: &[&str]) -> String {
             (false, _) => format!(" ({} +{more} more)", list.join(", ")),
         };
         let line = format!("{head}{detail}");
-        if line.chars().count() <= WARNING_COLUMNS || shown == 0 {
+        if line.chars().count() <= WARNING_COLUMNS || shown == fewest {
             return line;
         }
     }
@@ -3032,6 +3145,73 @@ requests @ https://example.com/r.whl
         assert!(pins.unclassified.contains("requests"));
     }
 
+    /// pip-compile's shape, as homelab's laya-decisions has it (f108).
+    const HASHED: &str = "\
+# This file was autogenerated by uv via the following command:
+#    ./compile-requirements.sh
+anyio==4.15.1 \\
+    --hash=sha256:6152 \\
+    --hash=sha256:9f28
+    # via
+    #   starlette
+idna==3.7 \\
+    --hash=sha256:aaaa
+torch==2.14.0+cpu \\
+    --hash=sha256:bbbb
+    # via -r requirements.in
+";
+
+    #[test]
+    fn only_a_fully_hashed_file_skips_the_resolve() {
+        assert_eq!(hashed_pins_in(HASHED), Some(3));
+        // Top-level `==` pins without hashes: their dependencies are unlisted.
+        assert_eq!(hashed_pins_in("requests==2.0.0\nidna==3.7\n"), None);
+        let one_unhashed = format!("{HASHED}idna==3.7\n");
+        assert_eq!(hashed_pins_in(&one_unhashed), None);
+        let ranged = "requests>=2.0 \\\n    --hash=sha256:cccc\n";
+        assert_eq!(hashed_pins_in(ranged), None);
+        let included = format!("-r requirements-upload.txt\n{HASHED}");
+        assert_eq!(hashed_pins_in(&included), None);
+        let indexed = format!("--extra-index-url https://example.com\n{HASHED}");
+        assert_eq!(hashed_pins_in(&indexed), None);
+        // A marker pin off this host would be dropped without a word.
+        let marked =
+            format!("{HASHED}pywin32==306 ; sys_platform == 'win32' \\\n    --hash=sha256:dddd\n");
+        assert_eq!(hashed_pins_in(&marked), None);
+        assert_eq!(hashed_pins_in("# fixture\n"), None);
+        assert_eq!(hashed_pins_in(""), None);
+    }
+
+    /// pip-audit 2.10.1's output on laya-decisions with `--no-deps
+    /// --disable-pip`, cut to two rows.
+    const SKIPPING: &str = "\
+Found 2 known vulnerabilities in 1 package
+Name      Version ID              Fix Versions
+--------- ------- --------------- ------------
+starlette 0.41.3  PYSEC-2026-1941 0.47.2
+starlette 0.41.3  PYSEC-2026-1942 0.49.1
+
+Name  Skip Reason
+----- -------------------------------------------------------------------------
+torch Dependency not found on PyPI and could not be audited: torch (2.14.0+cpu)
+";
+
+    #[test]
+    fn the_skip_table_names_its_packages_and_is_no_finding() {
+        assert_eq!(pip_skipped_names(SKIPPING), vec!["torch".to_string()]);
+        assert_eq!(
+            pip_vulnerable_rows(SKIPPING),
+            vec![
+                ("starlette".to_string(), "PYSEC-2026-1941".to_string()),
+                ("starlette".to_string(), "PYSEC-2026-1942".to_string()),
+            ]
+        );
+        assert!(pip_rows_all_named(SKIPPING));
+        let clean = "No known vulnerabilities found\nName  Skip Reason\n----- ----\ntorch Dependency not found on PyPI\n";
+        assert_eq!(pip_skipped_names(clean), vec!["torch".to_string()]);
+        assert!(pip_skipped_names("No known vulnerabilities found\n").is_empty());
+    }
+
     #[test]
     fn the_skipped_line_names_three_and_counts_the_rest() {
         let names: Vec<String> = ["a", "b", "c", "d", "e"].map(String::from).into();
@@ -3043,6 +3223,11 @@ requests @ https://example.com/r.whl
         assert_eq!(
             skipped_line("", &refs[..1]),
             "audit-python: 1 private/non-PyPI package skipped (a)"
+        );
+        let long = "services/laya-decisions/requirements.txt: ";
+        assert_eq!(
+            skipped_line(long, &["torch", "triton"]),
+            format!("audit-python: {long}2 private/non-PyPI packages skipped (torch +1 more)")
         );
     }
 
