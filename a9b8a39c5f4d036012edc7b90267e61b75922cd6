@@ -1,0 +1,19 @@
+greengate-provenance-v1
+commit a9b8a39c5f4d036012edc7b90267e61b75922cd6
+tree 6e417d90f8e6f5af36fc04f7fbcc84103f67345f
+canon 5be403e9a39fecd51648bf615c4e080fd7a7701e
+patch fe069657e23ac2604f26e256829537d2af3245c3
+plan docs/plans/2026-11-23-slot-journal-records-holders.md f067a16b92574e27434b791c6ba4231c4f649a1bc4e8d07d029589dcb73c6b51
+review reviewed f3af788a15ff5ca1ffe1039546da31379ed0c2c7188c7ac6f9289746297c5e78
+code-review backend reviewed f3af788a15ff5ca1ffe1039546da31379ed0c2c7188c7ac6f9289746297c5e78
+code-review lang:rust reviewed f3af788a15ff5ca1ffe1039546da31379ed0c2c7188c7ac6f9289746297c5e78
+code-review unix carried afa8a5cd1a3baf0a7a6bdf593fd3c8af65bcc9857e3a55326634c05f1cee1f94
+preview not-required
+producer greenbelay 6.8.0
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg7UOvJ8myo4dhW907VFty7T/bUV
+RFQerK+MWJ4bjChwcAAAAUZ3JlZW5nYXRlLXByb3ZlbmFuY2UAAAAAAAAABnNoYTUxMgAA
+AFMAAAALc3NoLWVkMjU1MTkAAABAW9JzIPOwKB6E+hOcVQUmTuWMV0sEkSgtRWfgVB+bdY
+7LQYi55RVFV7ps5sp9NNh48aWu2WBKKCScHqgkOXwABQ==
+-----END SSH SIGNATURE-----
