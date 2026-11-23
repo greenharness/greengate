@@ -14,7 +14,8 @@
 //! admitted-at             when the last holder was admitted, for the ramp
 //! queue/<nanos>-<pid>     a waiter's ticket, flocked for as long as it waits
 //! holders/slot-N.who      who holds slot N (JSON), while it does
-//! waits.jsonl             one line per acquisition, for measurement
+//! waits.jsonl             one line per acquisition, and one per released
+//!                         lease, for measurement
 //! ```
 //!
 //! Only the process that took a slot holds it: every descriptor here is
@@ -371,11 +372,19 @@ impl Holder {
     /// The record as one JSON object: what `holders/slot-N.who` holds, and
     /// what `amont slots --json` lists.
     pub fn to_json(&self) -> String {
+        self.to_json_with(None)
+    }
+
+    /// [`Holder::to_json`], with `lease` first when given: the record a
+    /// [`Lease`] writes. The id stays off `Holder` itself, so its public
+    /// shape, its equality and `amont slots --json` do not change.
+    fn to_json_with(&self, lease: Option<&str>) -> String {
+        let lease = lease.map_or(String::new(), |l| format!("\"lease\":\"{}\",", escape(l)));
         let jobs = self
             .jobs
             .map_or(String::new(), |j| format!(",\"jobs\":{j}"));
         format!(
-            "{{\"pid\":{},\"tool\":\"{}\",\"repo\":\"{}\",\"command\":\"{}\",\"session\":\"{}\",\"started_ms\":{}{jobs}}}",
+            "{{{lease}\"pid\":{},\"tool\":\"{}\",\"repo\":\"{}\",\"command\":\"{}\",\"session\":\"{}\",\"started_ms\":{}{jobs}}}",
             self.pid,
             escape(&self.tool),
             escape(&self.repo),
@@ -423,6 +432,65 @@ fn session_from(get: impl Fn(&str) -> Option<String>) -> String {
 pub struct Lease {
     files: Vec<File>,
     who: Vec<PathBuf>,
+    /// `<pid>-<seq>`: written into every holder record of this lease, so a
+    /// reader of `holders/` tells two leases apart even when their records
+    /// are otherwise equal, and sees one lease once while it is renamed.
+    id: String,
+    /// Boxed: it carries the whole holder, and `Poll::Granted` holds a lease.
+    release: Box<Release>,
+}
+
+/// What the release row of a [`Lease`] says: who took it, and when.
+#[derive(Debug)]
+struct Release {
+    dir: PathBuf,
+    /// The holder at the grant: its tool, session, command and jobs.
+    holder: Holder,
+    /// Monotonic, for `held_ms`: a wall-clock step never makes it negative.
+    granted: Instant,
+    /// Wall clock, for pairing the release with its `admitted` row.
+    granted_ms: u128,
+}
+
+/// Lease ids are unique within a process; the pid makes them unique on the
+/// host.
+static LEASE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// A holder record as written to `holders/slot-N.who`: the holder's JSON with
+/// its lease id first.
+fn record_json(holder: &Holder, lease: &str) -> String {
+    holder.to_json_with(Some(lease))
+}
+
+/// Write `json` to the holder record `path` through a hidden temp file and a
+/// rename, so a concurrent reader sees the old record or the new one, never a
+/// truncated one. The error names the path that failed.
+fn write_record(path: &Path, json: &str) -> io::Result<()> {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Err(io::Error::other(format!(
+            "not a record path: {}",
+            path.display()
+        )));
+    };
+    let temp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    fs::write(&temp, json).map_err(|error| {
+        let _ = fs::remove_file(&temp); // best-effort: a partly written temp of our own
+        io::Error::new(
+            error.kind(),
+            format!("cannot write {}: {error}", temp.display()),
+        )
+    })?;
+    fs::rename(&temp, path).map_err(|error| {
+        let _ = fs::remove_file(&temp); // best-effort: cleanup of our own temp file
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot rename {} over {}: {error}",
+                temp.display(),
+                path.display()
+            ),
+        )
+    })
 }
 
 impl Lease {
@@ -446,9 +514,6 @@ impl Lease {
         // leave the lease's other records naming the old holder.
         let mut first_error: Option<io::Error> = None;
         for path in &self.who {
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
             let mut record = renamed.clone();
             if record.jobs.is_none() {
                 record.jobs = fs::read_to_string(path)
@@ -456,28 +521,9 @@ impl Lease {
                     .and_then(|text| Holder::from_json(&text))
                     .and_then(|old| old.jobs);
             }
-            let json = record.to_json();
-            let temp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-            let written = fs::write(&temp, &json).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("cannot write {}: {error}", temp.display()),
-                )
-            });
-            let renamed_over = written.and_then(|()| {
-                fs::rename(&temp, path).map_err(|error| {
-                    let _ = fs::remove_file(&temp); // best-effort: cleanup of our own temp file
-                    io::Error::new(
-                        error.kind(),
-                        format!(
-                            "cannot rename {} over {}: {error}",
-                            temp.display(),
-                            path.display()
-                        ),
-                    )
-                })
-            });
-            if let Err(error) = renamed_over {
+            // The lease id comes from the lease, never from the old file: a
+            // record that cannot be read must not lose it.
+            if let Err(error) = write_record(path, &record_json(&record, &self.id)) {
                 first_error.get_or_insert(error);
             }
         }
@@ -488,7 +534,10 @@ impl Lease {
 impl Drop for Lease {
     /// The holder record first, then the locks, then the count: a releasing
     /// holder never deletes its successor's record, and the count never reads
-    /// zero while this process still holds a flock.
+    /// zero while this process still holds a flock. Then one `released` row
+    /// in `waits.jsonl`, best-effort. A process that exits without unwinding
+    /// (`process::exit`, a kill) leaves no such row; the kernel frees its
+    /// flocks.
     fn drop(&mut self) {
         for w in &self.who {
             let _ = fs::remove_file(w); // best-effort: a stale record is ignored by pid
@@ -496,6 +545,35 @@ impl Drop for Lease {
         let n = self.files.len();
         self.files.clear();
         HELD.fetch_sub(n, Ordering::SeqCst);
+        self.release.record(n);
+    }
+}
+
+impl Release {
+    /// `{"at_ms":…,"tool":…,"pid":…,"session":…,"command":…,"weight":…,
+    /// "jobs":…,"granted_ms":…,"held_ms":…,"outcome":"released"}`: one line
+    /// per lease, however many gates it was handed across. It has no
+    /// `waited_ms`, so a reader of waits selects `has("waited_ms")`.
+    fn record(&self, weight: usize) {
+        let holder = &self.holder;
+        let session = if holder.session.is_empty() {
+            String::new()
+        } else {
+            format!(",\"session\":\"{}\"", escape(&holder.session))
+        };
+        let jobs = holder
+            .jobs
+            .map_or(String::new(), |j| format!(",\"jobs\":{j}"));
+        let line = format!(
+            "{{\"at_ms\":{},\"tool\":\"{}\",\"pid\":{}{session},\"command\":\"{}\",\"weight\":{weight}{jobs},\"granted_ms\":{},\"held_ms\":{},\"outcome\":\"released\"}}\n",
+            now_ms(),
+            escape(&holder.tool),
+            std::process::id(),
+            escape(&holder.command),
+            self.granted_ms,
+            self.granted.elapsed().as_millis(),
+        );
+        append_journal(&self.dir, &line);
     }
 }
 
@@ -720,19 +798,37 @@ impl Waiter {
                 reason: Some(reason),
             }));
         }
+        let id = format!(
+            "{}-{}",
+            std::process::id(),
+            LEASE_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let record = record_json(&self.holder, &id);
         let mut files = Vec::new();
         let mut who = Vec::new();
         for (index, file) in free.into_iter().take(weight) {
             let path = self.dir.join("holders").join(format!("slot-{index}.who"));
-            let _ = fs::write(&path, self.holder.to_json()); // best-effort: a missing record shows "unknown"
+            let _ = write_record(&path, &record); // best-effort: a missing record shows "unknown"
             who.push(path);
             files.push(file);
         }
         HELD.fetch_add(files.len(), Ordering::SeqCst);
         let _ = fs::write(self.dir.join("admitted-at"), probe.now_ms.to_string()); // best-effort: a lost stamp only shortens one ramp
         self.leave();
-        remove_dead_holder_temps(&self.dir);
-        Ok(Poll::Granted(Lease { files, who }))
+        remove_dead_holder_files(&self.dir);
+        // The real clocks, never the probe's: tests fake `probe.now_ms`.
+        let release = Box::new(Release {
+            dir: self.dir.clone(),
+            holder: self.holder.clone(),
+            granted: Instant::now(),
+            granted_ms: now_ms(),
+        });
+        Ok(Poll::Granted(Lease {
+            files,
+            who,
+            id,
+            release,
+        }))
     }
 
     fn leave(&mut self) {
@@ -875,6 +971,14 @@ pub enum WaitPlace {
 /// [`record_wait_jobs`] naming the check that waited: the line gains `"name"`
 /// (when `context` has one), `"pid"`, `"session"` (when known), and `"rehearsal"` and
 /// `"prestage"` when `context` sets them.
+///
+/// Every line also carries `"holders"` and `"holder_jobs"`: the slots held,
+/// and the jobs of the distinct leases holding them, when the line is
+/// written ([`occupancy`]). Callers write the line after the grant, so an
+/// `admitted` or `handed` line counts its own lease (its `weight` and `jobs`
+/// are in the line to subtract), while a `timeout`, `unqueued` or `deferred`
+/// line counts only the others. Both are `null` when the holder records
+/// could not be read.
 pub fn record_wait_named(
     dir: &Path,
     tool: &str,
@@ -903,14 +1007,25 @@ pub fn record_wait_named(
         WaitPlace::Rehearsal => (",\"rehearsal\":true", ""),
         WaitPlace::Prestage => (",\"rehearsal\":true", ",\"prestage\":true"),
     };
+    let held = occupancy(dir).map_or(
+        ",\"holders\":null,\"holder_jobs\":null".to_string(),
+        |(slots, jobs)| format!(",\"holders\":{slots},\"holder_jobs\":{jobs}"),
+    );
     let line = format!(
-        "{{\"at_ms\":{},\"tool\":\"{}\"{name},\"pid\":{}{session},\"weight\":{weight}{jobs}{cap},\"cores\":{},\"waited_ms\":{waited_ms},\"load1\":{load},\"outcome\":\"{}\"{rehearsal}{prestage}}}\n",
+        "{{\"at_ms\":{},\"tool\":\"{}\"{name},\"pid\":{}{session},\"weight\":{weight}{jobs}{cap},\"cores\":{}{held},\"waited_ms\":{waited_ms},\"load1\":{load},\"outcome\":\"{}\"{rehearsal}{prestage}}}\n",
         now_ms(),
         escape(tool),
         std::process::id(),
         context.cores.unwrap_or_else(cores),
         escape(outcome)
     );
+    append_journal(dir, &line);
+}
+
+/// Append one line to `waits.jsonl` in a single write. Best-effort.
+// holds-until: t08 finds `waits.jsonl` past 3x its 232-lines-per-12-hours
+// baseline; then rotation becomes its own ticket (the t09 plan's Non-goals).
+fn append_journal(dir: &Path, line: &str) {
     if let Ok(mut f) = OpenOptions::new()
         .create(true)
         .append(true)
@@ -918,6 +1033,46 @@ pub fn record_wait_named(
     {
         let _ = f.write_all(line.as_bytes()); // best-effort: a lost line costs one sample
     } // else best-effort: an unopenable log costs one sample, never a slot
+}
+
+/// The slots held now and the jobs of the distinct leases holding them, from
+/// the live `holders/slot-N.who` records alone: no lock is taken, so this is
+/// an observation, not an atomic count. A record whose writer is dead is
+/// skipped, as is one removed while it was read (a release). Leases are told
+/// apart by their `"lease"` id; a record without one (an older writer) is
+/// deduplicated by equality. A slot held by a client that writes no record is
+/// not seen. `None` when the directory or a record could not be read or
+/// parsed: unknown, never zero.
+fn occupancy(dir: &Path) -> Option<(usize, u32)> {
+    let entries = match fs::read_dir(dir.join("holders")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some((0, 0)),
+        Err(_) => return None,
+    };
+    let mut slots = 0;
+    let mut jobs = 0u32;
+    let mut leases = std::collections::BTreeSet::new();
+    for entry in entries {
+        let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("slot-") && name.ends_with(".who")) {
+            continue;
+        }
+        let text = match fs::read_to_string(dir.join("holders").join(&name)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        let holder = Holder::from_json(&text)?;
+        if !platform::alive(holder.pid) {
+            continue;
+        }
+        slots += 1;
+        let lease = raw(&text, "lease").unwrap_or_else(|| holder.to_json());
+        if leases.insert(lease) {
+            jobs = jobs.saturating_add(holder.jobs.unwrap_or(0));
+        }
+    }
+    Some((slots, jobs))
 }
 
 /// Milliseconds since the epoch.
@@ -963,15 +1118,34 @@ fn live_tickets(dir: &Path, mine: Option<&Path>) -> io::Result<Vec<PathBuf>> {
     Ok(live)
 }
 
-/// Remove the hidden `holders/.slot-N.who.<pid>.tmp` files [`Lease::rename`]
-/// leaves when its process dies between the write and the rename: those whose
-/// pid is dead, as dead queue tickets are.
-fn remove_dead_holder_temps(dir: &Path) {
+/// Remove what a dead process left in `holders/`, as dead queue tickets are
+/// removed: the hidden `.slot-N.who.<pid>.tmp` a write leaves when its
+/// process dies between the write and the rename, and the `slot-N.who` record
+/// of a holder that exited without dropping its lease (a kill, or
+/// `process::exit` on a signal). Such a record is told by its slot's flock
+/// being free, not by its pid: a reused pid, or one from another pid
+/// namespace, says nothing about the slot, and the free flock proves the
+/// holder is gone. Left in place, it would count as a holder again. Called
+/// under the admission lock, so no grant writes a record meanwhile, and a
+/// lease renames only the slots it holds.
+fn remove_dead_holder_files(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir.join("holders")) else {
         return;
     };
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(slot) = name
+            .strip_prefix("slot-")
+            .and_then(|rest| rest.strip_suffix(".who"))
+            .filter(|index| index.parse::<u32>().is_ok())
+        {
+            let lock = dir.join(format!("slot-{slot}"));
+            // Only a slot file that exists is probed: probing creates it.
+            if lock.exists() && matches!(platform::try_lock(&lock), Ok(Some(_))) {
+                let _ = fs::remove_file(entry.path()); // best-effort: a gone holder's record
+            }
+            continue;
+        }
         let Some(stem) = name
             .strip_prefix('.')
             .and_then(|rest| rest.strip_suffix(".tmp"))
@@ -1775,13 +1949,35 @@ mod tests {
         let mut first = Waiter::new_in(&dir, Sizing::Fixed(2), 1, Holder::here("t", "a")).unwrap();
         let _held = granted(first.poll_with(idle(0)).unwrap());
         let dead = dir.join(format!("holders/.slot-0.who.{}.tmp", i32::MAX));
-        let live = dir.join(format!("holders/.slot-1.who.{}.tmp", std::process::id()));
+        // On slot 0, which `first` holds: the grant below writes slot 1's
+        // record through this process's own temp name for slot 1.
+        let live = dir.join(format!("holders/.slot-0.who.{}.tmp", std::process::id()));
         fs::write(&dead, "{}").unwrap();
         fs::write(&live, "{}").unwrap();
         let mut second = Waiter::new_in(&dir, Sizing::Fixed(2), 1, Holder::here("t", "b")).unwrap();
         let _also = granted(second.poll_with(idle(0)).unwrap());
         assert!(!dead.exists());
         assert!(live.exists());
+    }
+
+    /// A holder that exited without dropping its lease leaves its record; the
+    /// next grant removes it, so a reused pid never makes it count again.
+    #[test]
+    fn a_gone_holders_record_is_removed_at_the_next_grant() {
+        let dir = scratch("dead-record");
+        let mut first = Waiter::new_in(&dir, Sizing::Fixed(3), 1, Holder::here("t", "a")).unwrap();
+        let held = granted(first.poll_with(idle(0)).unwrap());
+        // Slot 2 is free: its holder died with its lease held, and its pid
+        // is in use again (this process's), so only the free flock tells.
+        // The grant below takes slot 1, so only the sweep removes this.
+        let reused = with_jobs("gone", 2);
+        let stale = dir.join("holders/slot-2.who");
+        fs::write(&stale, reused.to_json_with(Some("gone-0"))).unwrap();
+        let mut second = Waiter::new_in(&dir, Sizing::Fixed(3), 1, Holder::here("t", "b")).unwrap();
+        let also = granted(second.poll_with(idle(0)).unwrap());
+        assert_eq!(also.who[0], dir.join("holders/slot-1.who"));
+        assert!(!stale.exists(), "the gone holder's record is removed");
+        assert!(held.who[0].exists(), "a live holder's record stays");
     }
 
     #[test]
@@ -1873,5 +2069,161 @@ mod tests {
         assert!(!line.contains("\"name\""));
         assert!(!line.contains("\"rehearsal\""));
         assert!(!line.contains("\"prestage\""));
+    }
+
+    /// A holder of `jobs` jobs, running `command`.
+    fn with_jobs(command: &str, jobs: u32) -> Holder {
+        Holder {
+            jobs: Some(jobs),
+            ..Holder::here("t", command)
+        }
+    }
+
+    /// A granted lease of `weight` slots in `dir`.
+    fn take(dir: &Path, weight: u32, holder: Holder) -> Lease {
+        let mut w = Waiter::new_in(dir, Sizing::Fixed(4), weight, holder).unwrap();
+        granted(w.poll_with(idle(0)).unwrap())
+    }
+
+    /// The lines of `waits.jsonl`.
+    fn journal(dir: &Path) -> Vec<String> {
+        fs::read_to_string(dir.join("waits.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The last wait line (one with `waited_ms`).
+    fn last_wait(dir: &Path) -> String {
+        journal(dir)
+            .into_iter()
+            .rev()
+            .find(|l| l.contains("\"waited_ms\""))
+            .expect("a wait line")
+    }
+
+    #[test]
+    fn an_admitted_line_counts_its_own_lease_and_a_timeout_only_the_others() {
+        let dir = scratch("occupancy");
+        let _other = take(&dir, 2, with_jobs("other", 2));
+        let mine = take(&dir, 1, with_jobs("mine", 3));
+        record_wait(&dir, "t", 1, 0, "admitted");
+        let line = last_wait(&dir);
+        assert_eq!(raw(&line, "holders").as_deref(), Some("3"), "{line}");
+        // The weight-2 lease's jobs once, plus this lease's.
+        assert_eq!(raw(&line, "holder_jobs").as_deref(), Some("5"), "{line}");
+        drop(mine);
+        record_wait(&dir, "t", 1, 900, "timeout");
+        let line = last_wait(&dir);
+        assert_eq!(raw(&line, "holders").as_deref(), Some("2"), "{line}");
+        assert_eq!(raw(&line, "holder_jobs").as_deref(), Some("2"), "{line}");
+    }
+
+    #[test]
+    fn two_leases_from_one_cloned_holder_count_apart() {
+        let dir = scratch("siblings");
+        let holder = with_jobs("sibling", 2);
+        let _a = take(&dir, 1, holder.clone());
+        let _b = take(&dir, 1, holder);
+        assert_eq!(occupancy(&dir), Some((2, 4)));
+    }
+
+    #[test]
+    fn a_lease_seen_mid_rename_counts_its_jobs_once() {
+        let dir = scratch("mid-rename");
+        let lease = take(&dir, 2, with_jobs("before", 2));
+        // One record renamed, the other not yet: what a reader sees between
+        // the two writes of `Lease::rename`.
+        let after = with_jobs("after", 2);
+        write_record(&lease.who[0], &record_json(&after, &lease.id)).unwrap();
+        assert_eq!(occupancy(&dir), Some((2, 2)));
+    }
+
+    #[test]
+    fn an_empty_directory_holds_nothing_and_an_unreadable_record_is_unknown() {
+        let dir = scratch("empty");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(occupancy(&dir), Some((0, 0)), "no holders/ at all");
+        fs::create_dir_all(dir.join("holders")).unwrap();
+        assert_eq!(occupancy(&dir), Some((0, 0)));
+        record_wait(&dir, "t", 1, 0, "admitted");
+        assert!(last_wait(&dir).contains("\"holders\":0,\"holder_jobs\":0"));
+        fs::write(dir.join("holders/slot-0.who"), "{").unwrap();
+        assert_eq!(occupancy(&dir), None);
+        record_wait(&dir, "t", 1, 0, "timeout");
+        assert!(last_wait(&dir).contains("\"holders\":null,\"holder_jobs\":null"));
+    }
+
+    #[test]
+    fn every_wait_outcome_carries_waited_ms() {
+        let dir = scratch("outcomes");
+        fs::create_dir_all(&dir).unwrap();
+        let outcomes = ["admitted", "handed", "timeout", "unqueued", "deferred"];
+        for outcome in outcomes {
+            record_wait(&dir, "t", 1, 7, outcome);
+        }
+        let lines = journal(&dir);
+        assert_eq!(lines.len(), outcomes.len());
+        for line in lines {
+            assert!(line.contains("\"waited_ms\":7"), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_lease_id_is_in_the_record_but_not_in_the_holder() {
+        let dir = scratch("lease-id");
+        let lease = take(&dir, 1, with_jobs("a", 2));
+        let text = fs::read_to_string(&lease.who[0]).unwrap();
+        assert_eq!(raw(&text, "lease"), Some(lease.id.clone()));
+        let holder = Holder::from_json(&text).unwrap();
+        assert!(
+            !holder.to_json().contains("lease"),
+            "slots --json unchanged"
+        );
+        lease.rename(&Holder::here("t", "renamed")).unwrap();
+        let text = fs::read_to_string(&lease.who[0]).unwrap();
+        assert_eq!(
+            raw(&text, "lease"),
+            Some(lease.id.clone()),
+            "kept by rename"
+        );
+    }
+
+    #[test]
+    fn a_dropped_lease_appends_one_release_line() {
+        let dir = scratch("release");
+        let before = now_ms();
+        // The probe's clock is faked; the release line must not use it.
+        let mut w = Waiter::new_in(&dir, Sizing::Fixed(1), 1, with_jobs("a", 2)).unwrap();
+        let lease = granted(w.poll_with(idle(0)).unwrap());
+        std::thread::sleep(Duration::from_millis(200));
+        lease.rename(&Holder::here("t", "renamed")).unwrap();
+        drop(lease);
+        let lines = journal(&dir);
+        let released: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("\"outcome\":\"released\""))
+            .collect();
+        assert_eq!(released.len(), 1, "{lines:?}");
+        let line = released[0];
+        let held: u128 = raw(line, "held_ms").unwrap().parse().unwrap();
+        assert!((200..2000).contains(&held), "{line}");
+        let granted_ms: u128 = raw(line, "granted_ms").unwrap().parse().unwrap();
+        assert!(granted_ms >= before && granted_ms <= now_ms(), "{line}");
+        assert_eq!(raw(line, "command").as_deref(), Some("a"), "the grant's");
+        assert_eq!(raw(line, "jobs").as_deref(), Some("2"));
+        assert_eq!(raw(line, "weight").as_deref(), Some("1"));
+        assert_eq!(raw(line, "pid"), Some(std::process::id().to_string()));
+        assert!(!line.contains("waited_ms"));
+    }
+
+    #[test]
+    fn a_lease_dropped_after_its_directory_went_away_does_not_panic() {
+        let dir = scratch("gone");
+        let lease = take(&dir, 1, with_jobs("a", 2));
+        fs::remove_dir_all(&dir).unwrap();
+        drop(lease);
+        assert!(!dir.exists());
     }
 }

@@ -972,12 +972,29 @@ fn handoff_repo(conf: &str, gate_script: &str) -> (Repo, String) {
     (repo, line)
 }
 
-/// The parsed lines of `waits.jsonl`, in order.
+/// The parsed wait lines of `waits.jsonl`, in order: the release lines
+/// (no `waited_ms`) left out.
 fn waits(slots: &Path) -> Vec<serde_json::Value> {
+    journal(slots)
+        .into_iter()
+        .filter(|line| line.get("waited_ms").is_some())
+        .collect()
+}
+
+/// Every parsed line of `waits.jsonl`, release lines included.
+fn journal(slots: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(slots.join("waits.jsonl"))
         .unwrap_or_default()
         .lines()
         .map(|line| serde_json::from_str(line).expect("a waits.jsonl line is JSON"))
+        .collect()
+}
+
+/// The release lines `pid` wrote.
+fn releases(slots: &Path, pid: &serde_json::Value) -> Vec<serde_json::Value> {
+    journal(slots)
+        .into_iter()
+        .filter(|line| line["outcome"] == "released" && &line["pid"] == pid)
         .collect()
 }
 
@@ -1085,6 +1102,19 @@ fn a_rehearsal_hands_its_slot_to_the_next_heavy_gate() {
     assert!(handed[0]["cap"].is_number(), "{lines:?}");
     assert_eq!(admitted["cap"], handed[0]["cap"], "{lines:?}");
     assert_eq!(admitted["cores"], handed[0]["cores"], "{lines:?}");
+    // One lease, handed from gate one to gate two: one release line, held
+    // from the first grant, and both wait lines count it.
+    let released = releases(&slots, &admitted["pid"]);
+    assert_eq!(released.len(), 1, "{:?}", journal(&slots));
+    assert_eq!(released[0]["weight"], 1, "{released:?}");
+    assert!(released[0]["held_ms"].is_u64(), "{released:?}");
+    let granted = released[0]["granted_ms"].as_u64().expect("granted_ms");
+    assert!(
+        granted <= admitted["at_ms"].as_u64().unwrap(),
+        "{released:?}"
+    );
+    assert!(admitted["holders"].as_u64() >= Some(1), "{lines:?}");
+    assert!(handed[0]["holders"].as_u64() >= Some(1), "{lines:?}");
     let _ = outside.kill(); // best-effort: it sleeps for 10 s
     let _ = outside.wait(); // best-effort: reap
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
@@ -1118,6 +1148,13 @@ fn a_plain_push_does_not_hand_its_slot_over() {
     let lines = waits(&slots);
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(lines.iter().all(|l| l["outcome"] != "handed"), "{lines:?}");
+    // A lease per gate: a release line for each.
+    assert_eq!(
+        releases(&slots, &lines[0]["pid"]).len(),
+        2,
+        "{:?}",
+        journal(&slots)
+    );
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 

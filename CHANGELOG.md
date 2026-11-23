@@ -8,6 +8,18 @@ missing here.
 
 ## Unreleased
 
+### Added
+
+- The host-slot journal, `waits.jsonl`, now says how busy the host was and
+  how long each slot was held. Every wait line carries `holders` (slots held
+  when it was written, its own lease included on an `admitted` or `handed`
+  line) and `holder_jobs`. Every lease, when it is dropped, appends one
+  `"outcome":"released"` line with `granted_ms` and `held_ms`. A reader that
+  sums waits selects `has("waited_ms")`; `docs/host-slots.md` has the line,
+  and one that pairs a release with its grant. Both come from the
+  `greenharness-slots` crate, so relais writes them too once it updates. Holder
+  records gain a `lease` id; `greengate slots --json` is unchanged.
+
 ### Fixed
 
 - On a release, `pre-push-audit-python` asks `uv export --no-dev` what ships
