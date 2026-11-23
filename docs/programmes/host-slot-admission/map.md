@@ -48,28 +48,34 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 
 ## Handoff
 
-2026-11-23, t09 built and merged. Branch `feat/slots-journal-holders` (plan
-`docs/plans/2026-11-23-slot-journal-records-holders.md`):
-- every wait line carries `holders` and `holder_jobs`;
-- holder records carry a lease id;
-- a dropped lease appends one `released` line with `held_ms`;
-- a gone holder's record is swept at the next grant, by its free flock.
+2026-11-23, t09 closed. Shipped: greengate/greenharness-slots 4.13.0 (#510,
+release #511) and relais v0.78.0 (#545, release #547), both installed on this
+machine, with the relais coordinator restarted. Every wait line carries
+`holders` and `holder_jobs`. Every dropped lease appends one `released` line
+with `held_ms`. A gone holder's record is swept at the next grant, judged by
+its free flock. Plan: `docs/plans/2026-11-23-slot-journal-records-holders.md`
+(done).
 
-Merged as #510. The release PR that carries this handoff cuts
-greenharness-slots/greengate 4.13.0 (plan Phase 3); the session installs it. Then relais
-Phase 4: its lock goes from 4.0.0 to 4.13.0, then a release and an install.
-After each install, the plan's `## Measure` runs over 24 hours.
+Live state: real 4.13 lines are in `/tmp/greenharness-slots-501/waits.jsonl`.
+The first, a `slot run` timeout at `holders 1`, shows t01's starvation. No
+relais line yet.
 
-Next, in order: t10 (research: hand-set held marker), then the builds t11,
-t12 and t13, then the t08 workday measure, which reads the journal as its
-"Look at" notes say. No steps are left to the person.
+Due 2026-11-24, [t14](t14-journal-measure-after-install.md): the plan's `## Measure`, 24 hours of the journal:
+- 4.13 writers carry the fields, and the first relais line is in;
+- the unpaired-admitted count;
+- growth under 3× the baseline;
+- the p95 waited guard.
+
+Next, in order: t14 when due, t10 (research: hand-set held marker), then the builds t11,
+t12 and t13, then t08, which reads the journal as its "Look at" notes say.
+No steps are left to the person.
 
 Lessons:
-- Under a load of 240 to 350, the pre-commit clippy and test checks were
-  deferred to CI. Run `cargo clippy -D warnings` by hand before the push: it
-  caught one lint.
+- Under a load of 240 to 350 the pre-commit clippy and test checks deferred
+  to CI. Run `cargo clippy -D warnings` by hand before the push.
 - `cargo-semver-checks` is not installed on this machine.
-- A slot test that builds `Holder::here` records the worktree path; matching a bare word in its JSON broke in `amont-wt-release-…` ("release" holds "lease"). Match keys with their quotes.
+- A slot test that builds `Holder::here` records the worktree path, so match
+  JSON keys with their quotes, never bare words.
 
 ## Not yet specified
 

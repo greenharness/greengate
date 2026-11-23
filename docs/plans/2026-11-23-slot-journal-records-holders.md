@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/slots-journal-holders
 repos: [amont, relais]
 adrs: []
@@ -173,7 +173,7 @@ acquisition, and one per released lease."
     for the release-row test.
   - One test asserts that a pre-push which takes and hands a parked slot
     leaves exactly one `released` row for that chain.
-- [ ] Phase 3 — docs and release: `docs/host-slots.md`, `CHANGELOG.md`,
+- [x] Phase 3 — docs and release: `docs/host-slots.md`, `CHANGELOG.md`,
   `docs/programmes/host-slot-admission/t08-workday-measure.md`,
   `docs/programmes/host-slot-admission/t09-journal-holders-and-hold-time.md`
   - The host-slots doc gets the new fields, the release row, and two
@@ -191,7 +191,7 @@ acquisition, and one per released lease."
   - Minor release 4.13.0 through `tag-release`.
   - Read the crates.io job's `conclusion`: the token lasts 90 days.
   - Install on this machine.
-- [ ] Phase 4 — relais (separable: Phase 3 closes t09 for amont without waiting on it): `Cargo.lock`, `crates/relais/src/verify/heavy/tests.rs`
+- [x] Phase 4 — relais (separable: Phase 3 closes t09 for amont without waiting on it): `Cargo.lock`, `crates/relais/src/verify/heavy/tests.rs`
   - `cargo update -p greenharness-slots`, from 4.0.0 to 4.13.0. That brings
     12 minor releases of admission and width behaviour into relais; read the
     crate's CHANGELOG 4.1–4.13 and run relais's whole suite, not only this
@@ -231,9 +231,20 @@ acquisition, and one per released lease."
   with each `granted_ms` at or before its admitted `at_ms`. Both `jq` lines in
   host-slots.md pair them and skip a torn last line.
 - After install: `/tmp/greenharness-slots-501/waits.jsonl` gains a real
-  greengate row with `holders`, and a `released` row → Phase 3, after the
-  4.13.0 release.
-- After the relais install: the same for a `"tool":"relais"` row → Phase 4.
+  greengate row with `holders`, and a `released` row → greengate 4.13.0
+  installed from the tap.
+  - A real `greengate slot run` timeout line carried `"holders":1,
+    "holder_jobs":2`: one slot held, 6 waiting, a 900 s wait. That is t01's
+    starvation, now in the journal.
+  - Within 4 hours, 72 wait lines carried `holders`, and four `released`
+    lines held 116 to 571 s, from `cargo test` holders.
+- After the relais install: the same for a `"tool":"relais"` row → relais
+  v0.78.0 released and installed, and the idle coordinator was restarted on
+  it.
+  - The in-process test passes against crates.io 4.13.0, with the admitted
+    line's `holders` and the release line's session, weight and jobs.
+  - No live relais line yet: no relais run has taken a slot since the
+    install. The first one is the Measure's first check.
 - Public API: `cargo-semver-checks` is not installable here (no formula, no
   binstall). Instead, `git diff origin/main` of lib.rs changes no `pub`
   line.
@@ -258,8 +269,25 @@ After each install, 24 hours of `waits.jsonl`:
 
 ## Outcome
 
-Phases 1–2 shipped on `feat/slots-journal-holders`; next: Phase 3's
-release (4.13.0 through `tag-release`, crates.io conclusion read, install),
-then Phase 4 in relais.
+What shipped:
+- greengate/greenharness-slots 4.13.0 (#510, release #511). The crates.io,
+  npm and Homebrew jobs all succeeded.
+- relais v0.78.0 (#545, release #547).
+
+The journal now records occupancy and hold time, for t08.
+
+Not shipped: `cargo-semver-checks` (not installable here). The diff
+changes no `pub` line instead.
+
+What surprised:
+- The lease-id test failed in `amont-wt-release-…`, because a path holding
+  "release" matched the bare word "lease". Fixed in #511.
+- A review found that judging a gone holder by its pid fails on pid reuse
+  and across pid namespaces. Its free slot flock is the proof.
+- Under a load of 240 to 350 the pre-commit checks deferred to CI, so
+  clippy ran by hand before each push.
+
+Next: the Measure, 24 hours after each install (relais's first live line
+included), then t10.
 
 <!-- panel: repos=amont,relais adds=contract reviewers=backend,lang:rust,tui,unix,architect,po,codex body-sha=ee1562f70030 -->
