@@ -182,11 +182,11 @@ nothing, so it is no longer advised as unqueued, and the advice names
 
 ## Phases
 
-- [ ] Phase 1 — crate: admission threshold, `WaitReason::Load.holder_jobs`,
+- [x] Phase 1 — crate: admission threshold, `WaitReason::Load.holder_jobs`,
   `Stall`, unit tests (t01's two cases, and t02's red test: position 10, an
   admission every 60 s, not stalled after 400 s; its pair, stalled at 300 s):
   `crates/greenharness-slots/src/lib.rs`
-- [ ] Phase 2 — greengate: `wait_for_slot` takes a window and a ceiling, with
+- [x] Phase 2 — greengate: `wait_for_slot` takes a window and a ceiling, with
   a clock seam; end → defer for `wait` and the pre-stage; `now` in
   `resolve_busy` and its complaint (`host_slots.rs:163,166`), but not in the
   manifest; `slot run --now` (a boolean flag kind in `parse`), the stall
@@ -197,7 +197,7 @@ nothing, so it is no longer advised as unqueued, and the advice names
   `crates/greengate-runtime/src/dispatch.rs`,
   `crates/greengate-runtime/src/gate_stamp.rs`, `crates/greengate/src/main.rs`,
   `crates/greengate/tests/it/slot_run.rs`
-- [ ] Phase 3 — the decision and docs: ADR-0022 replaces the heads of
+- [x] Phase 3 — the decision and docs: ADR-0022 replaces the heads of
   `hooks.host-concurrency` (ADR-0021) and `hooks.busy-policy` (ADR-0013), naming
   ADR-0009's lineage, and the head of `hooks.gates-before-connection`
   (ADR-0018) to add the hour-long deferral completion, taking effect with the
@@ -239,39 +239,76 @@ installed.
   heads of the two keys are ADR-0021 and ADR-0013 (ADR-0009's
   `hooks.host-concurrency` was replaced by ADR-0013), so the new record replaces
   those, and its text names the lineage.
-- 2026-11-23 — 4.14.0 is a minor release with BREAKING entries, as 4.11.0 was.
-  `WaitReason::Load` gains a field (a fleet grep finds no reader outside
-  greengate), and `--on-timeout run` is refused. relais's `"4.13"` caret takes
-  4.14. Not 5.0.0: the workspace version is greengate's own, so a major
-  ripples every npm pin. `#[non_exhaustive]` would itself be a break.
+- 2026-11-23 — ~~4.14.0, a minor with BREAKING entries, as 4.11.0 was.~~
+  Superseded at implementation review: the fleet rule
+  `cli.compat.interface-is-public` makes removing `--on-timeout run`, and
+  re-meaning `onBusy wait` and `slot run`'s exit 75, a major. 4.11.0 broke the
+  rule; it is not a precedent. Phase 4 releases **5.0.0**: check the fleet's
+  npm pins on `@greenharness/greengate` (`^4`) and relais's crate pin, which
+  Phase 5 bumps to `"5"`. The rule's warning release is skipped because
+  accepting `run` for a release keeps the defect t03 removes. The CHANGELOG
+  says both. `WaitEnd` is new, so `#[non_exhaustive]` on it breaks nothing.
 - 2026-11-23 — A fleet grep finds one `--on-timeout` caller outside amont:
   greenbelay's `heavy-build-unqueued` rule, which Phase 6 migrates.
 - 2026-11-23 — The install waits for t14: a 4.14 writer inside t14's 24-hour
   window would change the admissions and outcomes that t14 measures.
+- 2026-11-23 — Built differently from the Behaviour text, after the
+  implementation review: the crate owns the one wait loop, `wait_in_line(waiter,
+  WaitBounds, on_wait) -> Result<Lease, LineEnd>`, which every caller uses,
+  relais in Phase 5 included. A stall window as long as the ceiling is not
+  applied. Three failed polls in a row end a wait, not one. The waiter's own
+  marks run on a monotonic clock and `admitted-at` on the wall clock (the
+  plan panel's carried unix finding). `Stall::window_from` takes the
+  variable's value, and each binary reads `GREENHARNESS_SLOT_STALL_S` at its
+  edge. `slot run` exits 74, not 75, when the queue fails while queued.
+- 2026-11-23 — The deferral roll-up offers the command that waits as `run
+  now:`, then `GREENGATE_ON_BUSY=now` on a second line (the plan panel's
+  carried tui finding), where the Behaviour said `run now:` advises `now`.
+- 2026-11-23 — The map's handoff and the t16 ticket ride this PR. They are
+  programme records outside Phases 1–3.
 
 ## Verification
 
-- Phase 1: `cargo test -p greenharness-slots`. The two t01 cases (12.3 → Granted,
-  300 → `Waiting(Load)`) and the two t02 cases (moving, not stalled at 400 s;
-  idle, stalled at 300 s) fail on `origin/main` and pass here.
+- Phase 1: `cargo test -p greenharness-slots`, 73 passed. t01's admission
+  test fails on `origin/main` (scratch worktree: `Waiting(Load { load_tenths:
+  123, cores: 6 })`) and passes here. t02's cases run through the shared loop's
+  seam: a moving line at position 10 is never stalled and ends only at a
+  600 s ceiling, a still line stalls at its window naming position 3, a window
+  equal to the ceiling leaves the ceiling to end it, and the third failed poll
+  in a row ends the wait. Clock edges: a future stamp idles 0, and an hour's
+  wall jump with 30 s monotonic does not stall.
 - Phase 2, piloted with the built binary on a scratch `GREENHARNESS_SLOT_DIR`
   with `greengate.hostSlots 1`:
   - A holds `slot run -- sleep 420`. B runs `slot run --max-wait 600 -- true`.
-    B exits 75 at about 300 s. Its stderr names the stall, and its row reads
-    `timeout` with `"end": "stalled"`.
-  - Three waiters are queued ahead of B, and a holder is released every 60 s, so B's position changes. B, with `--max-wait 600`, is admitted after more than 300 s. A stall-window env override lets `slot_run.rs` cover stall → 75 in seconds.
-  - `slot run --now -- true` runs at once, and its row reads `now`.
-  - `slot run --on-timeout run -- true` exits 2 with the message above.
-  - Hook path: clock-seam tests on `wait_for_slot`, one per table row (stall,
-    ceiling, sibling-holder extension), and a test on `before_spawn`'s end
-    action. Pilot: with a stall window of 5 s, a hook check behind a stalled
-    holder defers and leaves no stamp. `greengate land` to a local bare
-    remote, with that gate owed, pushes on the `deferred` completion, and the
-    gate is absent from the attestation. A changed tree owes it again.
-- Phase 3: `aval heads --check` exits 0, and `aval resolve hooks.busy-policy
-  --scope hook-binary` names ADR-0022.
-  - With `GREENGATE_ON_BUSY=now`, the same check runs at once, and its row
-    reads `now`.
+    Observed: `B rc=75 after 300s`, stderr `no progress in the host slot line
+    for 300s`, and the row `"outcome":"timeout","end":"stalled"`.
+  - The moving line, `slot_run::a_moving_line_outlasts_the_stall_window`:
+    three short holders ahead and a 4 s window. B is admitted after more than
+    4 s, and its own wait outlasts the window. Passed.
+  - `slot run --now -- true` runs at once, and its row reads `now`
+    (`now_skips_the_queue_and_is_journalled`). Passed.
+  - `slot run --on-timeout run -- true` exits 2 with two lines under 80
+    columns. `--now=1` and `--now --max-wait 5` exit 2, and `--on-timeout
+    exit` warns (`on_timeout_run_is_refused_and_now_is_a_switch`). Passed.
+  - Hook path: `each_caller_waits_by_its_row_of_the_table` (every row),
+    `the_sibling_extension_waits_while_the_line_moves` and
+    `a_deferral_names_its_cause`, all passed. `busy_defers::a_stalled_line_
+    defers_under_onbusy_wait`, with a 1 s window: the check defers, never
+    runs, offers `=now`, drops the `onBusy wait` hint, and journals
+    `"outcome":"deferred","end":"stalled"`. Passed. `busy_defers::now_runs_a_
+    heavy_check_at_once_and_journals_it`: passed.
+  - Land: `land::a_gate_deferred_on_a_stalled_line_still_lets_land_push`.
+    With a block heavy gate and a stalled slot, land exits 0 and the branch
+    reaches the bare remote, with no `evidence-missing`. The gate never ran
+    and has no stamp, and the tree's done note carries `deferred:`. Passed.
+    Not tested: a changed tree owing the gate again. That follows from the
+    note being keyed by tree.
+  - Post-rebase suites: `greengate-runtime` 88 passed; `greengate --test it`
+    (busy_defers, land, slot_run) 54 passed; `cargo clippy --workspace
+    --all-targets -D warnings` clean.
+- Phase 3: `aval heads --check` exits 0. `aval resolve` names ADR-0022 for
+  `hooks.busy-policy`, `hooks.host-concurrency` and
+  `hooks.gates-before-connection`.
 - Phase 4: `greengate --version` reads 4.14.0, and crates.io lists it.
 - Phase 5: a relais command in a moving line past `admission_wait_seconds` is
   granted, and the run is not blocked.
