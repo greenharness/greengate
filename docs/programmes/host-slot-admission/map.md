@@ -45,29 +45,31 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 - [What a check does when its wait ends](t03-unqueued-fallback.md): a stalled hook check defers to CI and `slot run` exits 75; not waiting is an explicit, journalled up-front choice (amends ADR-0009). The person's decision.
 - [Who may move a job ahead, and how far](t06-who-may-reorder.md): own session's jobs only, to the head, with a journalled reason; 3 moves per session per day, never past a job waiting 20 min or more. The person's decision.
 - [The journal records holders and hold time](t09-journal-holders-and-hold-time.md): every wait line carries `holders` and `holder_jobs`, and every dropped lease leaves one `released` line with `held_ms`, written by the crate (greenharness-slots 4.13.0).
+- [A hand-set held marker skips the queue](t10-held-marker-is-trusted.md): never set by hand in 7 days; the real hole is an inline marker on `amont slot run` or `git commit`. The marker becomes `held:<lease>`, checked live by one shared reader; a forged one queues with a journalled line. Build: t15.
 
 ## Handoff
 
-2026-11-23, t09 closed. Shipped: greengate/greenharness-slots 4.13.0 (#510,
-release #511) and relais v0.78.0 (#545, release #547), both installed on this
-machine, with the relais coordinator restarted. Every wait line carries
-`holders` and `holder_jobs`. Every dropped lease appends one `released` line
-with `held_ms`. A gone holder's record is swept at the next grant, judged by
-its free flock. Plan: `docs/plans/2026-11-23-slot-journal-records-holders.md`
-(done).
+2026-11-23, t10 closed (research, docs only). It found no hand-set uses in 7
+days. The ticket's premise was half right: greenbelay still advises an inline
+marker on `cargo test`, but stays silent on an inline marker before
+`amont slot run`, `amont run` or `git commit`, and those skip the queue.
+greengate, relais and greenbelay each read the marker differently today. The
+decided format, check, rollout and fixture list are in t10's Resolution. The
+build is filed as [t15](t15-build-held-marker-lease.md).
 
-Live state: real 4.13 lines are in `/tmp/greenharness-slots-501/waits.jsonl`.
-The first, a `slot run` timeout at `holders 1`, shows t01's starvation. No
-relais line yet.
+Earlier, t09 shipped greengate/greenharness-slots 4.13.0 and relais v0.78.0,
+both installed. Plan: `docs/plans/2026-11-23-slot-journal-records-holders.md`.
 
-Due 2026-11-24, [t14](t14-journal-measure-after-install.md): the plan's `## Measure`, 24 hours of the journal:
+Due 2026-11-24, [t14](t14-journal-measure-after-install.md): 24 hours of the
+journal after the 4.13 install:
 - 4.13 writers carry the fields, and the first relais line is in;
 - the unpaired-admitted count;
 - growth under 3× the baseline;
 - the p95 waited guard.
 
-Next, in order: t14 when due, t10 (research: hand-set held marker), then the builds t11,
-t12 and t13, then t08, which reads the journal as its "Look at" notes say.
+Next, in order: t14 when due, then the builds t11, t12, t13 and t15. t15 can
+share t11's crate release, but its three rollout steps each need an install
+before the next. Then t08, which reads the journal as its "Look at" notes say.
 No steps are left to the person.
 
 Lessons:
@@ -76,6 +78,9 @@ Lessons:
 - `cargo-semver-checks` is not installed on this machine.
 - A slot test that builds `Holder::here` records the worktree path, so match
   JSON keys with their quotes, never bare words.
+- Probe a greenbelay rule with the installed binary
+  (`greenbelay hook` on a PreToolUse payload, with a scratch
+  `CLAUDE_CONFIG_DIR`). It settles what the rule does in seconds.
 
 ## Not yet specified
 
