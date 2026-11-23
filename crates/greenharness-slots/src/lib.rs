@@ -372,11 +372,19 @@ impl Holder {
     /// The record as one JSON object: what `holders/slot-N.who` holds, and
     /// what `amont slots --json` lists.
     pub fn to_json(&self) -> String {
+        self.to_json_with(None)
+    }
+
+    /// [`Holder::to_json`], with `lease` first when given: the record a
+    /// [`Lease`] writes. The id stays off `Holder` itself, so its public
+    /// shape, its equality and `amont slots --json` do not change.
+    fn to_json_with(&self, lease: Option<&str>) -> String {
+        let lease = lease.map_or(String::new(), |l| format!("\"lease\":\"{}\",", escape(l)));
         let jobs = self
             .jobs
             .map_or(String::new(), |j| format!(",\"jobs\":{j}"));
         format!(
-            "{{\"pid\":{},\"tool\":\"{}\",\"repo\":\"{}\",\"command\":\"{}\",\"session\":\"{}\",\"started_ms\":{}{jobs}}}",
+            "{{{lease}\"pid\":{},\"tool\":\"{}\",\"repo\":\"{}\",\"command\":\"{}\",\"session\":\"{}\",\"started_ms\":{}{jobs}}}",
             self.pid,
             escape(&self.tool),
             escape(&self.repo),
@@ -428,17 +436,16 @@ pub struct Lease {
     /// reader of `holders/` tells two leases apart even when their records
     /// are otherwise equal, and sees one lease once while it is renamed.
     id: String,
-    release: Release,
+    /// Boxed: it carries the whole holder, and `Poll::Granted` holds a lease.
+    release: Box<Release>,
 }
 
 /// What the release row of a [`Lease`] says: who took it, and when.
 #[derive(Debug)]
 struct Release {
     dir: PathBuf,
-    tool: String,
-    session: String,
-    command: String,
-    jobs: Option<u32>,
+    /// The holder at the grant: its tool, session, command and jobs.
+    holder: Holder,
     /// Monotonic, for `held_ms`: a wall-clock step never makes it negative.
     granted: Instant,
     /// Wall clock, for pairing the release with its `admitted` row.
@@ -450,11 +457,9 @@ struct Release {
 static LEASE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// A holder record as written to `holders/slot-N.who`: the holder's JSON with
-/// its lease id first. Kept off [`Holder`] so its public shape, its equality
-/// and `amont slots --json` do not change.
+/// its lease id first.
 fn record_json(holder: &Holder, lease: &str) -> String {
-    let json = holder.to_json();
-    format!("{{\"lease\":\"{}\",{}", escape(lease), &json[1..])
+    holder.to_json_with(Some(lease))
 }
 
 /// Write `json` to the holder record `path` through a hidden temp file and a
@@ -469,6 +474,7 @@ fn write_record(path: &Path, json: &str) -> io::Result<()> {
     };
     let temp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
     fs::write(&temp, json).map_err(|error| {
+        let _ = fs::remove_file(&temp); // best-effort: a partly written temp of our own
         io::Error::new(
             error.kind(),
             format!("cannot write {}: {error}", temp.display()),
@@ -549,20 +555,21 @@ impl Release {
     /// per lease, however many gates it was handed across. It has no
     /// `waited_ms`, so a reader of waits selects `has("waited_ms")`.
     fn record(&self, weight: usize) {
-        let session = if self.session.is_empty() {
+        let holder = &self.holder;
+        let session = if holder.session.is_empty() {
             String::new()
         } else {
-            format!(",\"session\":\"{}\"", escape(&self.session))
+            format!(",\"session\":\"{}\"", escape(&holder.session))
         };
-        let jobs = self
+        let jobs = holder
             .jobs
             .map_or(String::new(), |j| format!(",\"jobs\":{j}"));
         let line = format!(
             "{{\"at_ms\":{},\"tool\":\"{}\",\"pid\":{}{session},\"command\":\"{}\",\"weight\":{weight}{jobs},\"granted_ms\":{},\"held_ms\":{},\"outcome\":\"released\"}}\n",
             now_ms(),
-            escape(&self.tool),
+            escape(&holder.tool),
             std::process::id(),
-            escape(&self.command),
+            escape(&holder.command),
             self.granted_ms,
             self.granted.elapsed().as_millis(),
         );
@@ -794,7 +801,7 @@ impl Waiter {
         let id = format!(
             "{}-{}",
             std::process::id(),
-            LEASE_SEQ.fetch_add(1, Ordering::SeqCst)
+            LEASE_SEQ.fetch_add(1, Ordering::Relaxed)
         );
         let record = record_json(&self.holder, &id);
         let mut files = Vec::new();
@@ -808,17 +815,14 @@ impl Waiter {
         HELD.fetch_add(files.len(), Ordering::SeqCst);
         let _ = fs::write(self.dir.join("admitted-at"), probe.now_ms.to_string()); // best-effort: a lost stamp only shortens one ramp
         self.leave();
-        remove_dead_holder_temps(&self.dir);
+        remove_dead_holder_files(&self.dir);
         // The real clocks, never the probe's: tests fake `probe.now_ms`.
-        let release = Release {
+        let release = Box::new(Release {
             dir: self.dir.clone(),
-            tool: self.holder.tool.clone(),
-            session: self.holder.session.clone(),
-            command: self.holder.command.clone(),
-            jobs: self.holder.jobs,
+            holder: self.holder.clone(),
             granted: Instant::now(),
             granted_ms: now_ms(),
-        };
+        });
         Ok(Poll::Granted(Lease {
             files,
             who,
@@ -1019,6 +1023,8 @@ pub fn record_wait_named(
 }
 
 /// Append one line to `waits.jsonl` in a single write. Best-effort.
+// holds-until: t08 finds `waits.jsonl` past 3x its 232-lines-per-12-hours
+// baseline; then rotation becomes its own ticket (the t09 plan's Non-goals).
 fn append_journal(dir: &Path, line: &str) {
     if let Ok(mut f) = OpenOptions::new()
         .create(true)
@@ -1112,15 +1118,30 @@ fn live_tickets(dir: &Path, mine: Option<&Path>) -> io::Result<Vec<PathBuf>> {
     Ok(live)
 }
 
-/// Remove the hidden `holders/.slot-N.who.<pid>.tmp` files [`Lease::rename`]
-/// leaves when its process dies between the write and the rename: those whose
-/// pid is dead, as dead queue tickets are.
-fn remove_dead_holder_temps(dir: &Path) {
+/// Remove what a dead process left in `holders/`, as dead queue tickets are
+/// removed: the hidden `.slot-N.who.<pid>.tmp` a write leaves when its
+/// process dies between the write and the rename, and the `slot-N.who` record
+/// of a holder that exited without dropping its lease (a kill, or
+/// `process::exit` on a signal). Left in place, such a record would count as
+/// a holder again once its pid is reused. Called under the admission lock,
+/// so no grant writes a record meanwhile; a dead holder's slot is free, so no
+/// rename does either.
+fn remove_dead_holder_files(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir.join("holders")) else {
         return;
     };
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("slot-") && name.ends_with(".who") {
+            let pid = fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|text| raw(&text, "pid"))
+                .and_then(|pid| pid.parse::<u32>().ok());
+            if pid.is_some_and(|pid| !platform::alive(pid)) {
+                let _ = fs::remove_file(entry.path()); // best-effort: a dead holder's record
+            }
+            continue;
+        }
         let Some(stem) = name
             .strip_prefix('.')
             .and_then(|rest| rest.strip_suffix(".tmp"))
@@ -1933,6 +1954,30 @@ mod tests {
         let _also = granted(second.poll_with(idle(0)).unwrap());
         assert!(!dead.exists());
         assert!(live.exists());
+    }
+
+    /// A holder that exited without dropping its lease leaves its record; the
+    /// next grant removes it, so a reused pid never makes it count again.
+    #[test]
+    fn a_dead_holders_record_is_removed_at_the_next_grant() {
+        let dir = scratch("dead-record");
+        let mut first = Waiter::new_in(&dir, Sizing::Fixed(3), 1, Holder::here("t", "a")).unwrap();
+        let held = granted(first.poll_with(idle(0)).unwrap());
+        let dead = Holder {
+            pid: i32::MAX as u32,
+            tool: "t".into(),
+            jobs: Some(2),
+            ..Holder::default()
+        };
+        // Slot 2 is free: its holder died with its lease held. The grant
+        // below takes slot 1, so only the sweep can remove this record.
+        let stale = dir.join("holders/slot-2.who");
+        fs::write(&stale, dead.to_json_with(Some("dead-0"))).unwrap();
+        let mut second = Waiter::new_in(&dir, Sizing::Fixed(3), 1, Holder::here("t", "b")).unwrap();
+        let also = granted(second.poll_with(idle(0)).unwrap());
+        assert_eq!(also.who[0], dir.join("holders/slot-1.who"));
+        assert!(!stale.exists(), "the dead holder's record is gone");
+        assert!(held.who[0].exists(), "a live holder's record stays");
     }
 
     #[test]
