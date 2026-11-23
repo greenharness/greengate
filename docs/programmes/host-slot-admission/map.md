@@ -75,7 +75,7 @@ Next, in order:
 
 1. [t14](t14-journal-measure-after-install.md), due 2026-11-24: the 4.13
    journal day. It must close before anything below is installed.
-2. t11 Phase 4: release greengate 4.14.0 (crates.io included) and install it.
+2. t11 Phase 4: release greengate 5.0.0 (crates.io included; a major: `cli.compat.interface-is-public`) and install it.
    Read the crates.io job's conclusion: its token is a 90-day one. Run
    semver-checks, or an equivalent check, before the publish.
 3. t11 Phase 5 (relais):

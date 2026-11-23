@@ -28,7 +28,7 @@ and ADR-0018's `hooks.gates-before-connection`. Each keeps everything its
 record decided except the clauses named below. It amends the lineage that
 began with ADR-0009 ("a slot that never frees runs the check unqueued with a
 note"), which ADR-0013 had carried on as `onBusy wait`. It takes effect with
-the greengate 4.14.0 install.
+the greengate 5.0.0 install.
 
 ## Context
 
@@ -73,8 +73,8 @@ deferrals and 29 unqueued runs, some started at load 445 to 563.
 - `waits.jsonl` gains `end` (`stalled`, `ceiling`, `io_error`) and the `now`
   outcome, and `holder_jobs` counts a record with no `jobs` as one slot's
   width, as the load test does.
-- A `deferred` completion is read by greengate 4.14 and later. An older
+- A `deferred` completion is read by greengate 5.0 and later. An older
   binary does not know the word, so its push refuses the gate as missing,
   which fails closed.
 - Rollback: reinstall greengate 4.13, and note it here. relais can stay on
-  the 4.14 crate.
+  the 5.0 crate.

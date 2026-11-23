@@ -2883,6 +2883,20 @@ mod tests {
             window: None,
             ceiling: Duration::from_secs(600),
         };
+        // Two failures, then a slot: granted, not ended.
+        let dir = scratch("poll-failures");
+        let mut waiter = Waiter::new_in(&dir, Sizing::Fixed(1), 1, Holder::here("t", "x")).unwrap();
+        let grant = waiter.poll_with(idle(1_000_000)).unwrap();
+        assert!(run_line(bounds, vec![fail(), fail(), Ok(grant)], None).is_ok());
+        // A good poll resets the count: two failures, a wait, two more
+        // failures, then waiting until the ceiling, which is what ends it.
+        let mut polls = vec![fail(), fail(), waiting_at(1), fail(), fail()];
+        polls.extend((0..70).map(|_| waiting_at(1)));
+        assert!(matches!(
+            run_line(bounds, polls, None),
+            Err(LineEnd::Ceiling { .. })
+        ));
+        // Three in a row end it.
         let polls = vec![fail(), fail(), waiting_at(1), fail(), fail(), fail()];
         match run_line(bounds, polls, None) {
             Err(LineEnd::PollFailed { error }) => assert_eq!(error.to_string(), "busy disk"),

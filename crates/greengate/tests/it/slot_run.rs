@@ -67,11 +67,11 @@ fn slots_json_names_the_cores_and_their_source() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 
-/// Wait until `amont slots --json` shows `n` waiters, so the next one queues
+/// Wait until `amont slots --json` shows `waiters` waiters, so the next one queues
 /// behind them in ticket order, never by a guessed sleep.
-fn until_waiting(slots: &Path, n: usize) {
+fn until_waiting(slots: &Path, waiters: usize) {
     let deadline = Instant::now() + Duration::from_secs(30);
-    let want = format!("\"waiting\":{n}");
+    let want = format!("\"waiting\":{waiters}");
     loop {
         let out = amont(slots, &["slots", "--json"])
             .output()
@@ -80,7 +80,7 @@ fn until_waiting(slots: &Path, n: usize) {
         if json.contains(&want) {
             return;
         }
-        assert!(Instant::now() < deadline, "no {n} waiting: {json}");
+        assert!(Instant::now() < deadline, "no {waiters} waiting: {json}");
         std::thread::yield_now();
     }
 }

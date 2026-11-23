@@ -30,8 +30,8 @@ why.
 
 **Wait lines**, one per acquisition: `at_ms`, `tool`, `pid`, `weight`,
 `cores`, `waited_ms`, `load1`, `outcome` (`admitted`, `deferred`,
-`unqueued`, `timeout`, `handed`, and from 4.14 `now`), `jobs` and `cap`
-when the writer knows them. From 4.14 a line whose wait ended without a slot
+`unqueued`, `timeout`, `handed`, and from 5.0 `now`), `jobs` and `cap`
+when the writer knows them. From 5.0 a line whose wait ended without a slot
 also carries `end`: `stalled`, `ceiling` or `io_error` (see
 [When a wait ends](#when-a-wait-ends)); `unqueued` then means only that the
 slots were unusable (off, an unsafe directory, a queue that could not be
@@ -46,7 +46,7 @@ observation, not an atomic count. Callers write the line after the grant, so
 an `admitted` or `handed` line counts its own lease (subtract its `weight`
 and `jobs`), while `timeout`, `unqueued` and `deferred` lines count only the
 others. Both are `null` when a record could not be read. A line without them
-comes from an older writer: its occupancy is unknown, not 0. From 4.14 a
+comes from an older writer: its occupancy is unknown, not 0. From 5.0 a
 record that names no `jobs` adds one slot's width (`parallelism(1)`) to
 `holder_jobs`, as the load test counts it; under 4.13 it added 0.
 
@@ -164,7 +164,7 @@ A plain push and a commit release their slot after each check.
 
 ## When a wait ends
 
-A wait ends, from 4.14 (ADR-0022), when its line has **stalled**: no
+A wait ends, from 5.0 (ADR-0022), when its line has **stalled**: no
 admission anywhere (the `admitted-at` stamp) and no change of the waiter's
 place for 300 s. The waiter's own marks run on a monotonic clock, so a
 laptop's sleep cannot stall a moving line; a stamp ahead of now counts as just
@@ -243,7 +243,7 @@ holder record.
   exit status through. When the line stalls for 300 s, or `--max-wait` runs out
   (default 90 s, under Claude Code's 120 s Bash timeout), it exits 75 and runs
   nothing, saying which. `--now` runs it at once, unqueued and width-bound. From
-  4.14 `--on-timeout run` exits 2, and `--on-timeout exit` warns that it is
+  5.0 `--on-timeout run` exits 2, and `--on-timeout exit` warns that it is
   deprecated.
 - `greengate slots [--json]` lists the holders, the old-client slots and the
   number of waiters.

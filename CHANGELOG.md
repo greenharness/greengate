@@ -8,6 +8,10 @@ missing here.
 
 ## Unreleased
 
+The next release is a major, 5.0.0: `--on-timeout run` is removed, and
+`onBusy wait` and `slot run`'s exit 75 change meaning
+(`cli.compat.interface-is-public`).
+
 ### Changed
 
 - **BREAKING: a wait that ends runs nothing** (ADR-0022). A heavy check whose
