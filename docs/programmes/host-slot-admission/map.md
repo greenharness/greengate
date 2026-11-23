@@ -48,12 +48,28 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 
 ## Handoff
 
-2026-11-22, charting boundary. Charted and researched in one session; 7 decisions
-closed (t01–t07). Next, in order: t09 (the journal records holders and hold
-time; lands first so the builds can be measured), t10 (research: hand-set held
-marker), then the builds t11 (admission and waits, amends ADR-0009), t12 (relais
-setup lease) and t13 (reorder), then the t08 workday measure. No steps are
-left to the person.
+2026-11-23, t09 built and merged. Branch `feat/slots-journal-holders` (plan
+`docs/plans/2026-11-23-slot-journal-records-holders.md`):
+- every wait line carries `holders` and `holder_jobs`;
+- holder records carry a lease id;
+- a dropped lease appends one `released` line with `held_ms`;
+- a gone holder's record is swept at the next grant, by its free flock.
+
+Merged as #510. The release PR that carries this handoff cuts
+greenharness-slots/greengate 4.13.0 (plan Phase 3); the session installs it. Then relais
+Phase 4: its lock goes from 4.0.0 to 4.13.0, then a release and an install.
+After each install, the plan's `## Measure` runs over 24 hours.
+
+Next, in order: t10 (research: hand-set held marker), then the builds t11,
+t12 and t13, then the t08 workday measure, which reads the journal as its
+"Look at" notes say. No steps are left to the person.
+
+Lessons:
+- Under a load of 240 to 350, the pre-commit clippy and test checks were
+  deferred to CI. Run `cargo clippy -D warnings` by hand before the push: it
+  caught one lint.
+- `cargo-semver-checks` is not installed on this machine.
+- A slot test that builds `Holder::here` records the worktree path; matching a bare word in its JSON broke in `amont-wt-release-…` ("release" holds "lease"). Match keys with their quotes.
 
 ## Not yet specified
 
