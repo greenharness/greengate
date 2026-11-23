@@ -10,14 +10,16 @@ due = "2026-11-24"
 
 ## Question
 
-greengate/greenharness-slots 4.13.0 and relais v0.78.0 were installed on
-2026-11-23 ([t09](t09-journal-holders-and-hold-time.md)). After 24 hours,
+greengate/greenharness-slots 4.13.0 was installed 2026-11-23 04:59 CET and
+relais v0.78.0 at 08:20 CET, with its coordinator restarted at 08:21
+([t09](t09-journal-holders-and-hold-time.md)). After 24 hours,
 does `waits.jsonl` meet the plan's `## Measure`? If not, roll back or file the
 gap.
 
 ## Look at
 
-- `/tmp/greenharness-slots-501/waits.jsonl`, from 2026-11-23 08:00.
+- `/tmp/greenharness-slots-501/waits.jsonl`: greengate lines from 04:59
+  CET, relais lines from 08:20 CET.
 - `docs/host-slots.md` "The journal": the waits-only and pairing `jq` lines.
 - The plan `docs/plans/2026-11-23-slot-journal-records-holders.md`,
   `## Measure`.
@@ -28,7 +30,8 @@ gap.
   `holders`. The target is 0: each one names a stale writer to update. Also
   give the first `"tool":"relais"` line with `holders`, and its `released`
   line.
-- Count every `released` line with `held_ms` ≥ 0. Give the share of
+- Count `released` lines whose `held_ms` is missing or not an integer
+  (target 0). Give the share of
   `admitted` lines carrying `holders` that have no release: their pid is
   dead, or they are older than the longest hold.
 - Lines per 12 hours against the 232 baseline. Above 3× it, rotation

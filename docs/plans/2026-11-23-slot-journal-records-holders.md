@@ -253,12 +253,16 @@ acquisition, and one per released lease."
 
 After each install, 24 hours of `waits.jsonl`:
 - 100% of wait rows from 4.13 writers carry `holders` and `holder_jobs`.
-- Every `released` row has `held_ms` ≥ 0 (under 1 ms floors to 0); unpaired admitted rows are counted.
+- Every `released` row has an integer `held_ms` (missing or non-integer
+  counts as a failure; under 1 ms floors to 0). Unpaired admitted rows are
+  counted.
 - Growth stays under 3× the baseline of 232 rows per 12 hours (t08); above
   that, rotation becomes its own ticket.
 - Roll back (revert, next patch release) on a panic in `Drop`, or when the
-  p95 of `waited_ms` on `admitted` rows with `holders` of 1 exceeds twice
-  its 2026-11-21/22 baseline, measured before install.
+  p95 of `waited_ms` on all `admitted` rows after install exceeds twice its
+  2026-11-21/22 baseline. Amended at close: rows from before 4.13 carry no
+  `holders`, so a `holders` filter cannot apply to the baseline (the
+  reviews' carried note on the rollback baseline).
 
 ## Implementation review
 
