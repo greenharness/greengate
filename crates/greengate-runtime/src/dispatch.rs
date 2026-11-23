@@ -1713,8 +1713,8 @@ pub fn pre_push(ctx: &Ctx) -> Verdict {
             }
             Decision::Skip(Skip::CompletedEarlier) => {
                 crate::say!(
-                    "{} {} ran on this tree earlier and did not pass cleanly (it warned or \
-                     could not run) — not repeating it here",
+                    "{} {} ended on this tree earlier without passing (it warned, could not \
+                     run, or was deferred to CI on a busy host) — not repeating it here",
                     warning_sign(),
                     highlight(check.name()),
                 );
@@ -1878,7 +1878,13 @@ pub fn pre_push(ctx: &Ctx) -> Verdict {
             // Recorded as a completion for an hour (ADR-0022), so land's push
             // after a pre-stage deferral does not refuse it as missing.
             Outcome::Deferred => {
-                if stamped_push_gate(*check) {
+                // Only where a deferral leaves land's push nothing to show:
+                // a rehearsal or land's pre-stage (ADR-0022). A plain push's
+                // `slotWait` deferral writes none, so a later land on a freed
+                // host runs the gate rather than skip it for an hour.
+                if stamped_push_gate(*check)
+                    && (crate::rehearsal::in_prestage() || crate::rehearsal::in_snapshot())
+                {
                     completed_otherwise.push((
                         check.name().to_string(),
                         crate::gate_stamp::Completion::Deferred,
@@ -2110,7 +2116,7 @@ fn announce_skipped(names: &[&str], blocked_by: &[&str]) {
 /// offered only for `block` checks, since a `warn` check never waits on a
 /// commit or a push and the hint cannot stop it deferring there.
 fn announce_deferred(deferred: &[(&str, Severity)]) {
-    for line in deferral_advice(deferred, crate::host_slots::deferred_by_slot_wait()) {
+    for line in deferral_advice(deferred, crate::host_slots::deferred_by()) {
         println!("{line}");
     }
 }
@@ -2120,7 +2126,10 @@ fn announce_deferred(deferred: &[(&str, Severity)]) {
 /// `--raw` run waits for its slot under `GREENGATE_ON_BUSY=wait`, warn or block),
 /// then the `onBusy wait` hint only when a `block` check is in the list,
 /// since only a `block` check stops deferring under it.
-fn deferral_advice(deferred: &[(&str, Severity)], by_slot_wait: bool) -> Vec<String> {
+fn deferral_advice(
+    deferred: &[(&str, Severity)],
+    deferred_by: crate::host_slots::DeferredBy,
+) -> Vec<String> {
     let names: Vec<&str> = deferred.iter().map(|(name, _)| *name).collect();
     let mut lines = vec![format!(
         "{} {} check(s) deferred to CI, the host was busy: {}",
@@ -2148,7 +2157,7 @@ fn deferral_advice(deferred: &[(&str, Severity)], by_slot_wait: bool) -> Vec<Str
     }
     // `set onBusy wait` stops only a `slotWait` deferral: a stall defers
     // under either policy.
-    if any_block && by_slot_wait {
+    if any_block && deferred_by == crate::host_slots::DeferredBy::SlotWait {
         lines.push(format!(
             "  stop deferring the block checks: {}",
             highlight("set onBusy wait")
@@ -2992,7 +3001,7 @@ mod tests {
                 ("pre-push-probe", Severity::Warn),
                 ("pre-push-lint", Severity::Warn),
             ],
-            true,
+            crate::host_slots::DeferredBy::SlotWait,
         );
         let said = lines.join("\n");
         assert!(said.contains("2 check(s) deferred to CI"), "{said}");
@@ -3014,7 +3023,7 @@ mod tests {
                 ("pre-push-probe", Severity::Warn),
                 ("pre-push-cargo-test", Severity::Block),
             ],
-            true,
+            crate::host_slots::DeferredBy::SlotWait,
         );
         let said = lines.join("\n");
         for gate in ["pre-push-probe", "pre-push-cargo-test"] {
@@ -3040,7 +3049,10 @@ mod tests {
     /// second, after the command that waits.
     #[test]
     fn a_stall_deferral_offers_the_wait_then_the_skip_and_no_hint() {
-        let lines = deferral_advice(&[("pre-push-cargo-test", Severity::Block)], false);
+        let lines = deferral_advice(
+            &[("pre-push-cargo-test", Severity::Block)],
+            crate::host_slots::DeferredBy::LineEnded,
+        );
         let said = lines.join("\n");
         assert!(!said.contains("set onBusy wait"), "{said}");
         assert!(lines[1].contains("GREENGATE_ON_BUSY=wait"), "{said}");

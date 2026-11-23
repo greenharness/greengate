@@ -22,6 +22,11 @@ use std::time::{Duration, Instant};
 /// Exit status for "the host stayed busy; nothing ran" (EX_TEMPFAIL).
 pub const BUSY_EXIT: i32 = 75;
 
+/// Exit status for "the slot queue failed after it was joined; nothing ran"
+/// (EX_IOERR): unlike a busy host, retrying the same command fails the same
+/// way.
+pub const QUEUE_FAILED_EXIT: i32 = 74;
+
 /// The default `--max-wait`: under Claude Code's 120 s Bash timeout, so a
 /// wrapped command is never killed while it is still queued.
 pub const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(90);
@@ -137,7 +142,7 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
     match value(own, "--on-timeout") {
         None => {}
         Some("exit") => {
-            eprintln!("{BIN}: --on-timeout is deprecated and will be removed: exit is the only end")
+            eprintln!("{BIN}: --on-timeout exit is deprecated and will be removed; drop it")
         }
         Some("run") => {
             eprintln!("{BIN}: --on-timeout was removed (ADR-0022): a wait that ends runs nothing");
@@ -206,13 +211,12 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
         record(0, "now", None);
         return spawn(program, rest, Launch::Unqueued, Some(jobs));
     }
-    let (window, warning) = greenharness_slots::Stall::window();
+    // Read at the binary's edge: the crate reads no environment for it.
+    let setting = std::env::var(greenharness_slots::STALL_ENV).ok();
+    let (window, warning) = greenharness_slots::Stall::window_from(setting.as_deref());
     if let Some(warning) = warning {
         eprintln!("{BIN}: warning: {warning}");
     }
-    // The caller's deadline is hard (the Bash tool's 120 s): a stall window
-    // as long as it would never end a wait first, so the ceiling alone does.
-    let mut stall = (window < max_wait).then(|| greenharness_slots::Stall::new(window));
     let started = Instant::now();
     let mut waiter = match greenharness_slots::Waiter::new_in_on(
         &dir,
@@ -227,45 +231,44 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
             return spawn(program, rest, Launch::Unqueued, Some(jobs));
         }
     };
-    let mut last_said: Option<Instant> = None;
-    let ended = loop {
-        match waiter.poll() {
-            Ok(greenharness_slots::Poll::Granted(lease)) => break Ok(lease),
-            Ok(greenharness_slots::Poll::Waiting(queue)) => {
-                let due = last_said.map_or(true, |t| t.elapsed() >= Duration::from_secs(30));
-                if due && (!queue.holders.is_empty() || queue.unknown > 0) {
-                    eprintln!("{BIN}: {}", crate::host_slots::behind(&queue));
-                    // The pointer once, not on every 30 s repeat.
-                    if last_said.is_none() {
-                        eprintln!("  see: {BIN} slots");
-                    }
-                    last_said = Some(Instant::now());
-                }
-                if stall.as_mut().is_some_and(|s| s.observe(&waiter, &queue)) {
-                    break Err(greenharness_slots::WaitEnd::Stalled);
-                }
-            }
-            // Joined, then failed: nothing runs outside the queue because of
-            // it (ADR-0022).
-            Err(e) => {
-                eprintln!("{BIN}: the host slot files failed while queued: {e}");
-                break Err(greenharness_slots::WaitEnd::IoError);
-            }
-        }
-        if started.elapsed() >= max_wait {
-            break Err(greenharness_slots::WaitEnd::Ceiling);
-        }
-        std::thread::sleep(Duration::from_millis(200));
+    // The caller's deadline is hard (the Bash tool's 120 s); the crate does
+    // not apply a stall window as long as it.
+    let bounds = greenharness_slots::WaitBounds {
+        window: Some(window),
+        ceiling: max_wait,
     };
+    let mut last_said: Option<Instant> = None;
+    let ended = greenharness_slots::wait_in_line(&mut waiter, bounds, |queue| {
+        let due = last_said.map_or(true, |t| t.elapsed() >= Duration::from_secs(30));
+        if due && (!queue.holders.is_empty() || queue.unknown > 0) {
+            eprintln!("{BIN}: {}", crate::host_slots::behind(queue));
+            // The pointer once, not on every 30 s repeat.
+            if last_said.is_none() {
+                eprintln!("  see: {BIN} slots");
+            }
+            last_said = Some(Instant::now());
+        }
+    });
     drop(waiter);
     let waited = started.elapsed().as_millis();
     let lease = match ended {
         Ok(lease) => lease,
         Err(end) => {
-            record(waited, "timeout", Some(end));
-            eprintln!("{BIN}: {}", end_message(end, window, max_wait));
-            eprintln!("  `{label}` did not run (exit {BUSY_EXIT}); retry later, or pass --now to skip the queue");
-            return BUSY_EXIT;
+            record(waited, "timeout", Some(end.end()));
+            eprintln!("{BIN}: {}", end_message(&end, max_wait));
+            return match end {
+                // A broken queue is not a busy host: retrying the same
+                // command would fail the same way.
+                greenharness_slots::LineEnd::PollFailed { .. } => {
+                    eprintln!("  `{label}` did not run (exit {QUEUE_FAILED_EXIT})");
+                    QUEUE_FAILED_EXIT
+                }
+                greenharness_slots::LineEnd::Stalled { .. }
+                | greenharness_slots::LineEnd::Ceiling { .. } => {
+                    eprintln!("  `{label}` did not run (exit {BUSY_EXIT}); retry later, or pass --now to skip the queue");
+                    BUSY_EXIT
+                }
+            };
         }
     };
     record(waited, "admitted", None);
@@ -275,18 +278,20 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
 }
 
 /// Why a `slot run` wait ended, in one line under 80 columns.
-fn end_message(end: greenharness_slots::WaitEnd, window: Duration, max_wait: Duration) -> String {
+fn end_message(end: &greenharness_slots::LineEnd, max_wait: Duration) -> String {
     match end {
-        greenharness_slots::WaitEnd::Stalled => {
+        greenharness_slots::LineEnd::Stalled { window, .. } => {
             format!(
                 "no progress in the host slot line for {}s",
                 window.as_secs()
             )
         }
-        greenharness_slots::WaitEnd::Ceiling => {
+        greenharness_slots::LineEnd::Ceiling { .. } => {
             format!("no host slot within --max-wait {}s", max_wait.as_secs())
         }
-        greenharness_slots::WaitEnd::IoError => "the host slot queue could not be read".to_string(),
+        greenharness_slots::LineEnd::PollFailed { error } => {
+            format!("the host slot queue failed while queued: {error}")
+        }
     }
 }
 

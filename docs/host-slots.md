@@ -168,21 +168,23 @@ A wait ends, from 4.14 (ADR-0022), when its line has **stalled**: no
 admission anywhere (the `admitted-at` stamp) and no change of the waiter's
 place for 300 s. The waiter's own marks run on a monotonic clock, so a
 laptop's sleep cannot stall a moving line; a stamp ahead of now counts as just
-now. `GREENHARNESS_SLOT_STALL_S` overrides the window, a test seam beside
-`GREENHARNESS_SLOT_DIR`. A wait also ends at its caller's hard **ceiling**,
-or when a poll fails after the queue was joined. Whatever ends it, nothing
-runs outside the queue because of it:
+now. `GREENHARNESS_SLOT_STALL_S` overrides the window. It is a test seam beside
+`GREENHARNESS_SLOT_DIR`, read by each binary at its edge. A wait also ends at
+its caller's hard **ceiling**, or when three polls in a row fail after the
+queue was joined. One loop in the crate, `wait_in_line`, applies the rule for
+every caller. Whatever ends a wait, nothing runs outside the queue because of
+it:
 
 | Caller | Stall window | Ceiling | At the end |
 |---|---|---|---|
 | hook check, `onBusy wait` (and every rehearsal) | 300 s | `greengate.timeout` (3600 s when 0) | defers to CI |
 | heavy `warn` check of land's pre-stage | 300 s | `greengate.warnSlotWait` (600 s, never above the timeout) | defers |
 | hook check, `onBusy defer` | none | `slotWait` (60 s) | defers |
-| `greengate slot run` | 300 s, never above `--max-wait` | `--max-wait` (90 s) | exits 75 |
+| `greengate slot run` | 300 s, never above `--max-wait` | `--max-wait` (90 s) | exits 75 (74 when the queue failed) |
 | relais verification command | 300 s | the run's total budget | blocks `admission_wait_exhausted` |
 
-A gate that defers inside a rehearsal or land's pre-stage writes a `deferred`
-completion record for the tree (ADR-0018's `refs/notes/amont-gate-done`),
+A gate that defers inside a rehearsal or land's pre-stage (only there) writes a
+`deferred` completion record for the tree (ADR-0018's `refs/notes/amont-gate-done`),
 which answers for an hour: land's push does not refuse the gate it could not
 run, and CI runs it. It is never a stamp or an attestation.
 

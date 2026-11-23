@@ -888,26 +888,127 @@ impl Drop for Waiter {
     }
 }
 
-/// Wait up to `budget` for `weight` slots, polling. `Ok(None)` when the
-/// budget ran out. `on_wait` sees each answer while waiting.
+/// Wait for `weight` slots while the line moves, at most `budget` (ADR-0022:
+/// [`wait_in_line`] with the [`STALL`] window). `Ok(None)` when the wait
+/// ended without a slot, `Err` when polling kept failing. `on_wait` sees
+/// each answer while waiting.
 pub fn acquire(
     sizing: Sizing,
     weight: u32,
     holder: Holder,
     budget: Duration,
-    mut on_wait: impl FnMut(&Queue),
+    on_wait: impl FnMut(&Queue),
 ) -> io::Result<Option<Lease>> {
-    let started = Instant::now();
     let mut waiter = Waiter::new(sizing, weight, holder)?;
+    let bounds = WaitBounds {
+        window: Some(STALL),
+        ceiling: budget,
+    };
+    match wait_in_line(&mut waiter, bounds, on_wait) {
+        Ok(lease) => Ok(Some(lease)),
+        Err(LineEnd::PollFailed { error }) => Err(error),
+        Err(LineEnd::Stalled { .. } | LineEnd::Ceiling { .. }) => Ok(None),
+    }
+}
+
+/// How a wait in line is bounded (ADR-0022): the stall window (`None`: no
+/// stall rule) and the caller's hard ceiling. A window as long as the
+/// ceiling would never end a wait first, so it is not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitBounds {
+    pub window: Option<Duration>,
+    pub ceiling: Duration,
+}
+
+/// Why a wait in line ended without a slot.
+#[derive(Debug)]
+pub enum LineEnd {
+    /// No admission anywhere and no change of place for `window`.
+    Stalled { window: Duration, position: usize },
+    /// The caller's hard ceiling ran out after `waited`.
+    Ceiling { waited: Duration },
+    /// [`POLL_FAILURES`] polls in a row failed after the queue was joined.
+    PollFailed { error: io::Error },
+}
+
+impl LineEnd {
+    /// The journal's `"end"` for this ending.
+    pub fn end(&self) -> WaitEnd {
+        match self {
+            LineEnd::Stalled { .. } => WaitEnd::Stalled,
+            LineEnd::Ceiling { .. } => WaitEnd::Ceiling,
+            LineEnd::PollFailed { .. } => WaitEnd::IoError,
+        }
+    }
+}
+
+/// How many polls in a row may fail before a wait ends: one failed read of
+/// the slot files (a busy disk, a record mid-rename) is not a broken queue.
+pub const POLL_FAILURES: u32 = 3;
+
+/// Wait in line until a slot is granted, the line stalls, or the ceiling
+/// runs out (ADR-0022): the one loop every caller uses, so greengate's hooks,
+/// `slot run` and relais end a wait the same way. `on_wait` sees each answer
+/// while waiting.
+pub fn wait_in_line(
+    waiter: &mut Waiter,
+    bounds: WaitBounds,
+    on_wait: impl FnMut(&Queue),
+) -> Result<Lease, LineEnd> {
+    let joined = Instant::now();
+    let dir = waiter.dir.clone();
+    wait_in_line_with(
+        bounds,
+        || waiter.poll(),
+        || (joined.elapsed(), now_ms(), admitted_at(&dir)),
+        std::thread::sleep,
+        on_wait,
+    )
+}
+
+/// [`wait_in_line`] against given polls and clocks: `clock` answers the time
+/// since the wait began (monotonic), then now and the last admission (wall
+/// milliseconds). The seam the tests drive.
+fn wait_in_line_with(
+    bounds: WaitBounds,
+    mut poll: impl FnMut() -> io::Result<Poll>,
+    mut clock: impl FnMut() -> (Duration, u128, u128),
+    mut sleep: impl FnMut(Duration),
+    mut on_wait: impl FnMut(&Queue),
+) -> Result<Lease, LineEnd> {
+    let mut stall = bounds
+        .window
+        .filter(|window| *window < bounds.ceiling)
+        .map(Stall::new);
+    let mut failures = 0;
     loop {
-        match waiter.poll()? {
-            Poll::Granted(lease) => return Ok(Some(lease)),
-            Poll::Waiting(queue) => on_wait(&queue),
+        match poll() {
+            Ok(Poll::Granted(lease)) => return Ok(lease),
+            Ok(Poll::Waiting(queue)) => {
+                failures = 0;
+                on_wait(&queue);
+                let (elapsed, now, admitted) = clock();
+                if let Some(stall) = stall.as_mut() {
+                    if stall.observe_at(&queue, elapsed, now, admitted) {
+                        return Err(LineEnd::Stalled {
+                            window: stall.limit(),
+                            position: queue.position,
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                failures += 1;
+                if failures >= POLL_FAILURES {
+                    return Err(LineEnd::PollFailed { error });
+                }
+            }
         }
-        if started.elapsed() >= budget {
-            return Ok(None);
+        let (elapsed, _, _) = clock();
+        if elapsed >= bounds.ceiling {
+            return Err(LineEnd::Ceiling { waited: elapsed });
         }
-        std::thread::sleep(Duration::from_millis(200));
+        sleep(Duration::from_millis(200));
     }
 }
 
@@ -948,11 +1049,25 @@ impl Stall {
         }
     }
 
-    /// The window to stall after: [`STALL`], or [`STALL_ENV`] (whole seconds
-    /// from 1). An empty, zero or unreadable value gives [`STALL`] and a
-    /// warning for the caller to print once.
-    pub fn window() -> (Duration, Option<String>) {
-        stall_window_from(std::env::var(STALL_ENV).ok().as_deref())
+    /// The window to stall after, from the caller's reading of
+    /// [`STALL_ENV`] (whole seconds from 1): [`STALL`] when unset. An empty,
+    /// zero or unreadable value gives [`STALL`] and a warning for the caller
+    /// to print once. Each binary reads the variable at its edge; the crate
+    /// reads no environment for it.
+    pub fn window_from(setting: Option<&str>) -> (Duration, Option<String>) {
+        match setting {
+            None => (STALL, None),
+            Some(text) => match text.trim().parse::<u64>() {
+                Ok(secs) if secs >= 1 => (Duration::from_secs(secs), None),
+                _ => (
+                    STALL,
+                    Some(format!(
+                        "{STALL_ENV}={text:?} is not a whole number of seconds from 1; using {}",
+                        STALL.as_secs()
+                    )),
+                ),
+            },
+        }
     }
 
     /// Feed one poll's answer, at the real clocks: whether the line has now
@@ -998,37 +1113,17 @@ impl Stall {
     }
 }
 
-fn stall_window_from(value: Option<&str>) -> (Duration, Option<String>) {
-    match value {
-        None => (STALL, None),
-        Some(v) => match v.trim().parse::<u64>() {
-            Ok(s) if s >= 1 => (Duration::from_secs(s), None),
-            _ => (
-                STALL,
-                Some(format!(
-                    "{STALL_ENV}={v:?} is not a whole number of seconds from 1; using {}",
-                    STALL.as_secs()
-                )),
-            ),
-        },
-    }
+/// What tells one lease's records apart: its `"lease"` id, or the whole
+/// record for an older writer that names none.
+fn lease_key(text: &str, holder: &Holder) -> String {
+    raw(text, "lease").unwrap_or_else(|| holder.to_json())
 }
 
-/// The jobs one holder record adds to Σjobs, once per lease: its `jobs`, or
-/// `missing` for a record that names none (an older writer). The one count
-/// both the load test and the journal's `holder_jobs` use.
-fn lease_jobs(
-    text: &str,
-    holder: &Holder,
-    missing: u32,
-    leases: &mut std::collections::BTreeSet<String>,
-) -> u32 {
-    let lease = raw(text, "lease").unwrap_or_else(|| holder.to_json());
-    if leases.insert(lease) {
-        holder.jobs.unwrap_or(missing)
-    } else {
-        0
-    }
+/// The jobs one lease adds to Σjobs: its `jobs`, or `missing` for a record
+/// that names none (an older writer). The one count both the load test and
+/// the journal's `holder_jobs` use; the caller counts each lease once.
+fn lease_jobs(holder: &Holder, missing: u32) -> u32 {
+    holder.jobs.unwrap_or(missing)
 }
 
 /// Σjobs over the held slots `held`, for the load test: a held slot with no
@@ -1044,7 +1139,11 @@ fn held_jobs(dir: &Path, held: &[u32], missing: u32) -> u32 {
             .and_then(|t| Holder::from_json(t).map(|h| (t, h)))
         {
             Some((text, holder)) if platform::alive(holder.pid) => {
-                lease_jobs(text, &holder, missing, &mut leases)
+                if leases.insert(lease_key(text, &holder)) {
+                    lease_jobs(&holder, missing)
+                } else {
+                    0
+                }
             }
             _ => missing,
         };
@@ -1148,6 +1247,7 @@ pub struct WaitContext<'a> {
 /// Why a wait ended without a slot: the line stalled, the caller's hard
 /// ceiling ran out, or the slot files failed after the queue was joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WaitEnd {
     Stalled,
     Ceiling,
@@ -1287,7 +1387,9 @@ fn occupancy(dir: &Path, missing: u32) -> Option<(usize, u32)> {
             continue;
         }
         slots += 1;
-        jobs = jobs.saturating_add(lease_jobs(&text, &holder, missing, &mut leases));
+        if leases.insert(lease_key(&text, &holder)) {
+            jobs = jobs.saturating_add(lease_jobs(&holder, missing));
+        }
     }
     Some((slots, jobs))
 }
@@ -2455,28 +2557,26 @@ mod tests {
 
     // --- ADR-0022: admission counts the holders, waits end on a stall ---
 
-    /// On 6 cores, one holder at `jobs 2`, past the ramp.
-    fn one_holder_at(load1: f64, tag: &str) -> (PathBuf, Lease, Waiter) {
-        let d = scratch(tag);
-        let t0 = 30_000_000;
-        let six = |load1, now_ms| Probe {
-            load1: Some(load1),
+    /// On 6 cores, one holder at `jobs 2`, and a second waiter in line.
+    fn one_holder_and_a_waiter(tag: &str) -> (PathBuf, Lease, Waiter) {
+        let dir = scratch(tag);
+        let first = Probe {
+            load1: Some(1.0),
             cores: 6,
-            now_ms,
+            now_ms: 30_000_000,
             own_held: 0,
         };
-        let mut a = Waiter::new_in(&d, Sizing::Auto, 1, with_jobs("a", 2)).unwrap();
-        let lease = granted(a.poll_with(six(1.0, t0)).unwrap());
-        let mut b = Waiter::new_in(&d, Sizing::Auto, 1, with_jobs("b", 2)).unwrap();
-        let _ = b.poll_with(six(load1, t0 + 61_000)); // the decision under test
-        (d, lease, b)
+        let mut a = Waiter::new_in(&dir, Sizing::Auto, 1, with_jobs("a", 2)).unwrap();
+        let lease = granted(a.poll_with(first).unwrap());
+        let b = Waiter::new_in(&dir, Sizing::Auto, 1, with_jobs("b", 2)).unwrap();
+        (dir, lease, b)
     }
 
     /// t01: one holder at jobs 2 measured 12.3 by itself; the limit is
     /// 6 + 4×2 = 14, so the next job is admitted (it was refused at >= 6).
     #[test]
     fn a_holders_own_load_does_not_shut_the_next_slot() {
-        let d = scratch("t01-admit");
+        let dir = scratch("t01-admit");
         let t0 = 30_000_000;
         let six = |load1, now_ms| Probe {
             load1: Some(load1),
@@ -2484,9 +2584,9 @@ mod tests {
             now_ms,
             own_held: 0,
         };
-        let mut a = Waiter::new_in(&d, Sizing::Auto, 1, with_jobs("a", 2)).unwrap();
+        let mut a = Waiter::new_in(&dir, Sizing::Auto, 1, with_jobs("a", 2)).unwrap();
         let _a = granted(a.poll_with(six(1.0, t0)).unwrap());
-        let mut b = Waiter::new_in(&d, Sizing::Auto, 1, with_jobs("b", 2)).unwrap();
+        let mut b = Waiter::new_in(&dir, Sizing::Auto, 1, with_jobs("b", 2)).unwrap();
         let _b = granted(b.poll_with(six(12.3, t0 + 61_000)).unwrap());
     }
 
@@ -2494,7 +2594,7 @@ mod tests {
     /// the limit it was held to.
     #[test]
     fn outside_load_still_holds_the_next_job_back() {
-        let (_d, _lease, mut b) = one_holder_at(1.0, "t01-refuse");
+        let (_dir, _lease, mut b) = one_holder_and_a_waiter("t01-refuse");
         let q = waiting(
             b.poll_with(Probe {
                 load1: Some(300.0),
@@ -2522,9 +2622,9 @@ mod tests {
     /// slot's width, in the load test and in the journal alike.
     #[test]
     fn a_record_without_jobs_counts_one_slots_width_everywhere() {
-        let d = scratch("missing-jobs");
+        let dir = scratch("missing-jobs");
         let lease = take(
-            &d,
+            &dir,
             1,
             Holder {
                 jobs: None,
@@ -2536,11 +2636,11 @@ mod tests {
         let stripped = text.replace(&format!(",\"jobs\":{}", lease_jobs_of(&text)), "");
         assert!(!stripped.contains("\"jobs\""), "{stripped}");
         fs::write(&lease.who[0], stripped).unwrap();
-        assert_eq!(held_jobs(&d, &[0], 2), 2);
-        assert_eq!(occupancy(&d, 2), Some((1, 2)));
+        assert_eq!(held_jobs(&dir, &[0], 2), 2);
+        assert_eq!(occupancy(&dir, 2), Some((1, 2)));
         // A held slot with no record at all counts the same in the load test.
         fs::remove_file(&lease.who[0]).unwrap();
-        assert_eq!(held_jobs(&d, &[0], 2), 2);
+        assert_eq!(held_jobs(&dir, &[0], 2), 2);
     }
 
     fn lease_jobs_of(text: &str) -> String {
@@ -2643,10 +2743,13 @@ mod tests {
 
     #[test]
     fn the_stall_window_is_three_hundred_seconds_unless_the_seam_sets_it() {
-        assert_eq!(stall_window_from(None), (STALL, None));
-        assert_eq!(stall_window_from(Some("5")), (Duration::from_secs(5), None));
+        assert_eq!(Stall::window_from(None), (STALL, None));
+        assert_eq!(
+            Stall::window_from(Some("5")),
+            (Duration::from_secs(5), None)
+        );
         for bad in ["", "0", "-1", "5m"] {
-            let (window, warning) = stall_window_from(Some(bad));
+            let (window, warning) = Stall::window_from(Some(bad));
             assert_eq!(window, STALL, "{bad:?}");
             assert!(warning.is_some_and(|w| w.contains(STALL_ENV)), "{bad:?}");
         }
@@ -2671,5 +2774,118 @@ mod tests {
         assert!(last_wait(&dir).contains("\"outcome\":\"timeout\",\"end\":\"stalled\""));
         record_wait(&dir, "t", 1, 0, "admitted");
         assert!(!last_wait(&dir).contains("\"end\""));
+    }
+
+    /// A scripted line for [`wait_in_line_with`]: each poll's answer from
+    /// the script, the clock moving 10 s per poll.
+    struct Line {
+        polls: std::collections::VecDeque<io::Result<Poll>>,
+        elapsed: Duration,
+        admitted_ms: u128,
+    }
+
+    const WALL0: u128 = 1_800_000_000_000;
+
+    fn waiting_at(position: usize) -> io::Result<Poll> {
+        Ok(Poll::Waiting(at(position)))
+    }
+
+    fn run_line(
+        bounds: WaitBounds,
+        polls: Vec<io::Result<Poll>>,
+        admit_every_secs: Option<u64>,
+    ) -> Result<Lease, LineEnd> {
+        let line = std::cell::RefCell::new(Line {
+            polls: polls.into(),
+            elapsed: Duration::ZERO,
+            admitted_ms: WALL0,
+        });
+        wait_in_line_with(
+            bounds,
+            || {
+                let mut line = line.borrow_mut();
+                line.elapsed += Duration::from_secs(10);
+                if let Some(every) = admit_every_secs {
+                    if line.elapsed.as_secs() % every == 0 {
+                        line.admitted_ms = WALL0 + line.elapsed.as_millis();
+                    }
+                }
+                line.polls
+                    .pop_front()
+                    .unwrap_or_else(|| Err(io::Error::other("the script ran out")))
+            },
+            || {
+                let line = line.borrow();
+                (
+                    line.elapsed,
+                    WALL0 + line.elapsed.as_millis(),
+                    line.admitted_ms,
+                )
+            },
+            |_| {},
+            |_| {},
+        )
+    }
+
+    /// The shared loop, t02's red test: at position 10, an admission a
+    /// minute; a budget would have cut it short, the stall rule never does,
+    /// and only the ceiling ends it.
+    #[test]
+    fn the_shared_loop_waits_while_the_line_moves() {
+        let polls = (0..80)
+            .map(|step| waiting_at(10 - (step / 6).min(9)))
+            .collect();
+        let bounds = WaitBounds {
+            window: Some(STALL),
+            ceiling: Duration::from_secs(600),
+        };
+        match run_line(bounds, polls, Some(60)) {
+            Err(LineEnd::Ceiling { waited }) => assert!(waited >= Duration::from_secs(600)),
+            other => panic!("expected the ceiling, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_shared_loop_ends_a_stalled_line_and_says_where() {
+        let polls = (0..60).map(|_| waiting_at(3)).collect();
+        let bounds = WaitBounds {
+            window: Some(Duration::from_secs(60)),
+            ceiling: Duration::from_secs(600),
+        };
+        match run_line(bounds, polls, None) {
+            Err(LineEnd::Stalled { window, position }) => {
+                assert_eq!((window, position), (Duration::from_secs(60), 3));
+            }
+            other => panic!("expected a stall, got {other:?}"),
+        }
+    }
+
+    /// A window as long as the ceiling never ends the wait first.
+    #[test]
+    fn a_window_as_long_as_the_ceiling_leaves_the_ceiling_to_end_it() {
+        let polls = (0..20).map(|_| waiting_at(1)).collect();
+        let bounds = WaitBounds {
+            window: Some(Duration::from_secs(90)),
+            ceiling: Duration::from_secs(90),
+        };
+        assert!(matches!(
+            run_line(bounds, polls, None),
+            Err(LineEnd::Ceiling { .. })
+        ));
+    }
+
+    /// Two failed polls are a hiccup; the third in a row ends the wait.
+    #[test]
+    fn three_failed_polls_in_a_row_end_the_wait() {
+        let fail = || Err(io::Error::other("busy disk"));
+        let bounds = WaitBounds {
+            window: None,
+            ceiling: Duration::from_secs(600),
+        };
+        let polls = vec![fail(), fail(), waiting_at(1), fail(), fail(), fail()];
+        match run_line(bounds, polls, None) {
+            Err(LineEnd::PollFailed { error }) => assert_eq!(error.to_string(), "busy disk"),
+            other => panic!("expected the poll failure, got {other:?}"),
+        }
     }
 }

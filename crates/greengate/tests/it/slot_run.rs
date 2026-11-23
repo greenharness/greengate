@@ -201,7 +201,7 @@ fn a_stalled_line_exits_75_before_the_max_wait() {
     let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
     assert!(waits.contains("\"end\":\"stalled\""), "{waits}");
     let _ = holder.kill(); // best-effort: the holder is not under test
-    let _ = holder.wait();
+    let _ = holder.wait(); // best-effort: reap the killed holder
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
 
