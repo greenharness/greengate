@@ -24,6 +24,15 @@ missing here.
 
 ### Fixed
 
+- A heavy check now bounds vitest and Go too: greengate sets
+  `VITEST_MAX_WORKERS` and `GOMAXPROCS` to the slot's width beside the cargo
+  and make keys (`go build` / `go test` default `-p` and `-parallel` to
+  `GOMAXPROCS`). `pre-push-run-tests-js`
+  booked 2 jobs but vitest 4 started a worker per core but one (11 on a
+  6-core Mac), and a loaded host then timed out PGlite tests. A suite that
+  must run its files one at a time sets `VITEST_MAX_WORKERS=1` in its own
+  `test` script: the variable outranks `fileParallelism: false`.
+
 - On a release, `pre-push-audit-python` asks `uv export --no-dev` what ships
   only when a batch has findings to split, once per lock directory, and not
   after the time budget is spent. Out of time, every finding counts and a
