@@ -899,12 +899,12 @@ pub fn acquire(
     budget: Duration,
     on_wait: impl FnMut(&Queue),
 ) -> io::Result<Option<Lease>> {
-    let mut waiter = Waiter::new(sizing, weight, holder)?;
+    let waiter = Waiter::new(sizing, weight, holder)?;
     let bounds = WaitBounds {
         window: Some(STALL),
         ceiling: budget,
     };
-    match wait_in_line(&mut waiter, bounds, on_wait) {
+    match wait_in_line(waiter, bounds, on_wait) {
         Ok(lease) => Ok(Some(lease)),
         Err(LineEnd::PollFailed { error }) => Err(error),
         Err(LineEnd::Stalled { .. } | LineEnd::Ceiling { .. }) => Ok(None),
@@ -948,10 +948,11 @@ pub const POLL_FAILURES: u32 = 3;
 
 /// Wait in line until a slot is granted, the line stalls, or the ceiling
 /// runs out (ADR-0022): the one loop every caller uses, so greengate's hooks,
-/// `slot run` and relais end a wait the same way. `on_wait` sees each answer
-/// while waiting.
+/// `slot run` and relais end a wait the same way. It takes the waiter: when
+/// it returns, granted or not, this caller has left the queue. `on_wait` sees
+/// each answer while waiting.
 pub fn wait_in_line(
-    waiter: &mut Waiter,
+    mut waiter: Waiter,
     bounds: WaitBounds,
     on_wait: impl FnMut(&Queue),
 ) -> Result<Lease, LineEnd> {

@@ -837,7 +837,7 @@ fn wait_for_slot(
     holder: greenharness_slots::Holder,
     bounds: greenharness_slots::WaitBounds,
 ) -> Result<greenharness_slots::Lease, Reason> {
-    let mut waiter = match greenharness_slots::Waiter::new_in_on(
+    let waiter = match greenharness_slots::Waiter::new_in_on(
         &greenharness_slots::dir(),
         sizing,
         1,
@@ -851,7 +851,7 @@ fn wait_for_slot(
         Err(e) => return Err(Reason::Io(e.to_string())),
     };
     let mut said = false;
-    greenharness_slots::wait_in_line(&mut waiter, bounds, |queue| {
+    greenharness_slots::wait_in_line(waiter, bounds, |queue| {
         if !said && (!queue.holders.is_empty() || queue.unknown > 0) {
             said = true;
             crate::hooks::common::say(&format!("  {}", behind(queue)));

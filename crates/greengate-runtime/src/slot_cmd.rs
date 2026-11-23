@@ -218,7 +218,7 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
         eprintln!("{BIN}: warning: {warning}");
     }
     let started = Instant::now();
-    let mut waiter = match greenharness_slots::Waiter::new_in_on(
+    let waiter = match greenharness_slots::Waiter::new_in_on(
         &dir,
         sizing,
         weight,
@@ -238,7 +238,7 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
         ceiling: max_wait,
     };
     let mut last_said: Option<Instant> = None;
-    let ended = greenharness_slots::wait_in_line(&mut waiter, bounds, |queue| {
+    let ended = greenharness_slots::wait_in_line(waiter, bounds, |queue| {
         let due = last_said.map_or(true, |t| t.elapsed() >= Duration::from_secs(30));
         if due && (!queue.holders.is_empty() || queue.unknown > 0) {
             eprintln!("{BIN}: {}", crate::host_slots::behind(queue));
@@ -249,7 +249,6 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
             last_said = Some(Instant::now());
         }
     });
-    drop(waiter);
     let waited = started.elapsed().as_millis();
     let lease = match ended {
         Ok(lease) => lease,

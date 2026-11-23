@@ -67,6 +67,24 @@ fn slots_json_names_the_cores_and_their_source() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 
+/// Wait until `amont slots --json` shows `n` waiters, so the next one queues
+/// behind them in ticket order, never by a guessed sleep.
+fn until_waiting(slots: &Path, n: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let want = format!("\"waiting\":{n}");
+    loop {
+        let out = amont(slots, &["slots", "--json"])
+            .output()
+            .expect("amont slots");
+        let json = String::from_utf8_lossy(&out.stdout).into_owned();
+        if json.contains(&want) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "no {n} waiting: {json}");
+        std::thread::yield_now();
+    }
+}
+
 /// Wait until `amont slots --json` shows a holder, so a test never races the
 /// first wrapper's admission with a sleep.
 fn until_held(slots: &Path) -> String {
@@ -222,7 +240,8 @@ fn a_moving_line_outlasts_the_stall_window() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         ahead.push(cmd.spawn().expect("a waiter ahead"));
-        std::thread::sleep(Duration::from_millis(300)); // ticket order
+        // Ticket order: the next waiter joins only once this one is queued.
+        until_waiting(&slots, ahead.len() - 1);
     }
     let started = Instant::now();
     let out = amont(&slots, &["slot", "run", "--max-wait", "60", "--", "true"])
