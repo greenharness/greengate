@@ -140,7 +140,7 @@ acquisition, and one per released lease."
 
 ## Phases
 
-- [ ] Phase 1 — crate: `crates/greenharness-slots/src/lib.rs`
+- [x] Phase 1 — crate: `crates/greenharness-slots/src/lib.rs`
   - `Lease` gains a private `release: Option<Release>` built in `poll_with`
     from the waiter's `dir`, holder, weight, an `Instant` and `now_ms()`
     taken at the grant. `Release` holds `PathBuf`, `String` and `Instant`
@@ -164,7 +164,7 @@ acquisition, and one per released lease."
     - the old-field test (`record_wait_keeps_its_old_fields…`) still passes;
     - every wait outcome written by `record_wait_named` carries `waited_ms`,
       which the `has("waited_ms")` filter relies on.
-- [ ] Phase 2 — amont readers: `crates/greengate/tests/it/busy_defers.rs`,
+- [x] Phase 2 — amont readers: `crates/greengate/tests/it/busy_defers.rs`,
   `crates/greengate/tests/it/cluster_gates.rs`,
   `crates/greengate/tests/it/slot_run.rs`
   - Assertions that count or index wait lines filter on
@@ -213,18 +213,30 @@ acquisition, and one per released lease."
 ## Verification
 
 - Phase 1: `cargo test -p greenharness-slots` → the new tests pass, and they
-  go red with the change reverted → <result>.
+  go red with the change reverted → 58 pass. With the release write and the
+  lease-id dedupe disabled, 3 new tests fail. With the flock sweep disabled,
+  `a_gone_holders_record_is_removed_at_the_next_grant` fails.
 - Phase 2: `cargo test -p greengate --test it -- busy_defers cluster_gates
-  slot_run` → green, with the release-row assertion → <result>.
+  slot_run` → green, with the release-row assertion → 60 pass (162–276 s,
+  load 240–350). `cargo clippy -D warnings` on both crates is clean.
 - Piloted, amont, before the push: in the worktree, set
   `GREENHARNESS_SLOT_DIR=<scratch>` and run `greengate slot run -- sleep 2`
   while a second `slot run -- sleep 5` holds a slot →
   - the second admitted row has `"holders":2`;
   - each run leaves one `released` row, with `held_ms` in [2000, 2300] and [5000, 5300].
-  → <result>
+  → the run used the worktree binary, `GREENGATE_HOST_SLOTS=2` and an unset
+  `GREENHARNESS_HOST_SLOT`, with the second run started after the first's
+  admitted line. The first run was still running at the second's end. Second
+  admitted: `"holders":2,"holder_jobs":6`. Releases: `held_ms` 2029 and 5024,
+  with each `granted_ms` at or before its admitted `at_ms`. Both `jq` lines in
+  host-slots.md pair them and skip a torn last line.
 - After install: `/tmp/greenharness-slots-501/waits.jsonl` gains a real
-  greengate row with `holders`, and a `released` row → <result>.
-- After the relais install: the same for a `"tool":"relais"` row → <result>.
+  greengate row with `holders`, and a `released` row → Phase 3, after the
+  4.13.0 release.
+- After the relais install: the same for a `"tool":"relais"` row → Phase 4.
+- Public API: `cargo-semver-checks` is not installable here (no formula, no
+  binstall). Instead, `git diff origin/main` of lib.rs changes no `pub`
+  line.
 
 ## Measure
 
@@ -237,6 +249,17 @@ After each install, 24 hours of `waits.jsonl`:
   p95 of `waited_ms` on `admitted` rows with `holders` of 1 exceeds twice
   its 2026-11-21/22 baseline, measured before install.
 
+## Implementation review
+
+- implementation-review (opus): approve ×3 (round 1, two deltas). Plan-wording lows fixed or moot. 58k+37k+33k, 26+22+26 s.
+- backend (opus): approve-with-changes → approve. Fixed: stale record sweep (by free flock, not pid), temp cleanup, `holds-until`. Deliberate: null row on an unreadable record, 200 ms test wait. 60k+34k+30k.
+- lang:rust (opus): approve-with-changes → approve. Fixed: `to_json_with`, `Release` keeps the `Holder` (boxed), `Relaxed`. Deliberate: a tuple, not an `Occupancy` struct (one private caller). 50k+25k+25k.
+- unix (opus): approve-with-changes → approve. Deliberate: I/O in `Drop` (local dir by contract), no `command` cap (readers skip torn lines). Open low: the `jq` lines name the macOS path. 41k+29k.
+
 ## Outcome
+
+Phases 1–2 shipped on `feat/slots-journal-holders`; next: Phase 3's
+release (4.13.0 through `tag-release`, crates.io conclusion read, install),
+then Phase 4 in relais.
 
 <!-- panel: repos=amont,relais adds=contract reviewers=backend,lang:rust,tui,unix,architect,po,codex body-sha=ee1562f70030 -->
