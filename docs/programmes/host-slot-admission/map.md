@@ -49,38 +49,64 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 
 ## Handoff
 
-2026-11-23, t10 closed (research, docs only). It found no hand-set uses in 7
-days. The ticket's premise was half right: greenbelay still advises an inline
-marker on `cargo test`, but stays silent on an inline marker before
-`amont slot run`, `amont run` or `git commit`, and those skip the queue.
-greengate, relais and greenbelay each read the marker differently today. The
-decided format, check, rollout and fixture list are in t10's Resolution. The
-build is filed as [t15](t15-build-held-marker-lease.md).
+2026-11-23, t11 Phases 1–3 (branch `fix/hsa-t11`, plan
+`docs/plans/2026-11-23-admission-counts-holders-stalled-waits.md`). The crate,
+greengate and ADR-0022 are built and tested, in one amont PR. Nothing is
+released yet, and t11 stays open.
 
-Earlier, t09 shipped greengate/greenharness-slots 4.13.0 and relais v0.78.0,
-both installed. Plan: `docs/plans/2026-11-23-slot-journal-records-holders.md`.
+What the PR holds:
 
-Due 2026-11-24, [t14](t14-journal-measure-after-install.md): 24 hours of the
-journal after the 4.13 install:
-- 4.13 writers carry the fields, and the first relais line is in;
-- the unpaired-admitted count;
-- growth under 3× the baseline;
-- the p95 waited guard.
+- Admission takes a further slot while `load1 < cores + 4 × Σjobs`.
+- A wait ends on a 300 s stall or at its ceiling, and it defers or exits 75.
+  It never runs unqueued.
+- A pre-stage deferral writes an hour-long `deferred` completion, so land
+  still pushes.
+- `GREENGATE_ON_BUSY=now` and `slot run --now` skip the queue up front.
+- `--on-timeout run` is refused.
+- The journal gains `end` and the outcome `now`.
+- ADR-0022 replaces the heads of `hooks.host-concurrency`,
+  `hooks.busy-policy` and `hooks.gates-before-connection`.
 
-Next, in order: t14 when due, then the builds t11, t12, t13 and t15. t15 can
-share t11's crate release, but its three rollout steps each need an install
-before the next. Then t08, which reads the journal as its "Look at" notes say.
-No steps are left to the person.
+Measured: t01's admission test fails on `origin/main` (the old rule refuses
+at 12.3) and passes here. A real-window pilot exits 75 after 300 s with
+`"end":"stalled"`.
+
+Next, in order:
+
+1. [t14](t14-journal-measure-after-install.md), due 2026-11-24: the 4.13
+   journal day. It must close before anything below is installed.
+2. t11 Phase 4: release greengate 5.0.0 (crates.io included; a major: `cli.compat.interface-is-public`) and install it.
+   Read the crates.io job's conclusion: its token is a 90-day one. Run
+   semver-checks, or an equivalent check, before the publish.
+3. t11 Phase 5 (relais):
+   - bump the crate, `Stall` in `heavy.rs` `take()`, and `admission_overrun`,
+     for the host-slot wait only;
+   - the relais record that amends `execution.resource-budgets`;
+   - release and install.
+4. t11 Phase 6: greenbelay's `heavy-build-unqueued` learns `--now`. Then t11
+   closes and [t08](t08-workday-measure.md) can start.
+5. Then t12, t13, t15, and [t16](t16-coordinator-queue-moving-line.md) once
+   relais ships.
+
+The plan's "Full reviews" sidecar lists the findings carried into Phases 4–6.
+
+Accepted gaps:
+
+- `slot run`'s `--max-wait` and `onBusy defer`'s `slotWait` stay hard (the
+  Decision log), so 6 of 50 `slot run` timeouts and 14 of 103 deferrals,
+  which were in a moving line, are not saved.
+- An I/O error before the queue is joined still runs unqueued ("slots off").
 
 Lessons:
-- Under a load of 240 to 350 the pre-commit clippy and test checks deferred
-  to CI. Run `cargo clippy -D warnings` by hand before the push.
-- `cargo-semver-checks` is not installed on this machine.
-- A slot test that builds `Holder::here` records the worktree path, so match
-  JSON keys with their quotes, never bare words.
-- Probe a greenbelay rule with the installed binary
-  (`greenbelay hook` on a PreToolUse payload, with a scratch
-  `CLAUDE_CONFIG_DIR`). It settles what the rule does in seconds.
+
+- The host was jammed all session, at load 30 to 70 with 1 to 2 holders.
+  Run tests through `greengate slot run --max-wait 3000` in the background.
+- A `sh -c '… | tail'` hides the failure text: write the whole log to a file
+  and grep it.
+- amont's pre-commit runs `onBusy defer`, so clippy and the tests defer at
+  commit. Run them by hand first.
+
+No steps are left to the person.
 
 ## Not yet specified
 
@@ -88,6 +114,12 @@ Lessons:
   pressure) needs its own defence beyond the load test, such as memory pressure
   as an admission input.
 - How a reorder shows in relais's pane (greengate's view is in t13).
+- A detached wait for `greengate slot run`. The Bash tool kills a command at
+  120 s, so `--max-wait` stays a hard deadline (t11's Decision log), and a
+  moving line longer than that still ends a wait. 6 of 50 `slot run` timeouts
+  since 2026-11-21 18:00 were in a moving line.
+- Whether greenbelay should flag an inline `GREENGATE_ON_BUSY=now` prefix, as
+  it flags `slot run --now` (t11 Phase 6).
 
 ## Out of scope
 

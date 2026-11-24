@@ -30,8 +30,12 @@ why.
 
 **Wait lines**, one per acquisition: `at_ms`, `tool`, `pid`, `weight`,
 `cores`, `waited_ms`, `load1`, `outcome` (`admitted`, `deferred`,
-`unqueued`, `timeout`, `handed`), `jobs` and `cap` when the writer knows
-them. Lines written by greengate's checks also carry `name` (the check),
+`unqueued`, `timeout`, `handed`, and from 5.0 `now`), `jobs` and `cap`
+when the writer knows them. From 5.0 a line whose wait ended without a slot
+also carries `end`: `stalled`, `ceiling` or `io_error` (see
+[When a wait ends](#when-a-wait-ends)); `unqueued` then means only that the
+slots were unusable (off, an unsafe directory, a queue that could not be
+joined). Lines written by greengate's checks also carry `name` (the check),
 `session` when one is known, and `"rehearsal":true` / `"prestage":true`
 inside a rehearsal snapshot / land's pre-stage.
 
@@ -42,7 +46,9 @@ observation, not an atomic count. Callers write the line after the grant, so
 an `admitted` or `handed` line counts its own lease (subtract its `weight`
 and `jobs`), while `timeout`, `unqueued` and `deferred` lines count only the
 others. Both are `null` when a record could not be read. A line without them
-comes from an older writer: its occupancy is unknown, not 0.
+comes from an older writer: its occupancy is unknown, not 0. From 5.0 a
+record that names no `jobs` adds one slot's width (`parallelism(1)`) to
+`holder_jobs`, as the load test counts it; under 4.13 it added 0.
 
 **Release lines**, one per lease when it is dropped, from 4.13: `at_ms`,
 `tool`, `pid`, `session`, `command` and `jobs` (the grant's), `weight`,
@@ -81,7 +87,9 @@ none, under the admission lock, when:
 - **no slot is held:** the floor. The first waiter on an empty host is
   always admitted, whatever its weight up to the cap;
 - **`greengate.hostSlots` is unset (automatic):** a free slot exists, the
-  one-minute load is below the core count, and at least 60 s have passed
+  one-minute load is below `cores + 4 × Σjobs` (ADR-0022: Σjobs is the `jobs`
+  of the holders, once per lease; a held slot with no record, or a record with
+  no `jobs`, counts `parallelism(1)`), and at least 60 s have passed
   since the last admission, unless the waiter's own process already holds a
   slot (one commit's checks are not spaced apart). The cap is
   `max(1, cores/2)`, with `cores` as [Cores](#cores) counts them;
@@ -89,10 +97,14 @@ none, under the admission lock, when:
   ramp. `0` turns slots off.
 
 The 60 s ramp is the load average's own lag: 10 s after a new holder starts,
-the one-minute load shows only about 15% of it.
+the one-minute load shows only about 15% of it. The `4 × Σjobs` is the
+holders' own load: one holder at `jobs 2` measured 12.3 against an idle
+baseline of about 4, so a test against the cores alone kept every other slot
+shut while that holder ran.
 
 A waiter that is not admitted says why, after whom it waits behind:
-`(2 ahead)`, `(slots full 3/3)`, `(load 31.0 >= 6 cores)` or
+`(2 ahead)`, `(slots full 3/3)`,
+`(load 31.0 >= 14 (6 cores + 4×2 holder jobs))` or
 `(one new holder per minute)`. The first such line is followed, once, by
 `see: greengate slots`.
 
@@ -150,13 +162,39 @@ slot when it ends, however it ends. While a slot is parked, a light check's
 tools run under it, width-bound, and a child `greengate slot run` does not queue. A gate that runs on the cluster executor releases the parked slot first.
 A plain push and a commit release their slot after each check.
 
-## The ceiling in land's pre-stage
+## When a wait ends
 
-Only in land's pre-stage, a heavy `warn` check waits at most
-`greengate.warnSlotWait` seconds (default 600, range 1 to 3600, never above
-`greengate.timeout`), then runs unqueued. Precedence: git config, then
-`set warnSlotWait <s>` in a trusted `greengate.conf`, then the default. A `block`
-gate and a background rehearsal wait as before.
+A wait ends, from 5.0 (ADR-0022), when its line has **stalled**: no
+admission anywhere (the `admitted-at` stamp) and no change of the waiter's
+place for 300 s. The waiter's own marks run on a monotonic clock, so a
+laptop's sleep cannot stall a moving line; a stamp ahead of now counts as just
+now. `GREENHARNESS_SLOT_STALL_S` overrides the window. It is a test seam beside
+`GREENHARNESS_SLOT_DIR`, read by each binary at its edge. A wait also ends at
+its caller's hard **ceiling**, or when three polls in a row fail after the
+queue was joined. One loop in the crate, `wait_in_line`, applies the rule for
+every caller. Whatever ends a wait, nothing runs outside the queue because of
+it:
+
+| Caller | Stall window | Ceiling | At the end |
+|---|---|---|---|
+| hook check, `onBusy wait` (and every rehearsal) | 300 s | `greengate.timeout` (3600 s when 0) | defers to CI |
+| heavy `warn` check of land's pre-stage | 300 s | `greengate.warnSlotWait` (600 s, never above the timeout) | defers |
+| hook check, `onBusy defer` | none | `slotWait` (60 s) | defers |
+| `greengate slot run` | 300 s, never above `--max-wait` | `--max-wait` (90 s) | exits 75 (74 when the queue failed) |
+| relais verification command | 300 s | the run's total budget | blocks `admission_wait_exhausted` |
+
+A gate that defers inside a rehearsal or land's pre-stage (only there) writes a
+`deferred` completion record for the tree (ADR-0018's `refs/notes/amont-gate-done`),
+which answers for an hour: land's push does not refuse the gate it could not
+run, and CI runs it. It is never a stamp or an attestation.
+
+Skipping the queue is a choice made up front, journalled `now`:
+`GREENGATE_ON_BUSY=now` for every heavy hook check of one run (never in git
+config or `greengate.conf`, so no committed file skips the queue), and
+`greengate slot run --now`.
+
+`greengate.warnSlotWait`: git config, then `set warnSlotWait <s>` in a trusted
+`greengate.conf`, then 600.
 
 ## Width
 
@@ -200,10 +238,12 @@ holder record.
 
 ## Commands
 
-- `greengate slot run [--weight N] [--max-wait S] [--on-timeout run|exit] -- <cmd…>`
-  waits for a slot, then runs the command with `GREENHARNESS_HOST_SLOT=held` and
-  passes its exit status through. After `--max-wait` (default 90 s, under
-  Claude Code's 120 s Bash timeout) it exits 75 and runs nothing, unless
-  `--on-timeout run` is given.
+- `greengate slot run [--weight N] [--max-wait S | --now] -- <cmd…>` waits for a
+  slot, then runs the command with `GREENHARNESS_HOST_SLOT=held` and passes its
+  exit status through. When the line stalls for 300 s, or `--max-wait` runs out
+  (default 90 s, under Claude Code's 120 s Bash timeout), it exits 75 and runs
+  nothing, saying which. `--now` runs it at once, unqueued and width-bound. From
+  5.0 `--on-timeout run` exits 2, and `--on-timeout exit` warns that it is
+  deprecated.
 - `greengate slots [--json]` lists the holders, the old-client slots and the
   number of waiters.

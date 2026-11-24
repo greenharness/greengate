@@ -1,13 +1,15 @@
 //! `amont slot run` and `amont slots` (ADR-0014): the host slots for any
 //! command, and who holds them.
 //!
-//! `amont slot run [--weight N] [--max-wait S] [--on-timeout run|exit] -- <cmd…>`
-//! waits for a slot, runs the command with `GREENHARNESS_HOST_SLOT=held`, passes
-//! its exit status through and frees the slot when the command exits. The
-//! wrapper alone holds the slot: its descriptors are close-on-exec, so a
-//! daemon the command leaves behind never keeps it. A wait longer than
-//! `--max-wait` (default 90 s, under Claude Code's 120 s Bash timeout) exits
-//! 75 without running anything, unless `--on-timeout run` says otherwise.
+//! `amont slot run [--weight N] [--max-wait S | --now] -- <cmd…>` waits for a
+//! slot, runs the command with `GREENHARNESS_HOST_SLOT=held`, passes its exit
+//! status through and frees the slot when the command exits. The wrapper
+//! alone holds the slot: its descriptors are close-on-exec, so a daemon the
+//! command leaves behind never keeps it. A wait ends, with exit 75 and nothing
+//! run, when the line makes no progress for 300 s or `--max-wait` runs out
+//! (default 90 s, under Claude Code's 120 s Bash timeout) (ADR-0022). `--now`
+//! skips the queue up front: the command runs at once, unqueued, journalled
+//! `now`.
 
 /// The holder name a `slot run` queues under, as `greengate slots` shows it.
 const SLOT_RUN_HOLDER: &str = concat!(crate::bin!(), " slot run");
@@ -20,6 +22,11 @@ use std::time::{Duration, Instant};
 /// Exit status for "the host stayed busy; nothing ran" (EX_TEMPFAIL).
 pub const BUSY_EXIT: i32 = 75;
 
+/// Exit status for "the slot queue failed after it was joined; nothing ran"
+/// (EX_IOERR): unlike a busy host, retrying the same command fails the same
+/// way.
+pub const QUEUE_FAILED_EXIT: i32 = 74;
+
 /// The default `--max-wait`: under Claude Code's 120 s Bash timeout, so a
 /// wrapped command is never killed while it is still queued.
 pub const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(90);
@@ -30,7 +37,9 @@ pub fn slot_command(args: &[OsString]) -> i32 {
     match own.first().and_then(|a| a.to_str()) {
         Some("run") => run(&own[1..], cmd),
         _ => {
-            eprintln!("{BIN}: usage: {BIN} slot run [--weight N] [--max-wait S] [--on-timeout run|exit] -- <command…>");
+            eprintln!(
+                "{BIN}: usage: {BIN} slot run [--weight N] [--max-wait S | --now] -- <command…>"
+            );
             2
         }
     }
@@ -44,11 +53,15 @@ pub fn split_at_dashes(args: &[OsString]) -> (&[OsString], &[OsString]) {
     }
 }
 
-/// The flags `slot run` takes, each with a value.
+/// The flags `slot run` takes with a value. `--on-timeout` is read only to
+/// refuse `run` and warn on `exit` (ADR-0022).
 const VALUED: &[&str] = &["--weight", "--max-wait", "--on-timeout"];
 
+/// The flags `slot run` takes alone; given, their value is `"true"`.
+const SWITCHES: &[&str] = &["--now"];
+
 /// Read `own` (the words before `--`) into flag values, as `--flag value`
-/// or `--flag=value`. Anything else is a usage error.
+/// or `--flag=value`, and switches alone. Anything else is a usage error.
 fn parse(own: &[OsString]) -> Result<Vec<(&'static str, String)>, String> {
     let mut out = Vec::new();
     let mut words = own.iter();
@@ -58,6 +71,13 @@ fn parse(own: &[OsString]) -> Result<Vec<(&'static str, String)>, String> {
             Some((n, v)) => (n, Some(v.to_string())),
             None => (word, None),
         };
+        if let Some(switch) = SWITCHES.iter().find(|f| **f == name) {
+            if inline.is_some() {
+                return Err(format!("{switch} takes no value"));
+            }
+            out.push((*switch, "true".to_string()));
+            continue;
+        }
         let Some(flag) = VALUED.iter().find(|f| **f == name) else {
             return Err(format!("unknown argument {word:?}"));
         };
@@ -86,7 +106,7 @@ fn value<'a>(flags: &'a [(&'static str, String)], flag: &str) -> Option<&'a str>
 enum Launch {
     /// A slot is held for it (here or by an ancestor): `GREENHARNESS_HOST_SLOT=held`.
     Held,
-    /// No slot: off, unsupported, unavailable, or `--on-timeout run`.
+    /// No slot: off, unsupported, unavailable, or `--now`.
     Unqueued,
 }
 
@@ -119,14 +139,28 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
             return 2;
         }
     };
-    let run_on_timeout = match value(own, "--on-timeout") {
-        None | Some("exit") => false,
-        Some("run") => true,
-        Some(other) => {
-            eprintln!("{BIN}: --on-timeout is `run` or `exit`, not {other:?}");
+    match value(own, "--on-timeout") {
+        None => {}
+        Some("exit") => {
+            eprintln!("{BIN}: --on-timeout exit is deprecated and will be removed; drop it")
+        }
+        Some("run") => {
+            eprintln!("{BIN}: --on-timeout was removed (ADR-0022): a wait that ends runs nothing");
+            eprintln!("  skip the queue up front: {BIN} slot run --now -- <cmd>");
             return 2;
         }
-    };
+        Some(other) => {
+            eprintln!(
+                "{BIN}: --on-timeout was removed (ADR-0022), and {other:?} was never a value"
+            );
+            return 2;
+        }
+    }
+    let now = value(own, "--now").is_some();
+    if now && value(own, "--max-wait").is_some() {
+        eprintln!("{BIN}: --now skips the queue, so --max-wait has nothing to bound");
+        return 2;
+    }
     let label: String = std::iter::once(program)
         .chain(rest.iter().take(2))
         .map(|a| a.to_string_lossy().into_owned())
@@ -150,14 +184,41 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
             None,
         );
     };
-    // The width this command may run at, held or not: an unqueued run after
-    // a timeout happens when the host is busiest, so it is bounded too.
+    // The width this command may run at, held or not: a `--now` run happens
+    // when the host is busy, so it is bounded too.
     let slot_cap = sizing.cap_for(machine.cores);
     let jobs = greenharness_slots::parallelism(weight, machine.cores, slot_cap);
 
     let dir = greenharness_slots::dir();
+    // Every line of this run names the cap and cores it was sized for.
+    let record = |waited: u128, outcome: &str, end: Option<greenharness_slots::WaitEnd>| {
+        greenharness_slots::record_wait_named(
+            &dir,
+            SLOT_RUN_HOLDER,
+            greenharness_slots::WaitContext {
+                cap: Some(slot_cap),
+                cores: Some(machine.cores),
+                end,
+                ..greenharness_slots::WaitContext::default()
+            },
+            weight,
+            Some(jobs),
+            waited,
+            outcome,
+        );
+    };
+    if now {
+        record(0, "now", None);
+        return spawn(program, rest, Launch::Unqueued, Some(jobs));
+    }
+    // Read at the binary's edge: the crate reads no environment for it.
+    let setting = std::env::var(greenharness_slots::STALL_ENV).ok();
+    let (window, warning) = greenharness_slots::Stall::window_from(setting.as_deref());
+    if let Some(warning) = warning {
+        eprintln!("{BIN}: warning: {warning}");
+    }
     let started = Instant::now();
-    let mut waiter = match greenharness_slots::Waiter::new_in_on(
+    let waiter = match greenharness_slots::Waiter::new_in_on(
         &dir,
         sizing,
         weight,
@@ -170,70 +231,67 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
             return spawn(program, rest, Launch::Unqueued, Some(jobs));
         }
     };
+    // The caller's deadline is hard (the Bash tool's 120 s); the crate does
+    // not apply a stall window as long as it.
+    let bounds = greenharness_slots::WaitBounds {
+        window: Some(window),
+        ceiling: max_wait,
+    };
     let mut last_said: Option<Instant> = None;
-    let lease = loop {
-        match waiter.poll() {
-            Ok(greenharness_slots::Poll::Granted(lease)) => break Some(lease),
-            Ok(greenharness_slots::Poll::Waiting(queue)) => {
-                let due = last_said.map_or(true, |t| t.elapsed() >= Duration::from_secs(30));
-                if due && (!queue.holders.is_empty() || queue.unknown > 0) {
-                    eprintln!("{BIN}: {}", crate::host_slots::behind(&queue));
-                    // The pointer once, not on every 30 s repeat.
-                    if last_said.is_none() {
-                        eprintln!("  see: {BIN} slots");
-                    }
-                    last_said = Some(Instant::now());
-                }
+    let ended = greenharness_slots::wait_in_line(waiter, bounds, |queue| {
+        let due = last_said.map_or(true, |t| t.elapsed() >= Duration::from_secs(30));
+        if due && (!queue.holders.is_empty() || queue.unknown > 0) {
+            eprintln!("{BIN}: {}", crate::host_slots::behind(queue));
+            // The pointer once, not on every 30 s repeat.
+            if last_said.is_none() {
+                eprintln!("  see: {BIN} slots");
             }
-            Err(e) => {
-                eprintln!("{BIN}: host slots unavailable ({e}); running unqueued");
-                return spawn(program, rest, Launch::Unqueued, Some(jobs));
-            }
+            last_said = Some(Instant::now());
         }
-        if started.elapsed() >= max_wait {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    drop(waiter);
+    });
     let waited = started.elapsed().as_millis();
-    // Every line of this run names the cap and cores it was sized for.
-    let record = |outcome: &str| {
-        greenharness_slots::record_wait_named(
-            &dir,
-            SLOT_RUN_HOLDER,
-            greenharness_slots::WaitContext {
-                cap: Some(slot_cap),
-                cores: Some(machine.cores),
-                ..greenharness_slots::WaitContext::default()
-            },
-            weight,
-            Some(jobs),
-            waited,
-            outcome,
-        );
-    };
-    let Some(lease) = lease else {
-        if run_on_timeout {
-            record("unqueued");
-            eprintln!(
-                "{BIN}: no host slot freed in {}s; running unqueued (--on-timeout run)",
-                max_wait.as_secs()
-            );
-            return spawn(program, rest, Launch::Unqueued, Some(jobs));
+    let lease = match ended {
+        Ok(lease) => lease,
+        Err(end) => {
+            record(waited, "timeout", Some(end.end()));
+            eprintln!("{BIN}: {}", end_message(&end, max_wait));
+            return match end {
+                // A broken queue is not a busy host: retrying the same
+                // command would fail the same way.
+                greenharness_slots::LineEnd::PollFailed { .. } => {
+                    eprintln!("  `{label}` did not run (exit {QUEUE_FAILED_EXIT})");
+                    QUEUE_FAILED_EXIT
+                }
+                greenharness_slots::LineEnd::Stalled { .. }
+                | greenharness_slots::LineEnd::Ceiling { .. } => {
+                    eprintln!("  `{label}` did not run (exit {BUSY_EXIT}); retry later, or pass --now to skip the queue");
+                    BUSY_EXIT
+                }
+            };
         }
-        record("timeout");
-        eprintln!(
-            "{BIN}: no host slot freed in {}s; `{label}` did not run (exit {BUSY_EXIT}). \
-             Retry the same command later, or let CI run it.",
-            max_wait.as_secs()
-        );
-        return BUSY_EXIT;
     };
-    record("admitted");
+    record(waited, "admitted", None);
     let code = spawn(program, rest, Launch::Held, Some(jobs));
     drop(lease);
     code
+}
+
+/// Why a `slot run` wait ended, in one line under 80 columns.
+fn end_message(end: &greenharness_slots::LineEnd, max_wait: Duration) -> String {
+    match end {
+        greenharness_slots::LineEnd::Stalled { window, .. } => {
+            format!(
+                "no progress in the host slot line for {}s",
+                window.as_secs()
+            )
+        }
+        greenharness_slots::LineEnd::Ceiling { .. } => {
+            format!("no host slot within --max-wait {}s", max_wait.as_secs())
+        }
+        greenharness_slots::LineEnd::PollFailed { error } => {
+            format!("the host slot queue failed while queued: {error}")
+        }
+    }
 }
 
 /// Run the command, inheriting stdio, and pass its exit status through: the

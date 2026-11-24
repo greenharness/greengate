@@ -49,17 +49,58 @@ pub fn weight_of(name: &str) -> Weight {
 }
 
 /// Why a heavy check ran without a slot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Reason {
     /// The slot directory is not one this user alone owns.
     DirUnsafe(String),
     /// No `flock` here: Windows, the stated divergence.
     Unsupported,
-    /// No slot freed within the budget.
-    TimedOut(Duration),
-    /// A slot file could not be opened or locked for a reason other than
-    /// "another holder has it".
+    /// The queue could not be joined: a slot file could not be opened or
+    /// locked for a reason other than "another holder has it". The slots are
+    /// unusable, as if off.
     Io(String),
+    /// The wait in line ended (ADR-0022): a stall, the ceiling, or failed
+    /// polls. Nothing runs unqueued because of it: the check defers.
+    Ended(greenharness_slots::LineEnd),
+}
+
+impl Reason {
+    /// How the wait in line ended, when it did; `None` when the slots were
+    /// unusable.
+    fn ended(&self) -> Option<&greenharness_slots::LineEnd> {
+        match self {
+            Reason::Ended(end) => Some(end),
+            Reason::DirUnsafe(_) | Reason::Unsupported | Reason::Io(_) => None,
+        }
+    }
+}
+
+/// What a deferral of this run came from, for the roll-up: only an `onBusy
+/// defer` `slotWait` is stopped by `set onBusy wait`; a line that ended
+/// defers under either policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferredBy {
+    SlotWait,
+    LineEnded,
+}
+
+/// Set once a check deferred because `onBusy defer`'s `slotWait` ran out.
+static DEFERRED_BY_SLOT_WAIT: AtomicBool = AtomicBool::new(false);
+
+/// What this run's deferrals came from.
+pub fn deferred_by() -> DeferredBy {
+    if DEFERRED_BY_SLOT_WAIT.load(Ordering::SeqCst) {
+        DeferredBy::SlotWait
+    } else {
+        DeferredBy::LineEnded
+    }
+}
+
+/// Whether this run already deferred on a busy host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostSeen {
+    Busy,
+    NotYet,
 }
 
 /// Set once a check of this process deferred: the host was measured busy,
@@ -137,15 +178,20 @@ pub const ON_BUSY_ENV: &str = "GREENGATE_ON_BUSY";
 /// `hooks.busy-policy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusyPolicy {
-    /// Wait up to `greengate.timeout`, then run unqueued with a note: ADR-0009's
-    /// behaviour, and the default.
+    /// Wait while the line moves, up to `greengate.timeout`, then defer the
+    /// check to CI (ADR-0022): the default.
     Wait,
     /// Wait up to `slot_wait`, then defer the check to CI.
     Defer { slot_wait: Duration },
+    /// Skip the queue: run unqueued at once, journalled `now` (ADR-0022).
+    /// Only `GREENGATE_ON_BUSY=now` sets it, for one run: no committed file
+    /// can make every clone skip the queue.
+    Now,
 }
 
-/// The busy policy in force: `GREENGATE_ON_BUSY`, then `greengate.onBusy` (git
-/// config, or `set onBusy` in a trusted `amont.conf`), then `wait`.
+/// The busy policy in force: `GREENGATE_ON_BUSY` (`wait`, `defer` or `now`),
+/// then `greengate.onBusy` (git config, or `set onBusy` in a trusted
+/// `amont.conf`; `wait` or `defer`), then `wait`.
 pub fn busy_policy(settings: &crate::config::Settings) -> BusyPolicy {
     resolve_busy(std::env::var(ON_BUSY_ENV).ok().as_deref(), settings)
 }
@@ -157,10 +203,11 @@ fn resolve_busy(from_env: Option<&str>, settings: &crate::config::Settings) -> B
     let mode = match from_env.map(str::to_ascii_lowercase).as_deref() {
         Some("wait") => "wait",
         Some("defer") => "defer",
+        Some("now") => return BusyPolicy::Now,
         Some(other) => {
             crate::config::complain(
                 ON_BUSY_ENV,
-                &format!("{other:?} is not one of wait, defer"),
+                &format!("{other:?} is not one of wait, defer, now"),
                 "greengate.onBusy",
             );
             crate::config::enumerated_or(settings, "greengate.onBusy", &["wait", "defer"], "wait")
@@ -196,6 +243,8 @@ struct Current {
     /// handling turns the refused spawn into `Unavailable` or `Failed` still
     /// ends Deferred.
     deferred: Option<Duration>,
+    /// Why it deferred, for the refused spawn's error.
+    deferred_cause: String,
     /// How many jobs this heavy check's tools may run
     /// (`greenharness_slots::parallelism`), held or unqueued; `None` when slots are
     /// off, unsupported, or nested under a holder whose bounds it inherits.
@@ -219,9 +268,9 @@ enum SlotWait {
     /// waiting commit, and land's pre-stage needs the evidence). Set by
     /// [`never_waits`].
     NeverWaits,
-    /// A heavy `warn` check of land's pre-stage: it waits at most
-    /// `greengate.warnSlotWait`, then runs unqueued (ADR-0013). Set by
-    /// [`wait_bounded_for_warn`].
+    /// A heavy `warn` check of land's pre-stage: it waits while the line
+    /// moves, at most `greengate.warnSlotWait`, then defers (ADR-0022). Set
+    /// by [`wait_bounded_for_warn`].
     BoundedForWarn,
 }
 
@@ -332,10 +381,113 @@ pub fn deferred_here() -> bool {
     CURRENT.with(|c| c.borrow().deferred.is_some())
 }
 
-/// The error a refused spawn returns. Only a way to stop the spawn: what the
-/// check makes of it does not matter, because [`CheckGuard::deferred`] wins.
+/// The error a refused spawn returns, naming why the check deferred. Only a
+/// way to stop the spawn: what the check makes of it does not matter, because
+/// [`CheckGuard::deferred`] wins.
 fn refusal() -> std::io::Error {
-    std::io::Error::other("deferred to CI: no host slot freed (greengate.onBusy defer)")
+    let cause = CURRENT.with(|c| c.borrow().deferred_cause.clone());
+    std::io::Error::other(if cause.is_empty() {
+        "deferred to CI: the host is busy".to_string()
+    } else {
+        cause
+    })
+}
+
+/// Why a wait that ended in line defers, as the refused spawn says it.
+fn defer_cause(end: &greenharness_slots::LineEnd, policy: BusyPolicy) -> String {
+    use greenharness_slots::LineEnd;
+    let human = |d: Duration| crate::hooks::common::human_secs(d.as_secs());
+    match end {
+        LineEnd::Stalled { window, position } => format!(
+            "deferred to CI: the host slot line made no progress for {} (position {})",
+            human(*window),
+            position + 1
+        ),
+        LineEnd::PollFailed { error } => {
+            format!("deferred to CI: the host slot files failed: {error}")
+        }
+        LineEnd::Ceiling { waited } => match policy {
+            BusyPolicy::Defer { .. } => format!(
+                "deferred to CI: no host slot freed in {} (greengate.onBusy defer)",
+                human(*waited)
+            ),
+            BusyPolicy::Wait | BusyPolicy::Now => {
+                format!("deferred to CI: no host slot within {}", human(*waited))
+            }
+        },
+    }
+}
+
+/// How one heavy check waits for a slot (ADR-0022): it skips the queue, or
+/// it waits in line within bounds. Whatever ends the wait, the check defers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitPlan {
+    Now,
+    Queue(greenharness_slots::WaitBounds),
+}
+
+/// The [`WaitPlan`] for a check: one row of the plan's table per arm.
+/// `ceiling` is `greengate.timeout` (3600 s when 0), `stall` the stall
+/// window, `seen` whether this run already deferred on a busy host.
+fn wait_plan(
+    slot_wait: SlotWait,
+    policy: BusyPolicy,
+    ceiling: Duration,
+    warn_wait: Duration,
+    stall: Duration,
+    seen: HostSeen,
+) -> WaitPlan {
+    let queue =
+        |window, ceiling| WaitPlan::Queue(greenharness_slots::WaitBounds { window, ceiling });
+    match (slot_wait, policy) {
+        (_, BusyPolicy::Now) => WaitPlan::Now,
+        (SlotWait::NeverWaits, _) => queue(None, Duration::ZERO),
+        (SlotWait::BoundedForWarn, _) => queue(Some(stall), warn_wait.min(ceiling)),
+        (SlotWait::Policy, BusyPolicy::Wait) => queue(Some(stall), ceiling),
+        (SlotWait::Policy, BusyPolicy::Defer { slot_wait }) => match seen {
+            // The host was already measured busy by this run: defer now.
+            HostSeen::Busy => queue(None, Duration::ZERO),
+            HostSeen::NotYet => queue(None, slot_wait),
+        },
+    }
+}
+
+/// The bounds of the second wait an `onBusy defer` check takes after its
+/// `slotWait` ran out: while a sibling check of this process holds a slot,
+/// the host is busy with this commit's own work, which is not a reason to
+/// defer, so it waits as `wait` does, while the line moves, up to the
+/// ceiling; else one more pass, as a sibling may have released between the
+/// last poll and now.
+fn sibling_bounds(
+    slot_wait: SlotWait,
+    held_in_process: usize,
+    ceiling: Duration,
+    elapsed: Duration,
+    stall: Duration,
+) -> greenharness_slots::WaitBounds {
+    let waits_on_sibling = held_in_process > 0 && !matches!(slot_wait, SlotWait::NeverWaits);
+    if waits_on_sibling {
+        greenharness_slots::WaitBounds {
+            window: Some(stall),
+            ceiling: ceiling.saturating_sub(elapsed),
+        }
+    } else {
+        greenharness_slots::WaitBounds {
+            window: None,
+            ceiling: Duration::ZERO,
+        }
+    }
+}
+
+/// The stall window, read from [`greenharness_slots::STALL_ENV`] here, at the
+/// binary's edge, its warning said once.
+fn stall_window() -> Duration {
+    let setting = std::env::var(greenharness_slots::STALL_ENV).ok();
+    let (window, warning) = greenharness_slots::Stall::window_from(setting.as_deref());
+    if let Some(warning) = warning {
+        say_once(&warning);
+    }
+    window
 }
 
 impl Drop for CheckGuard {
@@ -389,7 +541,7 @@ pub fn never_waits() {
 /// The check running on this thread is a heavy `warn` check of land's
 /// pre-stage, where somebody waits for its evidence: it waits for a slot at
 /// most `greengate.warnSlotWait` (and never longer than `greengate.timeout`), under
-/// either busy policy, then runs unqueued, never deferred.
+/// either busy policy, while its line moves, then defers (ADR-0022).
 pub fn wait_bounded_for_warn() {
     CURRENT.with(|current| current.borrow_mut().slot_wait = SlotWait::BoundedForWarn);
 }
@@ -466,43 +618,70 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
             0 => 3600,
             s => s,
         });
-        let warn_wait = warn_slot_wait(settings);
-        let cut_by_warn_wait =
-            matches!(slot_wait, SlotWait::BoundedForWarn) && warn_wait <= ceiling;
-        let budget = match policy {
-            BusyPolicy::Wait if matches!(slot_wait, SlotWait::BoundedForWarn) => {
-                warn_wait.min(ceiling)
-            }
-            BusyPolicy::Wait => ceiling,
-            // The host was already measured busy by this run: defer now.
-            BusyPolicy::Defer { .. } if BUSY_SEEN.load(Ordering::SeqCst) => Duration::ZERO,
-            BusyPolicy::Defer { slot_wait } => slot_wait,
+        let seen = if BUSY_SEEN.load(Ordering::SeqCst) {
+            HostSeen::Busy
+        } else {
+            HostSeen::NotYet
         };
+        let plan = wait_plan(
+            slot_wait,
+            policy,
+            ceiling,
+            warn_slot_wait(settings),
+            stall_window(),
+            seen,
+        );
         let slot_cap = sizing.cap_for(machine.cores);
         let cap = u64::from(slot_cap);
         // Hook checks take one slot; the width is set whether a slot is
-        // granted or the check runs unqueued, which happens at peak load.
+        // granted or the check runs unqueued.
         let jobs = greenharness_slots::parallelism(1, machine.cores, slot_cap);
+        let bounds = match plan {
+            WaitPlan::Queue(bounds) => bounds,
+            WaitPlan::Now => {
+                // Skipping the queue is a choice made up front (ADR-0022),
+                // said and journalled as such.
+                crate::hooks::common::say(&format!(
+                    "  running unqueued: {}=now skips the host slot queue",
+                    crate::ui::highlight(ON_BUSY_ENV)
+                ));
+                record_acquisition(
+                    &name,
+                    Some(jobs),
+                    Some((slot_cap, machine.cores)),
+                    Duration::ZERO,
+                    "now",
+                    None,
+                );
+                CURRENT.with(|c| {
+                    let mut c = c.borrow_mut();
+                    c.settled = true;
+                    c.jobs = Some(jobs);
+                    c.sized = Some((slot_cap, machine.cores));
+                });
+                return Ok(false);
+            }
+        };
         let sink = crate::live::current_sink();
         if let Some((stage, idx)) = &sink {
             stage.queue(*idx, Some((Instant::now(), cap)));
         }
         let started = Instant::now();
         let holder = holder_for(&name);
-        let mut got = wait_for_slot(sizing, machine, holder.clone(), budget);
-        if let (BusyPolicy::Defer { .. }, Err(Reason::TimedOut(_))) = (policy, &got) {
-            // A sibling check of this process holds a slot: the host is busy
-            // with this commit's own work, which is not a reason to defer.
-            // Wait as `wait` does, up to the ceiling; else one more pass, as a
-            // sibling may have released between the last poll and now.
-            let rest = if greenharness_slots::held_in_process() > 0
-                && !matches!(slot_wait, SlotWait::NeverWaits)
-            {
-                ceiling.saturating_sub(started.elapsed())
-            } else {
-                Duration::ZERO
-            };
-            got = wait_for_slot(sizing, machine, holder, rest);
+        let mut got = wait_for_slot(sizing, machine, holder.clone(), bounds);
+        if let (
+            BusyPolicy::Defer { .. },
+            Err(Reason::Ended(greenharness_slots::LineEnd::Ceiling { .. })),
+        ) = (policy, &got)
+        {
+            let more = sibling_bounds(
+                slot_wait,
+                greenharness_slots::held_in_process(),
+                ceiling,
+                started.elapsed(),
+                stall_window(),
+            );
+            got = wait_for_slot(sizing, machine, holder, more);
         }
         if let Some((stage, idx)) = &sink {
             stage.queue(*idx, None);
@@ -518,8 +697,19 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
                 crate::ui::highlight("greengate.hostSlots")
             ));
         }
-        let defer =
-            matches!(policy, BusyPolicy::Defer { .. }) && matches!(got, Err(Reason::TimedOut(_)));
+        // A wait that ended in line defers, whatever the policy: nothing
+        // runs outside the queue because a wait ended (ADR-0022).
+        let ended = got.as_ref().err().and_then(Reason::ended);
+        let defer = ended.is_some();
+        let end = ended.map(greenharness_slots::LineEnd::end);
+        let cause = ended.map_or(String::new(), |end| defer_cause(end, policy));
+        let by_slot_wait = matches!(
+            (policy, ended),
+            (
+                BusyPolicy::Defer { .. },
+                Some(greenharness_slots::LineEnd::Ceiling { .. })
+            )
+        );
         let outcome = match (&got, defer) {
             (Ok(_), _) => "admitted",
             (Err(_), true) => "deferred",
@@ -531,18 +721,22 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
             Some((slot_cap, machine.cores)),
             waited,
             outcome,
+            end,
         );
         let held = match got {
             Ok(lease) => Some(lease),
             // The deferral line is the dispatcher's, not this note.
-            Err(_) if defer => None,
+            Err(Reason::Ended(_)) => None,
             Err(reason) => {
-                note(&reason, cap, cut_by_warn_wait.then_some(warn_wait));
+                note(&reason);
                 None
             }
         };
         if defer {
             BUSY_SEEN.store(true, Ordering::SeqCst);
+            if by_slot_wait {
+                DEFERRED_BY_SLOT_WAIT.store(true, Ordering::SeqCst);
+            }
         }
         CURRENT.with(|c| {
             let mut c = c.borrow_mut();
@@ -552,6 +746,7 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
             c.sized = Some((slot_cap, machine.cores));
             if defer {
                 c.deferred = Some(waited);
+                c.deferred_cause = cause;
             }
         });
         if defer {
@@ -573,7 +768,7 @@ fn take_handed(handed: Parked, name: &str) -> bool {
             "  host slot kept, but `{BIN} slots` may still name the previous check: {error}"
         ));
     }
-    record_acquisition(name, jobs, sized, Duration::ZERO, "handed");
+    record_acquisition(name, jobs, sized, Duration::ZERO, "handed", None);
     CURRENT.with(|current| {
         let mut current = current.borrow_mut();
         current.held = Some(lease);
@@ -592,6 +787,7 @@ fn record_acquisition(
     sized: Option<(u32, u32)>,
     waited: Duration,
     outcome: &str,
+    end: Option<greenharness_slots::WaitEnd>,
 ) {
     let short = crate::short_name(name);
     greenharness_slots::record_wait_named(
@@ -608,6 +804,7 @@ fn record_acquisition(
             },
             cap: sized.map(|(cap, _)| cap),
             cores: sized.map(|(_, cores)| cores),
+            end,
         },
         1,
         jobs,
@@ -631,16 +828,16 @@ pub fn bound(cmd: &mut std::process::Command) {
     }
 }
 
-/// Wait up to `budget` for one slot, saying once whom the check waits
-/// behind.
+/// Wait in line for one slot within `bounds`, saying once whom the check
+/// waits behind (ADR-0022: the crate's [`greenharness_slots::wait_in_line`]).
+/// Failing to join the queue at all says the slots are unusable.
 fn wait_for_slot(
     sizing: greenharness_slots::Sizing,
     machine: greenharness_slots::Machine,
     holder: greenharness_slots::Holder,
-    budget: Duration,
+    bounds: greenharness_slots::WaitBounds,
 ) -> Result<greenharness_slots::Lease, Reason> {
-    let started = Instant::now();
-    let mut waiter = match greenharness_slots::Waiter::new_in_on(
+    let waiter = match greenharness_slots::Waiter::new_in_on(
         &greenharness_slots::dir(),
         sizing,
         1,
@@ -654,23 +851,14 @@ fn wait_for_slot(
         Err(e) => return Err(Reason::Io(e.to_string())),
     };
     let mut said = false;
-    loop {
-        match waiter.poll() {
-            Ok(greenharness_slots::Poll::Granted(lease)) => return Ok(lease),
-            Ok(greenharness_slots::Poll::Waiting(queue)) => {
-                if !said && (!queue.holders.is_empty() || queue.unknown > 0) {
-                    said = true;
-                    crate::hooks::common::say(&format!("  {}", behind(&queue)));
-                    crate::hooks::common::say(&format!("  see: {BIN} slots"));
-                }
-            }
-            Err(e) => return Err(Reason::Io(e.to_string())),
+    greenharness_slots::wait_in_line(waiter, bounds, |queue| {
+        if !said && (!queue.holders.is_empty() || queue.unknown > 0) {
+            said = true;
+            crate::hooks::common::say(&format!("  {}", behind(queue)));
+            crate::hooks::common::say(&format!("  see: {BIN} slots"));
         }
-        if started.elapsed() >= budget {
-            return Err(Reason::TimedOut(started.elapsed()));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    })
+    .map_err(Reason::Ended)
 }
 
 /// `queued behind relais: cargo test (greengate-wt-x, 4m) · 2 waiting`.
@@ -691,32 +879,19 @@ pub fn behind(queue: &greenharness_slots::Queue) -> String {
 }
 
 /// One line for the reasons a person can act on; nothing for the normal
-/// case (the platform).
-///
-/// `warn_wait` is set when `greengate.warnSlotWait` cut the wait: the note names
-/// that key rather than `greengate.hostSlots`.
-fn note(reason: &Reason, cap: u64, warn_wait: Option<Duration>) {
+/// case (the platform). A wait that ended in line defers, and the dispatcher
+/// says so; these are the slots being unusable.
+fn note(reason: &Reason) {
     match reason {
         Reason::DirUnsafe(why) => crate::hooks::common::warn(&format!(
             "host slots are off for this check: {why}. Remove it, or set {} to a directory \
              only you own",
             crate::ui::highlight(DIR_ENV)
         )),
-        Reason::TimedOut(waited) if warn_wait.is_some() => crate::hooks::common::warn(&format!(
-            "no host slot in {} (land: {}={}s); running it anyway",
-            crate::hooks::common::human_secs(waited.as_secs()),
-            crate::ui::highlight("greengate.warnSlotWait"),
-            warn_wait.map_or(0, |limit| limit.as_secs())
-        )),
-        Reason::TimedOut(waited) => crate::hooks::common::warn(&format!(
-            "no host slot freed in {} ({} {cap}); running it anyway",
-            crate::hooks::common::human_secs(waited.as_secs()),
-            crate::ui::highlight("greengate.hostSlots")
-        )),
         Reason::Io(why) => {
             crate::hooks::common::warn(&format!("host slots are off for this check: {why}"))
         }
-        Reason::Unsupported => {}
+        Reason::Ended(_) | Reason::Unsupported => {}
     }
 }
 
@@ -757,6 +932,158 @@ mod tests {
             }
         );
         assert_eq!(resolve_busy(Some(""), &none), BusyPolicy::Wait);
+        // ADR-0022: `now` skips the queue for one run, from the environment
+        // only; the file and git config keep `wait|defer`.
+        assert_eq!(resolve_busy(Some("now"), &defer), BusyPolicy::Now);
+        let committed = settings_from("set onBusy now\n");
+        assert_eq!(resolve_busy(None, &committed), BusyPolicy::Wait);
+    }
+
+    /// ADR-0022, one row of the plan's table per assertion: skip the
+    /// queue, or wait in line within these bounds.
+    #[test]
+    fn each_caller_waits_by_its_row_of_the_table() {
+        use greenharness_slots::WaitBounds;
+        let s = |n| Duration::from_secs(n);
+        let (ceiling, warn, stall) = (s(3600), s(600), s(300));
+        let defer = BusyPolicy::Defer { slot_wait: s(60) };
+        let queue = |window, ceiling| WaitPlan::Queue(WaitBounds { window, ceiling });
+        let row = |slot_wait, policy, ceiling, seen| {
+            wait_plan(slot_wait, policy, ceiling, warn, stall, seen)
+        };
+        // `onBusy wait`, the default (rehearsal and pre-stage too).
+        assert_eq!(
+            row(
+                SlotWait::Policy,
+                BusyPolicy::Wait,
+                ceiling,
+                HostSeen::NotYet
+            ),
+            queue(Some(stall), ceiling)
+        );
+        // A `warn` check of land's pre-stage: the stall, under warnSlotWait,
+        // which never outlasts the ceiling.
+        assert_eq!(
+            row(
+                SlotWait::BoundedForWarn,
+                BusyPolicy::Wait,
+                ceiling,
+                HostSeen::NotYet
+            ),
+            queue(Some(stall), warn)
+        );
+        assert_eq!(
+            row(
+                SlotWait::BoundedForWarn,
+                BusyPolicy::Wait,
+                s(100),
+                HostSeen::NotYet
+            ),
+            queue(Some(stall), s(100))
+        );
+        // `onBusy defer`: slotWait stays hard, with no stall rule; none at
+        // all once this run measured the host busy.
+        assert_eq!(
+            row(SlotWait::Policy, defer, ceiling, HostSeen::NotYet),
+            queue(None, s(60))
+        );
+        assert_eq!(
+            row(SlotWait::Policy, defer, ceiling, HostSeen::Busy),
+            queue(None, Duration::ZERO)
+        );
+        // A `warn` check outside a rehearsal never waits.
+        assert_eq!(
+            row(
+                SlotWait::NeverWaits,
+                BusyPolicy::Wait,
+                ceiling,
+                HostSeen::NotYet
+            ),
+            queue(None, Duration::ZERO)
+        );
+        // `GREENGATE_ON_BUSY=now`: no wait at all.
+        assert_eq!(
+            row(SlotWait::Policy, BusyPolicy::Now, ceiling, HostSeen::NotYet),
+            WaitPlan::Now
+        );
+    }
+
+    /// The sibling-holder extension: with a sibling of this process holding
+    /// a slot, the second wait goes on while the line moves, to the rest of
+    /// the ceiling; without one it is a single last poll.
+    #[test]
+    fn the_sibling_extension_waits_while_the_line_moves() {
+        let s = |n| Duration::from_secs(n);
+        let with_sibling = sibling_bounds(SlotWait::Policy, 1, s(3600), s(60), s(300));
+        assert_eq!(with_sibling.window, Some(s(300)));
+        assert_eq!(with_sibling.ceiling, s(3540));
+        let alone = sibling_bounds(SlotWait::Policy, 0, s(3600), s(60), s(300));
+        assert_eq!((alone.window, alone.ceiling), (None, Duration::ZERO));
+        let never = sibling_bounds(SlotWait::NeverWaits, 1, s(3600), s(60), s(300));
+        assert_eq!((never.window, never.ceiling), (None, Duration::ZERO));
+    }
+
+    /// The refused spawn names why: a stall names its own window (the
+    /// sibling extension's too) and the place; `slotWait` keeps naming
+    /// `onBusy defer`; a failed poll names the error.
+    #[test]
+    fn a_deferral_names_its_cause() {
+        use greenharness_slots::LineEnd;
+        let stalled = LineEnd::Stalled {
+            window: Duration::from_secs(300),
+            position: 1,
+        };
+        let cause = defer_cause(
+            &stalled,
+            BusyPolicy::Defer {
+                slot_wait: Duration::from_secs(60),
+            },
+        );
+        assert!(cause.contains("made no progress for 5m00s"), "{cause}");
+        assert!(cause.contains("(position 2)"), "{cause}");
+        let slot_wait = defer_cause(
+            &LineEnd::Ceiling {
+                waited: Duration::from_secs(60),
+            },
+            BusyPolicy::Defer {
+                slot_wait: Duration::from_secs(60),
+            },
+        );
+        assert!(
+            slot_wait.ends_with("(greengate.onBusy defer)"),
+            "{slot_wait}"
+        );
+        let ceiling = defer_cause(
+            &LineEnd::Ceiling {
+                waited: Duration::from_secs(3600),
+            },
+            BusyPolicy::Wait,
+        );
+        assert!(ceiling.contains("no host slot within 1h00m"), "{ceiling}");
+        let failed = defer_cause(
+            &LineEnd::PollFailed {
+                error: std::io::Error::other("busy disk"),
+            },
+            BusyPolicy::Wait,
+        );
+        assert!(failed.contains("busy disk"), "{failed}");
+    }
+
+    /// Every end of a wait in line defers; only failing to join the queue
+    /// means the slots are unusable.
+    #[test]
+    fn every_end_of_a_wait_in_line_defers() {
+        let ended = Reason::Ended(greenharness_slots::LineEnd::Ceiling {
+            waited: Duration::from_secs(1),
+        });
+        assert!(ended.ended().is_some());
+        for reason in [
+            Reason::Io("x".into()),
+            Reason::DirUnsafe("x".into()),
+            Reason::Unsupported,
+        ] {
+            assert!(reason.ended().is_none(), "{reason:?}");
+        }
     }
 
     #[test]

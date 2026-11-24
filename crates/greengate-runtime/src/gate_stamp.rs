@@ -971,9 +971,14 @@ pub enum Completion {
     /// The gate could not run (a tool missing): answers for an hour, then
     /// the gate is tried again.
     Unavailable,
+    /// The gate deferred to CI: its wait for a host slot ended on a stalled
+    /// line or its ceiling (ADR-0022). Answers for an hour, so land's push
+    /// does not refuse a gate the jammed host could not run, and CI runs it;
+    /// never a stamp or an attestation.
+    Deferred,
 }
 
-/// How long an `Unavailable` completion answers for.
+/// How long an `Unavailable` or `Deferred` completion answers for.
 const UNAVAILABLE_FOR_SECS: u64 = 60 * 60;
 
 /// The record word for `token` completed as `how`, at `now`.
@@ -982,6 +987,7 @@ fn completion_word(how: Completion, token: &str, now: u64) -> String {
         Completion::Warned => format!("warned:{token}"),
         Completion::FailedUnderWarn => format!("failed-under-warn:{token}"),
         Completion::Unavailable => format!("unavailable:{now}:{token}"),
+        Completion::Deferred => format!("deferred:{now}:{token}"),
     }
 }
 
@@ -994,6 +1000,7 @@ fn completion_answers(word: &str, token: &str, severity: crate::check::Severity,
         return severity == crate::check::Severity::Warn;
     }
     word.strip_prefix("unavailable:")
+        .or_else(|| word.strip_prefix("deferred:"))
         .and_then(|rest| rest.split_once(':'))
         .is_some_and(|(at, tok)| {
             tok == token
@@ -1011,9 +1018,9 @@ fn now_secs() -> u64 {
 }
 
 /// Record on `tree` that the gates behind `tokens` completed there without
-/// passing, as `how` (ADR-0018). Merged into the note; an `Unavailable`
-/// record replaces the one before it for the same gate, so a tree's note does
-/// not grow by a word per run. The error names the tree, for the caller to
+/// passing, as `how` (ADR-0018). Merged into the note; an `Unavailable` or
+/// `Deferred` record replaces the one of its kind before it for the same
+/// gate, so a tree's note does not grow by a word per run. The error names the tree, for the caller to
 /// say: a record that was not written costs a refused push.
 pub fn record_done(tree: &str, tokens: &[String], how: Completion) -> Result<(), String> {
     if tokens.is_empty() {
@@ -1021,10 +1028,15 @@ pub fn record_done(tree: &str, tokens: &[String], how: Completion) -> Result<(),
     }
     let now = now_secs();
     let mut note = note_in(DONE_REF, tree);
-    if how == Completion::Unavailable {
+    let dated = match how {
+        Completion::Unavailable => Some("unavailable:"),
+        Completion::Deferred => Some("deferred:"),
+        Completion::Warned | Completion::FailedUnderWarn => None,
+    };
+    if let Some(prefix) = dated {
         note.tokens.retain(|word| {
             !word
-                .strip_prefix("unavailable:")
+                .strip_prefix(prefix)
                 .and_then(|rest| rest.split_once(':'))
                 .is_some_and(|(_, token)| tokens.iter().any(|t| t == token))
         });
@@ -1277,6 +1289,17 @@ mod tests {
             Block,
             now + 3601
         ));
+        // A deferral on a jammed host answers for an hour too, warn or block.
+        let deferred = word(Completion::Deferred);
+        assert!(deferred.starts_with("deferred:"), "{deferred}");
+        assert!(completion_answers(&deferred, "gate-tok", Block, now + 3600));
+        assert!(!completion_answers(
+            &deferred,
+            "gate-tok",
+            Block,
+            now + 3601
+        ));
+        assert!(!completion_answers(&deferred, "other-tok", Warn, now));
         assert!(!completion_answers(
             &word(Completion::Warned),
             "other-tok",

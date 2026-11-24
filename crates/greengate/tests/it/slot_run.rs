@@ -67,6 +67,24 @@ fn slots_json_names_the_cores_and_their_source() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 
+/// Wait until `amont slots --json` shows `waiters` waiters, so the next one queues
+/// behind them in ticket order, never by a guessed sleep.
+fn until_waiting(slots: &Path, waiters: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let want = format!("\"waiting\":{waiters}");
+    loop {
+        let out = amont(slots, &["slots", "--json"])
+            .output()
+            .expect("amont slots");
+        let json = String::from_utf8_lossy(&out.stdout).into_owned();
+        if json.contains(&want) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "no {waiters} waiting: {json}");
+        std::thread::yield_now();
+    }
+}
+
 /// Wait until `amont slots --json` shows a holder, so a test never races the
 /// first wrapper's admission with a sleep.
 fn until_held(slots: &Path) -> String {
@@ -120,8 +138,8 @@ fn a_second_command_queues_behind_the_first_and_names_it() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
 
-/// A wait past `--max-wait` exits 75 and runs nothing; `--on-timeout run`
-/// runs it unqueued, and says so.
+/// A wait past `--max-wait` exits 75 and runs nothing (ADR-0022), and its
+/// journal row says the ceiling ended it.
 #[test]
 fn a_timed_out_wait_exits_75_without_running_anything() {
     let slots = slot_dir("timeout");
@@ -144,25 +162,173 @@ fn a_timed_out_wait_exits_75_without_running_anything() {
     .expect("timed out");
     assert_eq!(out.status.code(), Some(75), "{}", text(&out));
     assert!(!marker.exists(), "nothing may run on a timeout");
+    assert!(
+        text(&out).contains("no host slot within --max-wait 1s"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        text(&out).contains("pass --now to skip the queue"),
+        "{}",
+        text(&out)
+    );
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert!(
+        waits.contains("\"outcome\":\"timeout\",\"end\":\"ceiling\""),
+        "{waits}"
+    );
+    let _ = holder.wait(); // best-effort: reap the holder
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}
+
+/// A line with no progress for the stall window exits 75 before
+/// `--max-wait`, says so, and journals `"end":"stalled"` (ADR-0022).
+#[test]
+fn a_stalled_line_exits_75_before_the_max_wait() {
+    let slots = slot_dir("stall");
+    let mut holder = spawn(&slots, &["slot", "run", "--", "sleep", "8"]);
+    until_held(&slots);
+    let marker = slots.join("ran");
+    let started = Instant::now();
     let out = amont(
         &slots,
         &[
             "slot",
             "run",
             "--max-wait",
-            "1",
-            "--on-timeout",
+            "30",
+            "--",
+            "touch",
+            marker.to_str().unwrap(),
+        ],
+    )
+    .env("GREENHARNESS_SLOT_STALL_S", "2")
+    .output()
+    .expect("stalled");
+    assert_eq!(out.status.code(), Some(75), "{}", text(&out));
+    assert!(
+        started.elapsed() < Duration::from_secs(7),
+        "it waited for the holder"
+    );
+    assert!(!marker.exists(), "nothing may run on a stall");
+    assert!(
+        text(&out).contains("no progress in the host slot line for 2s"),
+        "{}",
+        text(&out)
+    );
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert!(waits.contains("\"end\":\"stalled\""), "{waits}");
+    let _ = holder.kill(); // best-effort: the holder is not under test
+    let _ = holder.wait(); // best-effort: reap the killed holder
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}
+
+/// A line that moves never stalls: with three short holders ahead, each
+/// admission comes sooner than the stall window, so the last waiter is
+/// admitted though its whole wait is longer than the window.
+#[test]
+fn a_moving_line_outlasts_the_stall_window() {
+    let slots = slot_dir("moving");
+    let mut ahead = vec![spawn(&slots, &["slot", "run", "--", "sleep", "2"])];
+    until_held(&slots);
+    for _ in 0..2 {
+        let mut cmd = amont(
+            &slots,
+            &["slot", "run", "--max-wait", "60", "--", "sleep", "2"],
+        );
+        cmd.env("GREENHARNESS_SLOT_STALL_S", "4")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        ahead.push(cmd.spawn().expect("a waiter ahead"));
+        // Ticket order: the next waiter joins only once this one is queued.
+        until_waiting(&slots, ahead.len() - 1);
+    }
+    let started = Instant::now();
+    let out = amont(&slots, &["slot", "run", "--max-wait", "60", "--", "true"])
+        .env("GREENHARNESS_SLOT_STALL_S", "4")
+        .output()
+        .expect("the last waiter");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        started.elapsed() > Duration::from_secs(4),
+        "the wait did not outlast the window, so it proves nothing: {:?}",
+        started.elapsed()
+    );
+    for child in ahead {
+        let _ = child.wait_with_output(); // best-effort: reap
+    }
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}
+
+/// `--on-timeout run` is refused (ADR-0022): a wait that ends runs nothing.
+/// `--now` is the up-front way to skip the queue, and it takes no value.
+#[test]
+fn on_timeout_run_is_refused_and_now_is_a_switch() {
+    let slots = slot_dir("flags");
+    let out = amont(
+        &slots,
+        &["slot", "run", "--on-timeout", "run", "--", "true"],
+    )
+    .output()
+    .expect("refused");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(
+        text(&out).contains("--on-timeout was removed"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        text(&out).contains("slot run --now -- <cmd>"),
+        "{}",
+        text(&out)
+    );
+    for line in text(&out).lines() {
+        assert!(line.chars().count() < 80, "over 79 columns: {line}");
+    }
+    for bad in [&["--now=1"][..], &["--now", "--max-wait", "5"][..]] {
+        let mut args = vec!["slot", "run"];
+        args.extend_from_slice(bad);
+        args.extend_from_slice(&["--", "true"]);
+        let out = amont(&slots, &args).output().expect("usage");
+        assert_eq!(out.status.code(), Some(2), "{bad:?}: {}", text(&out));
+    }
+    let out = amont(
+        &slots,
+        &["slot", "run", "--on-timeout", "exit", "--", "true"],
+    )
+    .output()
+    .expect("deprecated");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(text(&out).contains("deprecated"), "{}", text(&out));
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}
+
+/// `--now` runs at once beside a holder, unqueued, and journals `now`.
+#[test]
+fn now_skips_the_queue_and_is_journalled() {
+    let slots = slot_dir("now");
+    let mut holder = spawn(&slots, &["slot", "run", "--", "sleep", "4"]);
+    until_held(&slots);
+    let marker = slots.join("ran");
+    let started = Instant::now();
+    let out = amont(
+        &slots,
+        &[
+            "slot",
             "run",
+            "--now",
             "--",
             "touch",
             marker.to_str().unwrap(),
         ],
     )
     .output()
-    .expect("unqueued");
+    .expect("now");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    assert!(marker.exists(), "--on-timeout run runs it");
-    assert!(text(&out).contains("running unqueued"), "{}", text(&out));
+    assert!(marker.exists());
+    assert!(started.elapsed() < Duration::from_secs(3), "--now waited");
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert!(waits.contains("\"outcome\":\"now\""), "{waits}");
     let _ = holder.wait(); // best-effort: reap the holder
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
@@ -355,19 +521,14 @@ fn a_preset_width_wins_and_an_empty_one_does_not() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
 
-/// A command that runs unqueued after the slot wait timed out is bounded
-/// too: that happens when the host is busiest.
+/// A `--now` command runs unqueued, and is bounded too: that happens when the
+/// host is busy.
 #[test]
-fn an_unqueued_command_after_a_timeout_is_bounded_too() {
+fn a_now_command_is_bounded_too() {
     let slots = slot_dir("unqueued");
     let first = spawn(&slots, &["slot", "run", "--", "sleep", "5"]);
     until_held(&slots);
-    let env = env_under(
-        &slots,
-        "1",
-        &["--max-wait", "1", "--on-timeout", "run"],
-        &[],
-    );
+    let env = env_under(&slots, "1", &["--now"], &[]);
     assert_eq!(
         var(&env, "CARGO_BUILD_JOBS"),
         Some(cores().max(1).to_string().as_str()),

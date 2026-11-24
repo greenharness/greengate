@@ -585,6 +585,10 @@ fn a_retry_with_a_locked_tracking_ref_still_lands_and_the_receipt_names_the_retr
 /// like `busy_defers`, whose slot helpers it shares.
 #[cfg(unix)]
 fn land_on_a_busy_host(fx: &Fx, slots: &std::path::Path) -> Ran {
+    land_on_a_host(fx, slots, &[])
+}
+
+fn land_on_a_host(fx: &Fx, slots: &std::path::Path, env: &[(&str, &str)]) -> Ran {
     let mut cmd = crate::common::amont_cmd();
     cmd.arg("land")
         .current_dir(&fx.r.dir)
@@ -594,6 +598,9 @@ fn land_on_a_busy_host(fx: &Fx, slots: &std::path::Path) -> Ran {
         .env("GREENGATE_IDLE_LOAD_SCALE", "1")
         .env("GREENHARNESS_SLOT_DIR", slots)
         .env("GREENGATE_HOST_SLOTS", "1");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
     let out = cmd.output().expect("run amont land");
     Ran {
         code: out.status.code().unwrap_or(-1),
@@ -678,6 +685,63 @@ fn land_waits_for_a_passing_warn_gate_on_a_busy_host() {
 #[cfg(unix)]
 fn land_waits_for_a_failing_warn_gate_on_a_busy_host() {
     land_with_a_warn_gate_on_a_busy_host(1);
+}
+
+/// ADR-0022: a `block heavy` push gate whose line stalls in land's pre-stage
+/// defers rather than run unqueued, and records an hour-long `deferred`
+/// completion, so land's own push does not refuse it as missing evidence:
+/// the branch reaches the remote and CI runs the gate.
+#[test]
+#[cfg(unix)]
+fn a_gate_deferred_on_a_stalled_line_still_lets_land_push() {
+    use crate::busy_defers::{slot_dir, Holder};
+    let fx = fixture("feat/stalled");
+    let log = fx.r.path(".git/gate.log");
+    fx.r.stage(
+        "gate.sh",
+        &format!("printf x >> '{}'\n", log.to_str().expect("utf8")),
+    );
+    fx.r.stage(
+        "amont.conf",
+        "set timeout 600\npre-push  gate  *.txt  block  heavy sh gate.sh\n",
+    );
+    fx.r.commit("chore: the gate");
+    crate::tree_gates::trust_and_install(&fx.r);
+    let pushed = head(&fx);
+
+    let slots = slot_dir("land-stalled");
+    let holder = Holder::hold(&slots.join("slot-0")); // never released
+    let ran = land_on_a_host(&fx, &slots, &[("GREENHARNESS_SLOT_STALL_S", "2")]);
+    drop(holder);
+    let said = format!("{}{}", ran.stdout, ran.stderr);
+
+    assert_eq!(ran.code, 0, "{said}");
+    assert_eq!(tip(&fx, "feat/stalled"), pushed, "{said}");
+    assert!(!said.contains("evidence-missing"), "{said}");
+    assert!(said.contains("deferred to CI"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        "",
+        "a deferred gate never runs unqueued: {said}"
+    );
+    let tree = plain_git(&fx.r.dir, &["rev-parse", "HEAD^{tree}"]);
+    let stamp =
+        fx.r.git(&["notes", "--ref", "greengate-gate", "show", &tree]);
+    let stamp = String::from_utf8_lossy(&stamp.stdout).into_owned();
+    assert!(
+        !stamp.lines().next().unwrap_or("").contains("pre-push-gate"),
+        "a deferred gate is never stamped: {stamp}"
+    );
+    let done =
+        fx.r.git(&["notes", "--ref", "greengate-gate-done", "show", &tree]);
+    let done = String::from_utf8_lossy(&done.stdout).into_owned();
+    assert!(
+        done.contains("deferred:"),
+        "no deferral record: {done}\n{said}"
+    );
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert!(waits.contains("\"end\":\"stalled\""), "{waits}");
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 
 /// f06: the pre-push hook runs another greengate than land. Land's stamps

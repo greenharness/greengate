@@ -8,6 +8,57 @@ missing here.
 
 ## Unreleased
 
+The next release is a major, 5.0.0: `--on-timeout run` is removed, and
+`onBusy wait` and `slot run`'s exit 75 change meaning
+(`cli.compat.interface-is-public`).
+
+### Changed
+
+- **BREAKING: a wait that ends runs nothing** (ADR-0022). A heavy check whose
+  wait for a host slot ends now defers to CI, where `onBusy wait` used to run
+  it unqueued after `greengate.timeout`. The wait ends when the line has
+  stalled (no admission anywhere and no change of place for 300 s) or at the
+  timeout. A heavy `warn` check of land's pre-stage defers after
+  `greengate.warnSlotWait`, where it used to run unqueued. A gate that defers
+  in a rehearsal or a pre-stage is recorded as an hour-long `deferred`
+  completion, so land still pushes and CI runs it. Three failed polls in a
+  row, after the queue was joined, end the wait the same way.
+- **BREAKING: `greengate slot run --on-timeout run` is refused** (exit 2). Pass
+  `--now` to skip the queue up front. `--on-timeout exit` still works, with
+  a deprecation warning. There is no release that accepts `run` with a
+  warning, because running unqueued after a wait is the defect ADR-0022
+  removes. A wait now also ends, with exit 75, when the line stalls for
+  300 s before `--max-wait`. Its message says which of the two ended it. A
+  slot queue that fails while queued exits 74 (EX_IOERR), because retrying
+  would fail the same way.
+- **Admission counts the holders' own load** (ADR-0022). A further slot is
+  taken while `load1 < cores + 4 × Σjobs(holders)`, where the test used to be
+  against the cores alone. One holder at `jobs 2` no longer keeps slots 2
+  and 3 shut by itself. A waiter held back by load says the limit:
+  `load 31.0 >= 14 (6 cores + 4×2 holder jobs)`.
+- **`greenharness-slots`, BREAKING for a reader of its types:**
+  `WaitReason::Load` gains `holder_jobs`, and `WaitContext` gains `end`. A
+  fleet grep found no reader outside greengate that matches the one or
+  builds the other without `..default()`. New: `wait_in_line`, the one wait
+  loop every caller uses, with `WaitBounds` and `LineEnd`; `Stall`, the stall
+  clock, whose `window_from` reads a caller's `STALL_ENV` value; `WaitEnd`
+  (`#[non_exhaustive]`); `load_limit`, `LOAD_PER_JOB`, `STALL`, `STALL_ENV`
+  and `POLL_FAILURES`. `acquire` now waits in line under the same rule.
+
+### Added
+
+- **`GREENGATE_ON_BUSY=now`** runs every heavy hook check of that run at once,
+  unqueued, and says so. It is read from the environment only: `set onBusy
+  now` in `greengate.conf` is refused, so no committed file skips the queue.
+  `greengate slot run --now` does the same for one command.
+- **`waits.jsonl`:** an `end` field (`stalled`, `ceiling`, `io_error`) on a
+  wait that ended without a slot, and a `now` outcome. A holder record that
+  names no `jobs` now adds one slot's width to `holder_jobs`, as the load test
+  counts it.
+- The deferral roll-up offers the command that waits first, then
+  `GREENGATE_ON_BUSY=now`. It offers `set onBusy wait` only after a `slotWait`
+  deferral, since a stall defers under either policy.
+
 ## v4.13.0
 
 ### Added
