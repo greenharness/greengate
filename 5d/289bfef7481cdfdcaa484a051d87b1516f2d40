@@ -12,3 +12,22 @@ RFQerK+MWJ4bjChwcAAAALZ3JlZW5zdW1taXQAAAAAAAAABnNoYTUxMgAAAFMAAAALc3No
 LWVkMjU1MTkAAABAERggLZV4wfATsyzkXQHXO/1XweAAURXxohUVBB4ECe/ZoWfKBBIbbh
 LN04KsJ3XOS0iYY5RMzm9BGp+JS9MoCQ==
 -----END SSH SIGNATURE-----
+
+greensummit-v2
+tree 4b9b29996f7189651b0d806e426643171fcdcdbc
+gates ci-deps ci-hooks-ubuntu ci-load-ubuntu ci-msrv ci-rust
+platform x86_64-linux
+input ci-rust a64a3799653228cf3f7c6f434267f98bbee4a6e2
+input ci-msrv a64a3799653228cf3f7c6f434267f98bbee4a6e2
+input ci-deps a64a3799653228cf3f7c6f434267f98bbee4a6e2
+input ci-hooks-ubuntu a64a3799653228cf3f7c6f434267f98bbee4a6e2
+input ci-load-ubuntu a64a3799653228cf3f7c6f434267f98bbee4a6e2
+canon ff1a5cb167a881c6a09af9e3af4025a2f78361ab
+greengate attest-sign-linux
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgUpKx1QTdCdwZEjcw/MK/JGWqft
+YBCaiDmnUdMyQ1dZAAAAALZ3JlZW5zdW1taXQAAAAAAAAABnNoYTUxMgAAAFMAAAALc3No
+LWVkMjU1MTkAAABAEE7qhtdCPZHUcZ7UOXMwizJw94fJcseJzJJqT9HURGktlVJJL8q3oq
+bGEkC/RQcO40XJbbou4B5T0jk5PGGjBQ==
+-----END SSH SIGNATURE-----
