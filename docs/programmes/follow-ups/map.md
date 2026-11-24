@@ -31,6 +31,8 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 
 2026-11-22: f06 closed on the relay's prompt (land refuses at once on a hook/land version split; `init` unchanged; unreleased, ships with f01, f03 and f05 in the next release). Next, in order: f02 (ADR-0055 on the venv route, due 2026-12-05), then f07.
 
+2026-11-24: filed f08, f09 and f10 from the inbox. They are four tests that failed the host-slot-admission t11 lands at load 40–150 and pass alone; the branch touched none of them. Next, in order: f02 (due 2026-12-05), f07, then f09, f08 and f10. f09 comes first of the three because its fix (count waits, not seconds) is already clear.
+
 ## Not yet specified
 
 ## Out of scope
