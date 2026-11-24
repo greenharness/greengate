@@ -323,6 +323,7 @@ installed.
 
 ## Implementation review
 
+- After the rebase onto #515 (pack conflict only, every branch commit `=`), all five re-ran as a delta on tree a0573634: four approve and IR approve-with-changes, with nothing new. About 229k tokens.
 - implementation-review: approve-with-changes, three passes (round 1, delta, fresh round 1). It fixed the flags, the `&mut` parameter, names, the discard, the exhaustive matches, the seam, the reset test and the plan text. About 497k tokens, 31 min.
 - lang:rust: approve. It fixed the stall window shown as 0 s, the typed sources, `WaitPlan` and the shared loop. Deliberate: load tenths (a pre-existing line). Carried: the second `clock()` read and the scratch cleanup. About 173k tokens, 24 min.
 - unix: approve. It fixed the release, now 5.0.0 under `cli.compat.interface-is-public`, exit 74 and the deprecation text. About 146k tokens, 13 min.
