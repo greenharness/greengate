@@ -1,0 +1,20 @@
+greengate-provenance-v1
+commit f8113e578487a1440ce82462bb833bf52fcd142c
+tree ec51bd55e0ac09a2efd69f39daabae961c889e6e
+canon 3324dcdaec847e693da8e405ee6bee9cee7f19ca
+patch 4413c435d4209cdf9ae75fb952734ad622453ac1
+plan docs/plans/2026-11-23-admission-counts-holders-stalled-waits.md 08be653766268545b1d16c4581284a447cd6d19166db96a780d0ffff37f19415
+review reviewed f4c98a30b01d585b912cff2b49c94a04b2563a95abf8fbbb2bda5a6779120ee7
+code-review backend carried 223bcb79afd5a372eb98f06d5ac40e03cd56761abce3a02b8bc923a2b27c0f2b
+code-review lang:rust reviewed f4c98a30b01d585b912cff2b49c94a04b2563a95abf8fbbb2bda5a6779120ee7
+code-review unix reviewed f4c98a30b01d585b912cff2b49c94a04b2563a95abf8fbbb2bda5a6779120ee7
+code-review architect carried 223bcb79afd5a372eb98f06d5ac40e03cd56761abce3a02b8bc923a2b27c0f2b
+preview not-required
+producer greenbelay 6.9.0
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg7UOvJ8myo4dhW907VFty7T/bUV
+RFQerK+MWJ4bjChwcAAAAUZ3JlZW5nYXRlLXByb3ZlbmFuY2UAAAAAAAAABnNoYTUxMgAA
+AFMAAAALc3NoLWVkMjU1MTkAAABAJXC4Yv4Lynq8RA6dZqh5ghsor/66pq8rUkjGs576ue
+od2xfK+JulOKurVeCoc3WYAMWg0zI2VRJxfrf3gFvSBg==
+-----END SSH SIGNATURE-----
