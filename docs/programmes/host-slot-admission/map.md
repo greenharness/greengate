@@ -46,6 +46,7 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 - [Who may move a job ahead, and how far](t06-who-may-reorder.md): own session's jobs only, to the head, with a journalled reason; 3 moves per session per day, never past a job waiting 20 min or more. The person's decision.
 - [The journal records holders and hold time](t09-journal-holders-and-hold-time.md): every wait line carries `holders` and `holder_jobs`, and every dropped lease leaves one `released` line with `held_ms`, written by the crate (greenharness-slots 4.13.0).
 - [A hand-set held marker skips the queue](t10-held-marker-is-trusted.md): never set by hand in 7 days; the real hole is an inline marker on `amont slot run` or `git commit`. The marker becomes `held:<lease>`, checked live by one shared reader; a forged one queues with a journalled line. Build: t15.
+- [The journal holds up a day after the 4.13 install](t14-journal-measure-after-install.md): met the plan's `## Measure`; p95 of `waited_ms` 1.23× baseline, no rollback.
 
 ## Handoff
 
@@ -73,8 +74,9 @@ at 12.3) and passes here. A real-window pilot exits 75 after 300 s with
 
 Next, in order:
 
-1. [t14](t14-journal-measure-after-install.md), due 2026-11-24: the 4.13
-   journal day. It must close before anything below is installed.
+1. ~~t14~~ closed 2026-11-24: the 4.13 journal held (p95 1.23×, 291 rows per
+   12 h, no `Drop` panic; one stale 4.11.0 writer in greenrack worktrees).
+   Phase 4 may go ahead.
 2. t11 Phase 4: release greengate 5.0.0 (crates.io included; a major: `cli.compat.interface-is-public`) and install it.
    Read the crates.io job's conclusion: its token is a 90-day one. Run
    semver-checks, or an equivalent check, before the publish.
