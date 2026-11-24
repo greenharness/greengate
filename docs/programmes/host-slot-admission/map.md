@@ -77,9 +77,23 @@ Next, in order:
 1. ~~t14~~ closed 2026-11-24: the 4.13 journal held (p95 1.23×, 291 rows per
    12 h, no `Drop` panic; one stale 4.11.0 writer in greenrack worktrees).
    Phase 4 may go ahead.
-2. t11 Phase 4: release greengate 5.0.0 (crates.io included; a major: `cli.compat.interface-is-public`) and install it.
-   Read the crates.io job's conclusion: its token is a 90-day one. Run
-   semver-checks, or an equivalent check, before the publish.
+2. ~~t11 Phase 4~~ done 2026-11-24: greengate 5.0.0 released (Release run
+   https://github.com/greenharness/greengate/actions/runs/45386975691:
+   conclusion success, with `publish to crates.io`, `publish to npm`, `publish
+   to homebrew tap` and `brew can install what was published` each success)
+   and installed on this machine (brew; `greengate --version` printed
+   `greengate 5.0.0`). cargo-semver-checks is not
+   installed; the major bump and the changelog carry the breaks. Observed:
+   `cargo search` lists `greengate-runtime` and `greenharness-slots` 5.0.0;
+   `npm view @greenharness/greengate` reads `latest` 5.0.0 (a few minutes
+   after the green job); the brew binary is Cellar/greengate/5.0.0. Pins left
+   at the old major on purpose until each repo's own bump (read from the
+   `package.json` files; the plan's Decision log says `^4`): `^4.11.0` in
+   duro-app and greenrack, and relais's `greenharness-slots = "4.13"`, which
+   Phase 5 moves to `"5"`. The
+   24 h and 7 d journal counts against the baseline run from this install
+   (about 2026-11-24 12:49): they are t08's measure. Hook shims and the
+   AGENTS.md block are not refreshed fleet-wide yet.
 3. t11 Phase 5 (relais):
    - bump the crate, `Stall` in `heavy.rs` `take()`, and `admission_overrun`,
      for the host-slot wait only;
