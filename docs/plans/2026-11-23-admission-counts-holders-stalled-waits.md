@@ -204,7 +204,7 @@ nothing, so it is no longer advised as unqueued, and the advice names
   greengate 5.0.0 install; `aval heads --write`:
   `adr/0022-waits-end-on-a-stalled-line.md`, `adr/HEADS.md`,
   `docs/host-slots.md`, `CHANGELOG.md`
-- [ ] Phase 4 — release greengate 5.0.0 (crates.io included) and install it
+- [x] Phase 4 — release greengate 5.0.0 (crates.io included) and install it
   on this machine, only after t14's 24-hour window has closed and t14 is
   recorded: `Cargo.toml`, `CHANGELOG.md`
 - [ ] Phase 5 — relais: bump `greenharness-slots = "5"`, `Stall` in
