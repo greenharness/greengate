@@ -1771,6 +1771,20 @@ mod tests {
         }
     }
 
+    /// An automatic waiter sized for the 12 cores `idle` and `busy` probe,
+    /// not the host running the test: its `jobs` (2) feed the load limit,
+    /// and a 3-core CI runner would otherwise record 3 and admit at load 20.
+    fn auto_waiter(dir: &Path, command: &str) -> Waiter {
+        Waiter::new_in_on(
+            dir,
+            Sizing::Auto,
+            1,
+            Holder::here("t", command),
+            Machine { cores: 12 },
+        )
+        .unwrap()
+    }
+
     fn granted(p: Poll) -> Lease {
         match p {
             Poll::Granted(l) => l,
@@ -1799,9 +1813,9 @@ mod tests {
     fn auto_admits_a_second_holder_only_when_idle_and_after_the_ramp() {
         let d = scratch("auto");
         let t0 = 10_000_000;
-        let mut a = Waiter::new_in(&d, Sizing::Auto, 1, Holder::here("t", "a")).unwrap();
+        let mut a = auto_waiter(&d, "a");
         let _first = granted(a.poll_with(idle(t0)).unwrap());
-        let mut b = Waiter::new_in(&d, Sizing::Auto, 1, Holder::here("t", "b")).unwrap();
+        let mut b = auto_waiter(&d, "b");
         let ramp = waiting(b.poll_with(idle(t0 + 10_000)).unwrap()); // ramp not elapsed
         assert_eq!(ramp.reason, Some(WaitReason::Ramp));
         let load = waiting(b.poll_with(busy(t0 + 61_000)).unwrap()); // load too high
@@ -1838,7 +1852,7 @@ mod tests {
     fn a_sibling_of_a_holder_skips_the_ramp_but_not_the_load_test() {
         let d = scratch("sibling");
         let t0 = 70_000_000;
-        let mut a = Waiter::new_in(&d, Sizing::Auto, 1, Holder::here("t", "a")).unwrap();
+        let mut a = auto_waiter(&d, "a");
         let _a = granted(a.poll_with(idle(t0)).unwrap());
         let sibling = |now_ms, load1| Probe {
             load1: Some(load1),
@@ -1846,7 +1860,7 @@ mod tests {
             now_ms,
             own_held: 1,
         };
-        let mut b = Waiter::new_in(&d, Sizing::Auto, 1, Holder::here("t", "b")).unwrap();
+        let mut b = auto_waiter(&d, "b");
         waiting(b.poll_with(sibling(t0 + 1_000, 20.0)).unwrap()); // busy: still waits
         let _b = granted(b.poll_with(sibling(t0 + 1_000, 1.0)).unwrap()); // idle: no ramp
     }
@@ -1858,10 +1872,10 @@ mod tests {
     fn the_ramp_keeps_a_third_waiter_queued_past_ninety_seconds() {
         let d = scratch("three");
         let t0 = 50_000_000;
-        let mut a = Waiter::new_in(&d, Sizing::Auto, 1, Holder::here("t", "a")).unwrap();
+        let mut a = auto_waiter(&d, "a");
         let _a = granted(a.poll_with(idle(t0)).unwrap());
-        let mut b = Waiter::new_in(&d, Sizing::Auto, 1, Holder::here("t", "b")).unwrap();
-        let mut c = Waiter::new_in(&d, Sizing::Auto, 1, Holder::here("t", "c")).unwrap();
+        let mut b = auto_waiter(&d, "b");
+        let mut c = auto_waiter(&d, "c");
         let _b = granted(b.poll_with(idle(t0 + 60_000)).unwrap());
         waiting(c.poll_with(idle(t0 + 90_000)).unwrap());
         let _c = granted(c.poll_with(idle(t0 + 120_000)).unwrap());
