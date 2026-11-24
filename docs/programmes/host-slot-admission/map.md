@@ -47,6 +47,7 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 - [The journal records holders and hold time](t09-journal-holders-and-hold-time.md): every wait line carries `holders` and `holder_jobs`, and every dropped lease leaves one `released` line with `held_ms`, written by the crate (greenharness-slots 4.13.0).
 - [A hand-set held marker skips the queue](t10-held-marker-is-trusted.md): never set by hand in 7 days; the real hole is an inline marker on `amont slot run` or `git commit`. The marker becomes `held:<lease>`, checked live by one shared reader; a forged one queues with a journalled line. Build: t15.
 - [The journal holds up a day after the 4.13 install](t14-journal-measure-after-install.md): met the plan's `## Measure`; p95 of `waited_ms` 1.23× baseline, no rollback.
+- [The journal 24 hours after the 5.0 install](t17-count-after-5-0-install.md): due 2026-11-25; refresh the stale hook shims first, then the t11 Verification count, the first half of t08.
 
 ## Handoff
 
@@ -101,7 +102,8 @@ Next, in order:
    - release and install.
 4. t11 Phase 6: greenbelay's `heavy-build-unqueued` learns `--now`. Then t11
    closes and [t08](t08-workday-measure.md) can start.
-5. Then t12, t13, t15, and [t16](t16-coordinator-queue-moving-line.md) once
+5. [t17](t17-count-after-5-0-install.md) (due 2026-11-25): refresh the stale shims, then count the 5.0 journal.
+6. Then t12, t13, t15, and [t16](t16-coordinator-queue-moving-line.md) once
    relais ships.
 
 The plan's "Full reviews" sidecar lists the findings carried into Phases 4–6.
