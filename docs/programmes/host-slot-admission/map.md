@@ -102,11 +102,19 @@ Next, in order:
 4. ~~t11 Phase 6~~ done 2026-11-25: greenbelay 6.15.0 (`heavy-build-unqueued`
    fires on `slot run --now` and advises it; #331, release #333) installed
    2026-11-25 about 06:00 CET. t11's code is all shipped, but its plan stays
-   active: the post-install count is t17's, and its interim count (13.4 h,
-   commit c5acb1f0 on the unmerged branch `docs/hsa-t17-count`, owned by
-   another session) reads roll back: hook deferrals 4.5× the baseline. t08 waits on t17. greengate 4.13 has no `--now`, so a rollback of
-   greengate alone leaves greenbelay 6.15's advice naming a missing flag, and
-   relais 0.83 admits by crate 5's rule (t17 owns that decision).
+   active: the post-install count is t17's. Its interim count has already
+   fired the plan's 2× trigger: 158 hook deferrals in the 13.4 h after the
+   2026-11-24 12:49 install (141.8 per 12 h) against a baseline of 31.8 per
+   12 h (103 deferrals from 2026-11-21 18:00 over 38.9 h), 4.5× (commit
+   c5acb1f0 on the unmerged branch `docs/hsa-t17-count`, owned by another
+   session). t17's verdict and the rollback are pending there; do not count
+   again here. t08 waits on t17.
+
+   greengate 4.13 has no `--now`, and relais 0.83 admits by crate 5's rule, so
+   a rollback has three parts: greengate back to 4.13 (t17's recipe),
+   greenbelay back to 6.14.0 or forward without the `--now` advice, and
+   relais back to 0.82.0 or a stated decision to keep it on crate 5. Which
+   parts, and in what order, is t17's decision.
 5. [t17](t17-count-after-5-0-install.md) (due 2026-11-25): refresh the stale shims, then count the 5.0 journal.
 6. Then t12, t13, t15, and [t16](t16-coordinator-queue-moving-line.md) once
    relais ships.
