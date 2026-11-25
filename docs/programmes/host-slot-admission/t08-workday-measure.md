@@ -2,7 +2,7 @@
 type = "task"
 mode = "afk"
 status = "open"
-blocked_by = ["t11-build-admission-and-waits", "t12-build-relais-setup-lease", "t13-build-reorder", "t15-build-held-marker-lease"]
+blocked_by = ["t18-plan-hook-stall-narrow-fix", "t11-build-admission-and-waits", "t12-build-relais-setup-lease", "t13-build-reorder", "t15-build-held-marker-lease"]
 repos = ["amont"]
 +++
 # Measure one workday of the queue after the builds

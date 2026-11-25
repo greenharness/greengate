@@ -1,7 +1,7 @@
 +++
 type = "task"
 mode = "afk"
-status = "open"
+status = "closed"
 due = "2026-11-25"
 blocked_by = []
 repos = ["amont", "relais"]
@@ -83,9 +83,11 @@ Step 2, after install, by `tool`:
 Rows without `holders`: 0 (target met).
 
 Step 3. Unqueued rows after a wait, outside `now`: 0 (target met).
-`admission_wait_exhausted` after a grant: not counted yet. relais's
-Phase 5 (the `greenharness-slots = "5"` bump) has not shipped (relais
-0.82.0 installed).
+`admission_wait_exhausted` after a grant: 0. relais's Phase 5 (v0.83.0,
+greenharness-slots 5) was installed 2026-11-25 02:26 CET, after this count
+was first taken. From then to 09:40 the journal holds 11 relais
+`admitted` rows, and the ledger holds 2 runs (1 accepted, 1 cancelled),
+none blocked.
 
 Step 4, hook deferrals. The ticket's "103 per 12 hours" was wrong. The
 plan's 103 runs from 2026-11-21 18:00 to the 103rd deferral at 2026-11-23
@@ -111,3 +113,16 @@ clippy 36, adr-lint-cli-probe 29, run-tests-js 16, plugin-test 10.
 
 Verdict: **roll back**. The hook deferral rate passes 2× the baseline under
 every reading.
+
+## Resolution
+
+2026-11-25 09:40 CET. The 2× trigger fired. The person chose a **narrow fix
+over a revert**: greengate 5.0 stays installed, and so do relais 0.83 and
+greenbelay 6.15, whose `--now` advice needs 5.0. A plan drops only the
+hook-path stalled-line deferral (75 of the 158 deferrals) and ships as
+greengate 5.0.1: [t18](t18-plan-hook-stall-narrow-fix.md). The ceiling
+deferrals (83, 74.5 per 12 h) were unqueued runs before 5.0, and the narrow
+fix leaves them as they are. t18's plan states which way they end.
+
+t08 is not unblocked by a held verdict. Its count starts after the 5.0.1
+install.
