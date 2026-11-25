@@ -47,7 +47,7 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 - [The journal records holders and hold time](t09-journal-holders-and-hold-time.md): every wait line carries `holders` and `holder_jobs`, and every dropped lease leaves one `released` line with `held_ms`, written by the crate (greenharness-slots 4.13.0).
 - [A hand-set held marker skips the queue](t10-held-marker-is-trusted.md): never set by hand in 7 days; the real hole is an inline marker on `amont slot run` or `git commit`. The marker becomes `held:<lease>`, checked live by one shared reader; a forged one queues with a journalled line. Build: t15.
 - [The journal holds up a day after the 4.13 install](t14-journal-measure-after-install.md): met the plan's `## Measure`; p95 of `waited_ms` 1.23× baseline, no rollback.
-- [The journal 24 hours after the 5.0 install](t17-count-after-5-0-install.md): due 2026-11-25; refresh the stale hook shims first, then the t11 Verification count, the first half of t08.
+- [The journal 24 hours after the 5.0 install](t17-count-after-5-0-install.md): hook deferrals were 4.5× baseline (141.8 per 12 h against 31.8), past the 2× trigger. The person chose a narrow fix over a revert: 5.0, relais 0.83 and greenbelay 6.15 stay. Plan: t18.
 
 ## Handoff
 
@@ -115,7 +115,7 @@ Next, in order:
    greenbelay back to 6.14.0 or forward without the `--now` advice, and
    relais back to 0.82.0 or a stated decision to keep it on crate 5. Which
    parts, and in what order, is t17's decision.
-5. [t17](t17-count-after-5-0-install.md) (due 2026-11-25): refresh the stale shims, then count the 5.0 journal.
+5. ~~t17~~ closed 2026-11-25: the 2× trigger fired, and the person chose a narrow fix, with no revert of greengate, relais or greenbelay. Next is [t18](t18-plan-hook-stall-narrow-fix.md): plan greengate 5.0.1, with no stalled-line deferral on the hook path. t08 counts from the 5.0.1 install.
 6. Then t12, t13, t15, and [t16](t16-coordinator-queue-moving-line.md) once
    relais ships.
 
