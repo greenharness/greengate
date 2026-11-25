@@ -66,7 +66,7 @@ const USAGE: &str = concat!(
     greengate_runtime::bin!(),
     ")
   --agents-md    with fix/install: also roll out the AGENTS.md pointer
-  --aval-hook    with fix/install: also re-run `aval hook install` where a
+  --aval-hook    with fix/install: also re-run `greentopo hook install` where a
                  repository keeps an .adr.yaml and its session hook is behind
                  the aval on PATH. Reports, never edits, a .gitignore that
                  would drop the hook's files.
@@ -902,7 +902,7 @@ fn report_fix(plans: &[fix::FixPlan]) {
         }
         if p.install_aval_hook.is_some() {
             println!(
-                "  run   aval hook install  ({} · {})",
+                "  run   greentopo hook install  ({} · {})",
                 aval_hook::SCRIPT_PATH,
                 aval_hook::SETTINGS_PATH
             );

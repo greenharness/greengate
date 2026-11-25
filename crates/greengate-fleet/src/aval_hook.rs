@@ -1,6 +1,6 @@
 //! Whether each decision-bearing repository's `aval` session hook is current.
 //!
-//! `aval hook install` writes two tracked files — `.claude/hooks/aval-heads.sh`
+//! `greentopo hook install` writes two tracked files — `.claude/hooks/greentopo-heads.sh`
 //! and a `SessionStart` entry in `.claude/settings.json` — so that an agent
 //! session opens with the repository's decision heads and adopted rules in
 //! front of it. The script's bytes are its version: every aval release that
@@ -32,8 +32,11 @@ use serde::Serialize;
 
 /// The registry aval reads. Its presence is what makes a repository a corpus.
 pub const REGISTRY: &str = ".adr.yaml";
-/// The two files `aval hook install` writes, spelled as aval spells them.
-pub const SCRIPT_PATH: &str = ".claude/hooks/aval-heads.sh";
+/// The program that judges and writes the session hook. aval became
+/// greentopo (ADR-0072); the hook it writes is `greentopo-heads.sh`.
+pub const PROGRAM: &str = "greentopo";
+/// The two files `greentopo hook install` writes, spelled as it spells them.
+pub const SCRIPT_PATH: &str = ".claude/hooks/greentopo-heads.sh";
 pub const SETTINGS_PATH: &str = ".claude/settings.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -310,7 +313,7 @@ mod tests {
         // The negation shape every wired repository uses clears it.
         std::fs::write(
             repo.join(".gitignore"),
-            ".claude/*\n!.claude/settings.json\n!.claude/hooks/\n.claude/hooks/*\n!.claude/hooks/aval-heads.sh\n",
+            ".claude/*\n!.claude/settings.json\n!.claude/hooks/\n.claude/hooks/*\n!.claude/hooks/greentopo-heads.sh\n",
         )
         .unwrap();
         assert!(state(&repo, &aval).ignored.is_empty());

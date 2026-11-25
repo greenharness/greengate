@@ -892,7 +892,7 @@ fn inspect(
             _ => Some(false),
         },
         agents_md: agents_md_state(repo),
-        aval_hook: crate::aval_hook::state(repo, "aval"),
+        aval_hook: crate::aval_hook::state(repo, crate::aval_hook::PROGRAM),
         hooks_dir,
         shares_hooks_with,
         attest: crate::attest::read(repo),
