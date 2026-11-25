@@ -95,13 +95,17 @@ Next, in order:
    24 h and 7 d journal counts against the baseline run from this install
    (about 2026-11-24 12:49): they are t08's measure. Hook shims and the
    AGENTS.md block are not refreshed fleet-wide yet.
-3. t11 Phase 5 (relais):
-   - bump the crate, `Stall` in `heavy.rs` `take()`, and `admission_overrun`,
-     for the host-slot wait only;
-   - the relais record that amends `execution.resource-budgets`;
-   - release and install.
-4. t11 Phase 6: greenbelay's `heavy-build-unqueued` learns `--now`. Then t11
-   closes and [t08](t08-workday-measure.md) can start.
+3. ~~t11 Phase 5~~ done 2026-11-25: relais v0.83.0 (`greenharness-slots = "5"`,
+   `Stall` in the host-slot wait, in-memory `admission_overrun`, ADR-0015;
+   relais #573, release #580) installed 2026-11-25 02:26 CET; coordinator
+   stopped then. t17's `admission_wait_exhausted`-after-grant count starts there.
+4. ~~t11 Phase 6~~ done 2026-11-25: greenbelay 6.15.0 (`heavy-build-unqueued`
+   fires on `slot run --now` and advises it; #331, release #333) installed
+   2026-11-25 about 06:00 CET. t11's code is all shipped, but its plan stays
+   active: the post-install count is t17's, and t17's interim verdict is roll
+   back. t08 waits on t17. greengate 4.13 has no `--now`, so a rollback of
+   greengate alone leaves greenbelay 6.15's advice naming a missing flag, and
+   relais 0.83 admits by crate 5's rule (t17 owns that decision).
 5. [t17](t17-count-after-5-0-install.md) (due 2026-11-25): refresh the stale shims, then count the 5.0 journal.
 6. Then t12, t13, t15, and [t16](t16-coordinator-queue-moving-line.md) once
    relais ships.

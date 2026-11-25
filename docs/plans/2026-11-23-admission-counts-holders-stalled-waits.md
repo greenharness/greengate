@@ -207,14 +207,14 @@ nothing, so it is no longer advised as unqueued, and the advice names
 - [x] Phase 4 — release greengate 5.0.0 (crates.io included) and install it
   on this machine, only after t14's 24-hour window has closed and t14 is
   recorded: `Cargo.toml`, `CHANGELOG.md`
-- [ ] Phase 5 — relais: bump `greenharness-slots = "5"`, `Stall` in
+- [x] Phase 5 — relais: bump `greenharness-slots = "5"`, `Stall` in
   `take()`, `admission_overrun`, tests (a moving line outlives the admission
   budget, and the run is not ended after the grant; a stalled line blocks at
   300 s), a relais record replacing `execution.resource-budgets` (ADR-0010 row `admission_wait_seconds`: a moving line outlives it, overrun charged to the total only) with `aval heads --check`, pointer plan, release and install:
   `crates/relais/Cargo.toml`, `crates/relais/src/verify/heavy.rs`,
   `crates/relais/src/policy/budgets.rs`, `CHANGELOG.md`,
   `docs/plans/2026-11-23-admission-counts-holders-stalled-waits.md`
-- [ ] Phase 6 — greenbelay: `--now` counts as unqueued, and the advice
+- [x] Phase 6 — greenbelay: `--now` counts as unqueued, and the advice
   names it; release and install:
   `crates/greenbelay-guard/src/rules/heavy_build_unqueued.rs`,
   `crates/greenbelay-guard/tests/corpus/heavy-build-unqueued.cases`,
@@ -311,9 +311,22 @@ installed.
   `hooks.gates-before-connection`.
 - Phase 4: `greengate --version` reads 5.0.0, and crates.io lists it.
 - Phase 5: a relais command in a moving line past `admission_wait_seconds` is
-  granted, and the run is not blocked.
+  granted, and the run is not blocked. Observed (relais pointer plan, PR #573):
+  `host_slots` tests pass; a line moving past the 80 s budget is granted with
+  `waited + overrun == 80 s` and the run continues; a still line ends at its
+  window with the row `"end":"stalled"`; 730 relais lib tests and CI on three
+  platforms green. Released as relais v0.83.0 (Release run 45524069924, every
+  job success, brew install job success) and installed here at 2026-11-25
+  02:26 CET (`relais --version` 0.83.0); the idle coordinator was stopped then.
 - Phase 6: `slot run --now` triggers `heavy-build-unqueued`, and the advice
-  names `--now`.
+  names `--now`. Observed with the installed greenbelay 6.15.0 (PR #331,
+  Release run 45570392786, crates.io and brew jobs success):
+  `greenbelay check 'greengate slot run --now -- cargo test -p foo'` prints
+  `heavy-build-unqueued [advise]` with "`--now` runs it at once, unqueued. Drop
+  it to queue: `greengate slot run -- cargo test -p foo` …"; `greenbelay check
+  'cargo test'` names `--now` "past a stalled line" and exit 75 for a stalled
+  line. greengate 4.13.0 has no `--now`, so a rollback of greengate alone
+  would leave that advice naming a missing flag.
 - After the 5.0 install, count the journal at 24 h and 7 d against the
   baseline since 2026-11-21 18:00: hook unqueued 34, hook defer 103, `slot run`
   timeouts 50, relais deferred 21. The targets are 0 unqueued rows after a wait
