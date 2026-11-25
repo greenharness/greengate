@@ -332,7 +332,7 @@ installed.
   timeouts 50, relais deferred 21. The targets are 0 unqueued rows after a wait
   (outside `now`) and 0 runs blocked `admission_wait_exhausted` after a grant.
   Roll back if the hook deferral rate passes 2× the baseline. This count is
-  t08's workday measure, and t08 is told so.
+  t17's, carried into t08's workday measure when it holds.
 
 ## Implementation review
 

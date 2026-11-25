@@ -93,7 +93,7 @@ Next, in order:
    duro-app and greenrack, and relais's `greenharness-slots = "4.13"`, which
    Phase 5 moves to `"5"`. The
    24 h and 7 d journal counts against the baseline run from this install
-   (about 2026-11-24 12:49): they are t08's measure. Hook shims and the
+   (about 2026-11-24 12:49): they are t17's count, carried into t08 when it holds. Hook shims and the
    AGENTS.md block are not refreshed fleet-wide yet.
 3. ~~t11 Phase 5~~ done 2026-11-25: relais v0.83.0 (`greenharness-slots = "5"`,
    `Stall` in the host-slot wait, in-memory `admission_overrun`, ADR-0015;
@@ -102,8 +102,9 @@ Next, in order:
 4. ~~t11 Phase 6~~ done 2026-11-25: greenbelay 6.15.0 (`heavy-build-unqueued`
    fires on `slot run --now` and advises it; #331, release #333) installed
    2026-11-25 about 06:00 CET. t11's code is all shipped, but its plan stays
-   active: the post-install count is t17's, and t17's interim verdict is roll
-   back. t08 waits on t17. greengate 4.13 has no `--now`, so a rollback of
+   active: the post-install count is t17's, and its interim count (13.4 h,
+   commit c5acb1f0 on the unmerged branch `docs/hsa-t17-count`, owned by
+   another session) reads roll back: hook deferrals 4.5× the baseline. t08 waits on t17. greengate 4.13 has no `--now`, so a rollback of
    greengate alone leaves greenbelay 6.15's advice naming a missing flag, and
    relais 0.83 admits by crate 5's rule (t17 owns that decision).
 5. [t17](t17-count-after-5-0-install.md) (due 2026-11-25): refresh the stale shims, then count the 5.0 journal.
