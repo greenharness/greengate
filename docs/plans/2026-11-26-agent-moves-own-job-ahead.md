@@ -27,7 +27,8 @@ plan-id: p-01M8C7ZZ8GMKGY6HFJD9MZG2G6
 ```
 
 The picture shows one move: the ticket is renamed to sort first, under the
-admission lock, and each waiter finds its ticket again by its `pid-seq`.
+admission lock after its row is journalled, and each waiter finds its ticket
+again by its inode.
 
 ## Goal
 
@@ -130,8 +131,10 @@ stays right because its empty ticket is never moved.
 **CLI.**
 
 - `greengate slot promote <id> --reason <text> [--to <n>]`: the session is
-  read at the binary's edge (`session_id()`). Exit 0 prints to stdout
-  `moved 444-0 from 3 to 1, past 2 jobs; 2 of 3 moves left in 24 h`.
+  read at the binary's edge (`session_id()`). Exit 0 prints to stderr
+  `moved 444-0 from 3 to 1, past 2 jobs; 2 of 3 moves left in 24 h` (every
+  message goes to stderr: the exit status is the result, and the queue view
+  is the one stdout a script reads).
   Refusals and errors go to stderr: a refusal exits 1, slots off or
   unsupported exits 1 saying so, a usage error exits 2, an admission lock
   still busy after 10 s exits 75 with the command to retry (a wait over 1 s
