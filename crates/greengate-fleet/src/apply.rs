@@ -235,13 +235,13 @@ pub fn apply(plan: &FixPlan) -> Outcome {
         // Re-ask aval at the moment of action, same rule as `AGENTS.md`: the
         // scan may be stale, and a repository somebody re-installed in the
         // meantime must not be written a third time. The state is read from
-        // the same binary the plan's scan used — `"aval"` on PATH — because
+        // the same binary the plan's scan used — `greentopo` on PATH — because
         // "current" is aval's judgment, not this crate's. Only `Stale`
         // proceeds: `Current` is nothing to do, and every other answer is
         // what the plan would have warned about instead of planning.
-        match crate::aval_hook::state(&h.repo, "aval").state {
+        match crate::aval_hook::state(&h.repo, crate::aval_hook::PROGRAM).state {
             crate::aval_hook::AvalHookState::Stale => {
-                match crate::aval_hook::install(&h.repo, "aval") {
+                match crate::aval_hook::install(&h.repo, crate::aval_hook::PROGRAM) {
                     Ok(n) => written += n,
                     Err(e) => {
                         return Outcome::Failed {
