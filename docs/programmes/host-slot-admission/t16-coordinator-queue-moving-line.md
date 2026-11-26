@@ -2,6 +2,7 @@
 type = "task"
 mode = "afk"
 status = "open"
+due = "2026-12-02"
 blocked_by = ["t11-build-admission-and-waits"]
 repos = ["relais"]
 +++
