@@ -537,3 +537,125 @@ fn a_now_command_is_bounded_too() {
     let _ = first.wait_with_output(); // best-effort: reap the holder
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
+
+/// `amont` run as one agent session: the runner's own session variables
+/// removed, then one set, so the test's session never leaks in.
+fn as_session(slots: &Path, session: &str, args: &[&str]) -> Command {
+    let mut cmd = amont(slots, args);
+    cmd.env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("RELAIS_SESSION_ID")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env("CLAUDE_CODE_SESSION_ID", session);
+    cmd
+}
+
+/// The `slots --json` queue, parsed.
+fn queue_of(slots: &Path) -> Vec<serde_json::Value> {
+    let out = amont(slots, &["slots", "--json"]).output().expect("slots");
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("slots --json is JSON");
+    json["queue"].as_array().cloned().unwrap_or_default()
+}
+
+/// t13 on the built binary: two jobs wait behind a held slot, the queue
+/// names their sessions, another session's move is refused by name, and the
+/// job's own session moves it to the head with a journalled row.
+#[test]
+fn a_session_moves_its_own_waiting_job_to_the_head() {
+    let slots = slot_dir("promote");
+    // The holder holds until the test says so, never on a timer: on a busy
+    // host the steps below can outlast any sleep.
+    let release = slots.join("release-holder");
+    let release_arg = release.to_string_lossy().into_owned();
+    let first = spawn(
+        &slots,
+        &[
+            "slot",
+            "run",
+            "--",
+            "sh",
+            "-c",
+            "while [ ! -e \"$0\" ]; do sleep 0.1; done",
+            &release_arg,
+        ],
+    );
+    until_held(&slots);
+    let theirs = as_session(&slots, "session-theirs", &["slot", "run", "--", "true"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("theirs");
+    until_waiting(&slots, 1);
+    let mine = as_session(&slots, "session-mine", &["slot", "run", "--", "true"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("mine");
+    until_waiting(&slots, 2);
+    let queue = queue_of(&slots);
+    assert_eq!(queue.len(), 2, "{queue:?}");
+    assert_eq!(queue[0]["session"], "session-theirs", "{queue:?}");
+    assert_eq!(queue[1]["session"], "session-mine", "{queue:?}");
+    assert_eq!(queue[1]["position"], 1, "{queue:?}");
+    let id = queue[1]["id"].as_str().expect("an id").to_string();
+
+    let refused = as_session(
+        &slots,
+        "session-theirs",
+        &["slot", "promote", &id, "--reason", "mine first"],
+    )
+    .output()
+    .expect("promote");
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("refused (own-session)"),
+        "{}",
+        text(&refused)
+    );
+
+    let moved = as_session(
+        &slots,
+        "session-mine",
+        &["slot", "promote", &id, "--reason", "the person waits on it"],
+    )
+    .output()
+    .expect("promote");
+    assert_eq!(moved.status.code(), Some(0), "{}", text(&moved));
+    // Every message goes to stderr: the exit status is the result.
+    assert!(
+        String::from_utf8_lossy(&moved.stderr).starts_with(&format!(
+            "moved {id} from 1 to 0, past 1 job; 2 of 3 moves left"
+        )),
+        "{}",
+        text(&moved)
+    );
+    assert!(moved.stdout.is_empty(), "{}", text(&moved));
+    let queue = queue_of(&slots);
+    assert_eq!(queue[0]["id"], id.as_str(), "{queue:?}");
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert_eq!(
+        waits.matches("\"outcome\":\"promoted\"").count(),
+        1,
+        "{waits}"
+    );
+    assert!(
+        waits.contains("\"reason\":\"the person waits on it\""),
+        "{waits}"
+    );
+    assert!(waits.contains("\"limit\":\"own-session\""), "{waits}");
+
+    std::fs::write(&release, "").expect("release the holder");
+    let mine = mine.wait_with_output().expect("mine");
+    let theirs = theirs.wait_with_output().expect("theirs");
+    let said = String::from_utf8_lossy(&mine.stderr).into_owned();
+    assert!(
+        said.contains(&format!("id {id}; move ahead: greengate slot promote {id}")),
+        "{said}"
+    );
+    assert_eq!(
+        (mine.status.code(), theirs.status.code()),
+        (Some(0), Some(0))
+    );
+    let _ = first.wait_with_output(); // best-effort: reap the holder
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}

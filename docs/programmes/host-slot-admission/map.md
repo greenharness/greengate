@@ -50,6 +50,7 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 - [The journal 24 hours after the 5.0 install](t17-count-after-5-0-install.md): hook deferrals were 4.5× baseline (141.8 per 12 h against 31.8), past the 2× trigger. The person chose a narrow fix over a revert: 5.0, relais 0.83 and greenbelay 6.15 stay. Plan: t18.
 - [Build: admission counts holders, waits end on a stalled line](t11-build-admission-and-waits.md): shipped in greengate 5.0.0, relais v0.83.0 and greenbelay 6.15.0; the hook path narrowed in 5.1.1 (t18); its measure is t19.
 - [Hook waits end at the ceiling, not on a stall](t18-plan-hook-stall-narrow-fix.md): greengate 5.1.1 (5.1.0 was already out) gives a hook check no stall window, so it waits to its ceiling and defers there; `slot run`, `--now`, `holders` and relais stay on crate 5. Ceiling deferrals stay deferred (229 of 261 are `onBusy defer`'s 60 s `slotWait`; only 14 were unqueued before 5.0). ADR-0022 amended. The 24 h count is [t19](t19-count-after-5-1-1-install.md), and the plain 2× rule may still fire on `slotWait` rows.
+- [Build: an agent can move a job ahead](t13-build-reorder.md): `greengate slot promote <id> --reason …` (5.2.0) moves a session's own waiting job up to the head under t06's limits, journalled `promoted`; a waiter finds its ticket by inode, and `slots` lists the queue. relais's jobs become movable only once it links crate 5.2, and under its `run_id` session.
 
 ## Handoff
 
