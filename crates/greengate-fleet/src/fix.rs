@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use greengate_runtime::hookfile::Tracked;
 use serde::Serialize;
 
-use crate::aval_hook::AvalHookState;
+use crate::greentopo_hook::GreentopoHookState;
 use crate::scan::{AgentsMdState, Repo};
 use crate::shim::{self, DISPATCHERS};
 
@@ -234,16 +234,16 @@ pub struct WriteAgentsMd {
     pub changes: bool,
 }
 
-/// Re-running `aval hook install` in a repository whose session hook is out
-/// of date. Only ever present when the caller opted in (`plan`'s `aval_hook`
+/// Re-running `greentopo hook install` in a repository whose session hook is out
+/// of date. Only ever present when the caller opted in (`plan`'s `greentopo_hook`
 /// argument), for the same reason `WriteAgentsMd` is: it writes tracked
 /// content, and across a fleet that is a materially bigger action than the
-/// untracked shims. Unlike `WriteAgentsMd` the bytes are not ours — aval
-/// renders them, and `apply` runs aval rather than a copy of it.
+/// untracked shims. Unlike `WriteAgentsMd` the bytes are not ours — greentopo
+/// renders them, and `apply` runs greentopo rather than a copy of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct InstallAvalHook {
-    /// The repository aval is run in. The two files it writes are named by
-    /// [`crate::aval_hook::SCRIPT_PATH`] and [`crate::aval_hook::SETTINGS_PATH`].
+pub struct InstallGreentopoHook {
+    /// The repository greentopo is run in. The two files it writes are named by
+    /// [`crate::greentopo_hook::SCRIPT_PATH`] and [`crate::greentopo_hook::SETTINGS_PATH`].
     pub repo: PathBuf,
 }
 
@@ -292,19 +292,25 @@ pub enum Warning {
     /// `core.hooksPath` handed dispatch to another tool inside the repository.
     /// On both channels for the same reason as `HooksDirOutsideRepo`.
     HooksDirRedirected { path: PathBuf },
-    /// git ignores the aval session hook's files here, so the hook works for
-    /// whoever ran `aval hook install` and ships to nobody. Named, never
+    /// git ignores the greentopo session hook's files here, so the hook works for
+    /// whoever ran `greentopo hook install` and ships to nobody. Named, never
     /// repaired: the `.gitignore` fix is `.claude/*` plus negations in every
     /// repository seen so far, and "every so far" is not a rule this tool
     /// gets to write into somebody's ignore file. Only raised under
-    /// `--aval-hook`, since without it the hook is not this run's business.
-    AvalHookIgnored { paths: Vec<String> },
-    /// `--aval-hook` was asked for and this repository has a corpus, but its
-    /// hook could not be judged — no `aval` on `PATH`, or an answer aval did
+    /// `--greentopo-hook`, since without it the hook is not this run's business.
+    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
+    // renaming it is a major, after a minor that warns.
+    #[serde(rename = "aval_hook_ignored")]
+    GreentopoHookIgnored { paths: Vec<String> },
+    /// `--greentopo-hook` was asked for and this repository has a corpus, but its
+    /// hook could not be judged — no `greentopo` on `PATH`, or an answer greentopo did
     /// not promise. Absence of evidence, reported as such rather than as
     /// "current" (a missing binary is exactly how "up to date" would be faked
     /// by silence) or as "stale" (which would plan a write on a guess).
-    AvalHookUnjudged { why: String },
+    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
+    // renaming it is a major, after a minor that warns.
+    #[serde(rename = "aval_hook_unjudged")]
+    GreentopoHookUnjudged { why: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -325,7 +331,10 @@ pub struct FixPlan {
     pub remove: Vec<Removal>,
     pub write: Vec<WriteShim>,
     pub write_agents_md: Option<WriteAgentsMd>,
-    pub install_aval_hook: Option<InstallAvalHook>,
+    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
+    // renaming it is a major, after a minor that warns.
+    #[serde(rename = "install_aval_hook")]
+    pub install_greentopo_hook: Option<InstallGreentopoHook>,
 }
 
 impl FixPlan {
@@ -339,7 +348,7 @@ impl FixPlan {
         self.remove.is_empty()
             && self.write.iter().all(|w| !w.changes)
             && self.write_agents_md.is_none()
-            && self.install_aval_hook.is_none()
+            && self.install_greentopo_hook.is_none()
     }
     pub fn refused(&self) -> bool {
         !self.refuse.is_empty()
@@ -406,7 +415,7 @@ pub fn plan(
     binary: &str,
     intent: Intent,
     agents_md: bool,
-    aval_hook: bool,
+    greentopo_hook: bool,
     remove_unrecognized: bool,
 ) -> FixPlan {
     let hooks_dir = crate::scan::hooks_dir_for(repo_abs);
@@ -420,7 +429,7 @@ pub fn plan(
         remove: Vec::new(),
         write: Vec::new(),
         write_agents_md: None,
-        install_aval_hook: None,
+        install_greentopo_hook: None,
     };
 
     // Before anything else: a path the shim will not accept must not be baked
@@ -643,28 +652,28 @@ pub fn plan(
         }
     }
 
-    // Same shape, one tool over: the session hook is tracked content aval
-    // owns, read from the scan here and re-asked of aval at the moment of
+    // Same shape, one tool over: the session hook is tracked content greentopo
+    // owns, read from the scan here and re-asked of greentopo at the moment of
     // action. A repository with no corpus has nothing to say and says
     // nothing; one whose hook could not be judged is a warning, not a plan.
-    if aval_hook {
-        match &repo.aval_hook.state {
-            AvalHookState::NoCorpus | AvalHookState::Current => {}
-            AvalHookState::Stale => {
-                p.install_aval_hook = Some(InstallAvalHook {
+    if greentopo_hook {
+        match &repo.greentopo_hook.state {
+            GreentopoHookState::NoCorpus | GreentopoHookState::Current => {}
+            GreentopoHookState::Stale => {
+                p.install_greentopo_hook = Some(InstallGreentopoHook {
                     repo: repo_abs.to_path_buf(),
                 });
             }
-            AvalHookState::NoAval => p.warn.push(Warning::AvalHookUnjudged {
-                why: "no `aval` on PATH".to_string(),
+            GreentopoHookState::NoGreentopo => p.warn.push(Warning::GreentopoHookUnjudged {
+                why: "no `greentopo` on PATH".to_string(),
             }),
-            AvalHookState::Unknown { why } => {
-                p.warn.push(Warning::AvalHookUnjudged { why: why.clone() })
-            }
+            GreentopoHookState::Unknown { why } => p
+                .warn
+                .push(Warning::GreentopoHookUnjudged { why: why.clone() }),
         }
-        if !repo.aval_hook.ignored.is_empty() {
-            p.warn.push(Warning::AvalHookIgnored {
-                paths: repo.aval_hook.ignored.clone(),
+        if !repo.greentopo_hook.ignored.is_empty() {
+            p.warn.push(Warning::GreentopoHookIgnored {
+                paths: repo.greentopo_hook.ignored.clone(),
             });
         }
     }
@@ -696,7 +705,7 @@ mod tests {
             declared: Vec::new(),
             trusted: None,
             agents_md: AgentsMdState::Missing,
-            aval_hook: crate::aval_hook::AvalHook::default(),
+            greentopo_hook: crate::greentopo_hook::GreentopoHook::default(),
             hooks_dir: crate::scan::HooksDir::In {
                 path: std::path::PathBuf::from(".git/hooks"),
             },
@@ -919,38 +928,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `--aval-hook` mirrors `--agents-md`: never planned without opting in.
+    /// `--greentopo-hook` mirrors `--agents-md`: never planned without opting in.
     #[test]
-    fn aval_hook_is_never_planned_without_opting_in() {
-        let dir = healthy_repo_dir("aval-hook-optout");
+    fn greentopo_hook_is_never_planned_without_opting_in() {
+        let dir = healthy_repo_dir("greentopo-hook-optout");
         let mut r = repo(true);
-        r.aval_hook.state = AvalHookState::Stale;
+        r.greentopo_hook.state = GreentopoHookState::Stale;
         let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, false, false);
-        assert!(p.install_aval_hook.is_none());
+        assert!(p.install_greentopo_hook.is_none());
         assert!(p.warn.is_empty(), "no hook findings when the flag is off");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_stale_aval_hook_is_planned_when_opted_in_and_nothing_else_is() {
-        let dir = healthy_repo_dir("aval-hook-states");
+    fn a_stale_greentopo_hook_is_planned_when_opted_in_and_nothing_else_is() {
+        let dir = healthy_repo_dir("greentopo-hook-states");
         for (state, planned) in [
-            (AvalHookState::Stale, true),
-            (AvalHookState::Current, false),
-            (AvalHookState::NoCorpus, false),
+            (GreentopoHookState::Stale, true),
+            (GreentopoHookState::Current, false),
+            (GreentopoHookState::NoCorpus, false),
         ] {
             let mut r = repo(true);
-            r.aval_hook.state = state;
+            r.greentopo_hook.state = state;
             let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
             assert_eq!(
-                p.install_aval_hook.is_some(),
+                p.install_greentopo_hook.is_some(),
                 planned,
                 "{:?}",
-                r.aval_hook.state
+                r.greentopo_hook.state
             );
             assert!(p.warn.is_empty());
             if planned {
-                assert_eq!(p.install_aval_hook.as_ref().unwrap().repo, dir);
+                assert_eq!(p.install_greentopo_hook.as_ref().unwrap().repo, dir);
                 assert!(!p.is_noop());
             }
         }
@@ -960,20 +969,20 @@ mod tests {
     /// A hook that could not be judged is a warning, not a write: a missing
     /// binary must not read as "current" and must not plan on a guess.
     #[test]
-    fn an_unjudged_aval_hook_warns_instead_of_planning() {
-        let dir = healthy_repo_dir("aval-hook-unjudged");
+    fn an_unjudged_greentopo_hook_warns_instead_of_planning() {
+        let dir = healthy_repo_dir("greentopo-hook-unjudged");
         for state in [
-            AvalHookState::NoAval,
-            AvalHookState::Unknown {
+            GreentopoHookState::NoGreentopo,
+            GreentopoHookState::Unknown {
                 why: "exited 3".to_string(),
             },
         ] {
             let mut r = repo(true);
-            r.aval_hook.state = state;
+            r.greentopo_hook.state = state;
             let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
-            assert!(p.install_aval_hook.is_none());
+            assert!(p.install_greentopo_hook.is_none());
             assert!(
-                matches!(p.warn.as_slice(), [Warning::AvalHookUnjudged { .. }]),
+                matches!(p.warn.as_slice(), [Warning::GreentopoHookUnjudged { .. }]),
                 "{:?}",
                 p.warn
             );
@@ -982,23 +991,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The Rust names moved to greentopo; the `--json` keys did not, because
+    /// they are public interface (cli.compat.interface-is-public) and a
+    /// rename there is a major release.
+    #[test]
+    fn the_json_keys_keep_the_old_hook_names() {
+        let dir = healthy_repo_dir("greentopo-hook-json");
+        let mut r = repo(true);
+        r.greentopo_hook.state = GreentopoHookState::NoGreentopo;
+        r.greentopo_hook.ignored = vec![crate::greentopo_hook::SCRIPT_PATH.to_string()];
+        let scan = serde_json::to_value(&r).unwrap();
+        assert_eq!(scan["aval_hook"]["state"]["state"], "no_aval", "{scan}");
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("install_aval_hook").is_some(), "{json}");
+        let kinds: Vec<_> = json["warn"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["warning"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, ["aval_hook_unjudged", "aval_hook_ignored"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// git ignoring the files is reported on top of whatever the state is,
     /// and never turns into an edit of `.gitignore`.
     #[test]
-    fn a_gitignored_aval_hook_is_a_warning_alongside_the_plan() {
-        let dir = healthy_repo_dir("aval-hook-ignored");
+    fn a_gitignored_greentopo_hook_is_a_warning_alongside_the_plan() {
+        let dir = healthy_repo_dir("greentopo-hook-ignored");
         let mut r = repo(true);
-        r.aval_hook.state = AvalHookState::Stale;
-        r.aval_hook.ignored = vec![crate::aval_hook::SCRIPT_PATH.to_string()];
+        r.greentopo_hook.state = GreentopoHookState::Stale;
+        r.greentopo_hook.ignored = vec![crate::greentopo_hook::SCRIPT_PATH.to_string()];
         let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
         assert!(
-            p.install_aval_hook.is_some(),
-            "still installed locally, as aval itself does"
+            p.install_greentopo_hook.is_some(),
+            "still installed locally, as greentopo itself does"
         );
         assert_eq!(
             p.warn,
-            vec![Warning::AvalHookIgnored {
-                paths: vec![crate::aval_hook::SCRIPT_PATH.to_string()]
+            vec![Warning::GreentopoHookIgnored {
+                paths: vec![crate::greentopo_hook::SCRIPT_PATH.to_string()]
             }]
         );
         let _ = std::fs::remove_dir_all(&dir);

@@ -149,7 +149,8 @@ Repo {
   declared          : Vec<DeclaredCheck>     // this repo's own greengate.conf checks
   trusted           : Option<bool>   // None when there is no manifest at all
   agents_md         : AgentsMdState  // UpToDate | Missing | Drifted | Malformed
-  aval_hook         : AvalHook       // { state, ignored: Vec<String> } — see below
+  aval_hook         : GreentopoHook  // { state, ignored: Vec<String> } — see below;
+                                     // the JSON keys keep aval's name until the next major
   hooks_dir         : HooksDir       // where the hooks are, and whether we may touch them
   shares_hooks_with : Option<PathBuf> // a repo already seen that owns this hooks dir
   attest            : AttestState    // what it says to attest, from HEAD — see below
@@ -166,11 +167,11 @@ ShimState = Ok            // installed bytes match the expected baked template
           | Missing
           | Symlink{target}    // a link — writing here would rewrite something else
           | Unreadable{why}    // a binary, a directory, a permissions error, a hard link
-AvalHookState = NoCorpus  // no .adr.yaml — not applicable, and nothing was spawned
-              | NoAval    // a corpus, and no `aval` on PATH to judge it with
-              | Current   // `aval hook install --check` exited 0
-              | Stale     // …exited 1: the hook is behind the installed aval
-              | Unknown{why}   // aval answered something it did not promise
+GreentopoHookState = NoCorpus     // no .adr.yaml — not applicable, and nothing was spawned
+                   | NoGreentopo  // JSON `no_aval`: a corpus, and no `greentopo` on PATH to judge it with
+                   | Current      // `greentopo hook install --check` exited 0
+                   | Stale        // …exited 1: the hook is behind the installed greentopo
+                   | Unknown{why} // greentopo answered something it did not promise
 BakeState = Current       // == installed binary path
           | Stale(path)   // points somewhere else — the GUI-client failure mode
           | Unbaked       // __GREENGATE_BIN__ placeholder intact
@@ -189,7 +190,7 @@ FixPlan {
   remove    : Vec<Removal>
   write     : Vec<WriteShim>
   write_agents_md   : Option<WriteAgentsMd>    // --agents-md only
-  install_aval_hook : Option<InstallAvalHook>  // --aval-hook only; runs aval, renders nothing
+  install_aval_hook : Option<InstallGreentopoHook>  // --greentopo-hook only; runs greentopo, renders nothing
 }
 
 Refusal = unmanaged | unreadable_hooks | tracked{path}
@@ -199,7 +200,7 @@ Refusal = unmanaged | unreadable_hooks | tracked{path}
 Warning = unrecognized_sub_hook{path}     // a hook we did not write. NOT deleted.
         | hooks_dir_outside_repo{path}
         | aval_hook_ignored{paths}        // .gitignore drops the session hook. NOT edited.
-        | aval_hook_unjudged{why}         // --aval-hook asked, no aval (or an odd answer)
+        | aval_hook_unjudged{why}         // --greentopo-hook asked, no greentopo (or an odd answer)
 ```
 
 Four of these fields deserve a sentence, because each exists to make something
@@ -496,7 +497,7 @@ greengate-fleet fix                    # DRY RUN — prints the plan, writes not
 greengate-fleet fix --apply            # carries it out
 greengate-fleet install                # implies applying; named after intent
 greengate-fleet fix --apply --agents-md          # opt in, per invocation
-greengate-fleet fix --apply --aval-hook          # opt in, per invocation
+greengate-fleet fix --apply --greentopo-hook     # opt in, per invocation
 greengate-fleet fix --apply --remove-unrecognized
 ```
 
@@ -510,7 +511,7 @@ be ceremony over an unambiguous intent; it has no TUI equivalent, since
 adopting a repository is not a repair.
 
 Three flags are opt-in **per invocation** and never bundled into a plain
-`--apply`: `--agents-md`, which writes into a tracked file; `--aval-hook`,
+`--apply`: `--agents-md`, which writes into a tracked file; `--greentopo-hook`,
 which does the same for another tool's tracked files; and
 `--remove-unrecognized`, which deletes `pre-commit-*` / `pre-push-*` files this
 tool did not write. The last is spelled that way rather than `--remove-stale`
@@ -518,24 +519,26 @@ on purpose — "stale" means our own retired shims, which are removed by default
 and are a different thing entirely. `--binary <path>` chooses what the shims are
 baked to point at, defaulting to `$HOME/.local/bin/amont`.
 
-`--aval-hook` keeps [aval](https://github.com/fredericrous/aval)'s session hook
-current across every repository that keeps an `.adr.yaml`. `aval hook install`
-writes `.claude/hooks/aval-heads.sh` and a `SessionStart` entry in
+`--greentopo-hook` (its old name `--aval-hook` is still accepted, with a
+warning, until the next major) keeps
+[greentopo](https://github.com/greenharness/greentopo)'s session hook
+current across every repository that keeps an `.adr.yaml`. `greentopo hook install`
+writes `.claude/hooks/greentopo-heads.sh` and a `SessionStart` entry in
 `.claude/settings.json`, so an agent session opens with the decision heads and
 adopted rules in front of it; the script's bytes are its version, and every
-aval release that changes it leaves every corpus behind until somebody re-runs
+greentopo release that changes it leaves every corpus behind until somebody re-runs
 the command there. The fleet does not render that script — the template is
-aval's, and a copy here would be a second way to be stale. It runs `aval hook
+greentopo's, and a copy here would be a second way to be stale. It runs `greentopo hook
 install --check` per corpus and reads the exit code (`0` current, `1` behind),
-plans `aval hook install` for the stale ones, and re-asks at the moment of
+plans `greentopo hook install` for the stale ones, and re-asks at the moment of
 writing. A repository without `.adr.yaml` is never asked; one with a corpus and
-no `aval` on `PATH` is `not judged` — a warning, not "current", because a
+no `greentopo` on `PATH` is `not judged` — a warning, not "current", because a
 missing binary is exactly how "up to date" would be faked by silence. What git
 would do with the files is reported alongside from `git check-ignore`: a
 `.gitignore` that excludes `.claude/` wholesale makes the hook work for whoever
 ran the command and ship to nobody, and the fleet names the negations to add
 (`.claude/*` then `!.claude/settings.json`, `!.claude/hooks/`,
-`.claude/hooks/*`, `!.claude/hooks/aval-heads.sh`) rather than editing an
+`.claude/hooks/*`, `!.claude/hooks/greentopo-heads.sh`) rather than editing an
 ignore file it does not own.
 
 Given `make install` has destroyed tracked source twice in this repo's
