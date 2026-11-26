@@ -108,9 +108,9 @@ Risk accepted: a commit can wait up to `greengate.timeout` in a stalled line,
 as before 5.0; the deferral roll-up still offers `GREENGATE_ON_BUSY=now`.
 
 ## Phases
-- [ ] Phase 1 — hook waits have no stall window; the roll-up (label and command on their own lines, and its `deferral_advice` and `DeferredBy` comments), and the ceiling cause say the new end; tests follow: `crates/greengate-runtime/src/host_slots.rs`, `crates/greengate-runtime/src/dispatch.rs`, `crates/greengate/tests/it/busy_defers.rs`, `crates/greengate/tests/it/land.rs`
-- [ ] Phase 2 — amend ADR-0022 for the hook path and docs: `adr/0022-waits-end-on-a-stalled-line.md`, `adr/HEADS.md`, `docs/host-slots.md` (a hook wait ends at its ceiling; the stall applies to `slot run` and relais only)
-- [ ] Phase 3 — changelog, ticket resolution, release: `CHANGELOG.md`, `docs/programmes/host-slot-admission/t18-plan-hook-stall-narrow-fix.md`, `docs/programmes/host-slot-admission/t19-count-after-5-1-1-install.md`, `docs/programmes/host-slot-admission/t20-queued-heartbeat-names-ceiling.md`, `docs/programmes/host-slot-admission/map.md`
+- [x] Phase 1 — hook waits have no stall window; the roll-up (label and command on their own lines, and its `deferral_advice` and `DeferredBy` comments), and the ceiling cause say the new end; tests follow: `crates/greengate-runtime/src/host_slots.rs`, `crates/greengate-runtime/src/dispatch.rs`, `crates/greengate/tests/it/busy_defers.rs`, `crates/greengate/tests/it/land.rs`
+- [x] Phase 2 — amend ADR-0022 for the hook path and docs: `adr/0022-waits-end-on-a-stalled-line.md`, `adr/HEADS.md`, `docs/host-slots.md` (a hook wait ends at its ceiling; the stall applies to `slot run` and relais only)
+- [ ] Phase 3 — changelog and tickets done; the release follows the merge (`tag-release`, 5.1.1): `CHANGELOG.md`, `docs/programmes/host-slot-admission/t18-plan-hook-stall-narrow-fix.md`, `docs/programmes/host-slot-admission/t19-count-after-5-1-1-install.md`, `docs/programmes/host-slot-admission/t20-queued-heartbeat-names-ceiling.md`, `docs/programmes/host-slot-admission/t21-slot-run-waits-past-a-stall.md`, `docs/programmes/host-slot-admission/t08-workday-measure.md`, `docs/configuration.md`, `docs/programmes/host-slot-admission/map.md`
 
 ## Decision log
 - 2026-11-26 — release number is 5.1.1, not 5.0.1: main already carries 5.1.0
@@ -160,5 +160,21 @@ as before 5.0; the deferral roll-up still offers `GREENGATE_ON_BUSY=now`.
   baseline or a decision on `slotWait`, not another stall change. The count
   is a dated task ticket, `t19-count-after-5-1-1-install`, due the install
   time plus 24 h, and the first half of t08.
+
+## Decision log (build)
+- 2026-11-26 — t21 filed during the build: `slot run` exits 75 after the 300 s stall even with `--max-wait 3000`, so the driver's test recipe needs `GREENHARNESS_SLOT_STALL_S=3000`. The roll-up label prints once above the commands. The 80-column claim assumes a check name under about 35 characters. Whether the label should also show the resolved timeout is asked in t20.
+
+## Outcome
+Verification observed before the push (host jammed, run through `greengate slot run` with the stall seam at 3000 s):
+- clippy `-D warnings` on greengate-runtime and greengate: clean.
+- `cargo test -p greengate-runtime --lib -- host_slots:: dispatch::`: 30 passed. The `wait_plan` rows carry `window: None`, `sibling_bounds` carries `None`, `a_deferral_names_its_cause` asserts `greengate.timeout` and `greengate.warnSlotWait`.
+- `cargo test -p greengate --test it -- busy_defers:: land:: slot_run::`: 54 passed, including `a_hook_check_has_no_stall_end_under_onbusy_wait` (stall seam 1 s, `set timeout 3`: waited at least 3 s, `"end":"ceiling"`), `a_gate_deferred_at_the_ceiling_still_lets_land_push` (fixture `set timeout 4`, stall seam 2 s), and `slot_run::a_stalled_line_exits_75_before_the_max_wait` unchanged. After the review fixes the busy_defers and land tests were run again: 41 passed, then the one failing assertion (a cause text a rehearsal does not print) was removed and the test re-run, passed.
+- The 24 h count is t19.
+
+## Implementation review
+- implementation-review: approve-with-changes, round 1; delta approve-with-changes (plan-record items only, fixed here); 2 stale doc comments fixed; 5 findings.
+- backend: approve-with-changes, then approve; a `warn` pre-stage integration assertion added; label printed once.
+- lang:rust: approve; 3 low comment and naming fixes. unix: approve, no findings.
+- tui: approve-with-changes, then approve; label once; deliberate: the label names `greengate.timeout` without its value, and `skip the queue` names the first check only (pre-existing shape).
 
 <!-- panel: repos=amont reviewers=backend,lang:rust,tui,unix body-sha=6802c27a7313 -->

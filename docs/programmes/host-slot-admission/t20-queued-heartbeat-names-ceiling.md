@@ -22,6 +22,10 @@ how to skip it? Carried from the t18 plan review (tui).
   which says `queued behind` once.
 - t19's p95 and max `waited_ms` of hook waits: how long people really wait.
 
+- The roll-up label `wait for a slot, up to greengate.timeout:` names the
+  setting without its value; pass the resolved length in (`up to 1h00s`)?
+  (tui code review, t18.)
+
 ## Answer looks like
 
 A short change to the heartbeat and its test, or a note that the waits are
