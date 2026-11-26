@@ -2121,8 +2121,8 @@ fn announce_deferred(deferred: &[(&str, Severity)]) {
     }
 }
 
-/// The lines [`announce_deferred`] prints: the roll-up, then one `run now:`
-/// command per deferred check (`amont run` takes one check by name, and a
+/// The lines [`announce_deferred`] prints: the roll-up, then one `wait for a slot` label
+/// and command per deferred check (`amont run` takes one check by name, and a
 /// `--raw` run waits for its slot under `GREENGATE_ON_BUSY=wait`, warn or block),
 /// then the `onBusy wait` hint only when a `block` check is in the list,
 /// since only a `block` check stops deferring under it.
@@ -2143,20 +2143,22 @@ fn deferral_advice(
             Severity::Block => any_block = true,
             Severity::Warn => {}
         }
+        lines.push("  wait for a slot, up to greengate.timeout:".to_string());
         lines.push(format!(
-            "  run now: {}",
+            "    {}",
             highlight(&format!("GREENGATE_ON_BUSY=wait {BIN} run --raw {name}"))
         ));
     }
     // Skipping the queue is the person's choice, offered second (ADR-0022).
     if let Some((name, _)) = deferred.first() {
+        lines.push("  skip the queue (the host is busy):".to_string());
         lines.push(format!(
-            "  skip the queue (the host is busy): {}",
+            "    {}",
             highlight(&format!("GREENGATE_ON_BUSY=now {BIN} run --raw {name}"))
         ));
     }
-    // `set onBusy wait` stops only a `slotWait` deferral: a stall defers
-    // under either policy.
+    // `set onBusy wait` stops only a `slotWait` deferral: a ceiling under
+    // `onBusy wait` defers under either policy.
     if any_block && deferred_by == crate::host_slots::DeferredBy::SlotWait {
         lines.push(format!(
             "  stop deferring the block checks: {}",
@@ -3039,25 +3041,27 @@ mod tests {
         assert!(hint.contains("block checks"), "{hint}");
         assert_eq!(
             lines.len(),
-            5,
-            "roll-up, two commands, the skip line, one hint: {said}"
+            8,
+            "roll-up, two labelled commands, the skip label and command, one hint: {said}"
         );
     }
 
-    /// ADR-0022: a stall defers under `onBusy wait` too, so the `onBusy wait`
-    /// hint would stop nothing and is left out; skipping the queue is offered
-    /// second, after the command that waits.
+    /// ADR-0022: a line that ended defers under `onBusy wait` too, so the
+    /// `onBusy wait` hint would stop nothing and is left out; skipping the
+    /// queue is offered second, after the command that waits. Each command
+    /// stands alone under its label, so it copies whole and fits 80 columns.
     #[test]
-    fn a_stall_deferral_offers_the_wait_then_the_skip_and_no_hint() {
+    fn a_line_end_deferral_offers_the_wait_then_the_skip_and_no_hint() {
         let lines = deferral_advice(
             &[("pre-push-cargo-test", Severity::Block)],
             crate::host_slots::DeferredBy::LineEnded,
         );
         let said = lines.join("\n");
         assert!(!said.contains("set onBusy wait"), "{said}");
-        assert!(lines[1].contains("GREENGATE_ON_BUSY=wait"), "{said}");
-        assert!(lines[2].contains("skip the queue"), "{said}");
-        assert!(lines[2].contains("GREENGATE_ON_BUSY=now"), "{said}");
-        assert_eq!(lines.len(), 3, "{said}");
+        assert!(lines[1].contains("up to greengate.timeout"), "{said}");
+        assert!(lines[2].contains("GREENGATE_ON_BUSY=wait"), "{said}");
+        assert!(lines[3].contains("skip the queue"), "{said}");
+        assert!(lines[4].contains("GREENGATE_ON_BUSY=now"), "{said}");
+        assert_eq!(lines.len(), 5, "{said}");
     }
 }

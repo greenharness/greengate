@@ -8,6 +8,17 @@ missing here.
 
 ## Unreleased
 
+A hook check no longer defers to CI because its line stalled (ADR-0022,
+amended for the hook path; programme host-slot-admission t18). Under `onBusy
+wait`, in land's pre-stage and in `onBusy defer`'s sibling extension a check
+waits in line until its ceiling (`greengate.timeout`, `greengate.warnSlotWait`,
+`slotWait`) and defers there, as a commit or push could wait before 5.0. 75 of
+158 hook deferrals in the first 13.4 h of 5.0 were stalled lines. A ceiling
+still defers; nothing runs unqueued. `greengate slot run` keeps its stall end
+and exit 75, and `--now`, `GREENGATE_ON_BUSY=now` and relais are unchanged.
+The deferral roll-up prints each command under its label, so it copies whole
+and fits 80 columns, and the ceiling cause names the setting that set it.
+
 ## v5.1.0
 
 `greengate-fleet` judges and installs the session hook with `greentopo`, not `aval`, and looks for `.claude/hooks/greentopo-heads.sh` (#524, programme topo-spotter-rename t16). A repository the fleet sweep has not reached reports its hook stale until `aval hook uninstall` and `greentopo hook install` have run there.

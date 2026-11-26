@@ -829,7 +829,7 @@ fn a_warn_gate_waits_behind_a_queued_waiter_in_a_rehearsal() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 
-/// The `run now:` command printed for a deferred `warn` gate waits for the
+/// The `wait for a slot` command printed for a deferred `warn` gate waits for the
 /// held slot and runs the gate, and no `stop deferring` hint is printed
 /// (`set onBusy wait` cannot stop a warn gate deferring on a push).
 #[test]
@@ -838,15 +838,28 @@ fn the_run_now_advice_for_a_deferred_warn_gate_waits() {
     let marker = slots.join("gate-ran");
     let (repo, line) = warn_gate_repo(&marker, "set onBusy defer\nset slotWait 1");
     let holder = Holder::hold(&slots.join("slot-0"));
-    let (code, out) = hook(&repo, "pre-push", &[], &slots, &line, &[]);
+    let (code, out) = hook(&repo, "pre-push", &[], &slots, &line, &[("NO_COLOR", "1")]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("deferred to CI"), "{out}");
     assert!(!out.contains("stop deferring"), "{out}");
     assert!(!marker.exists(), "{out}");
+    // The label stands on its own line and the command alone on the next, so
+    // it copies whole and no line outgrows an 80-column terminal.
+    let label = out
+        .lines()
+        .position(|l| l.trim() == "wait for a slot, up to greengate.timeout:")
+        .unwrap_or_else(|| panic!("no wait-for-a-slot label: {out}"));
+    assert!(!out.contains("run now:"), "{out}");
+    let advice_lines: Vec<&str> = out.lines().skip(label).take(4).collect();
+    assert!(
+        advice_lines.iter().all(|l| l.chars().count() <= 80),
+        "a roll-up line past 80 columns: {advice_lines:?}"
+    );
     let advice = out
         .lines()
-        .find_map(|l| l.trim().strip_prefix("run now: "))
-        .unwrap_or_else(|| panic!("no run now line: {out}"))
+        .nth(label + 1)
+        .unwrap_or_else(|| panic!("no command under the label: {out}"))
+        .trim()
         .to_string();
     let mut words = advice.split_whitespace();
     let (key, value) = words
@@ -1341,22 +1354,25 @@ fn a_prestage_block_gate_has_no_ceiling() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 
-/// ADR-0022: under the default `onBusy wait`, a heavy check whose line
-/// stalls defers to CI rather than run unqueued after the timeout, says why,
-/// and leaves the `onBusy wait` hint out, since it would stop nothing.
+/// ADR-0022 as amended for the hook path: under the default `onBusy wait` a
+/// heavy check has no stall window. Beside a holder that never lets go, with
+/// the stall seam at 1 s, it is still waiting after that second and defers
+/// to CI at the ceiling (`greengate.timeout`), says why, leaves the `onBusy
+/// wait` hint out, and journals `"end":"ceiling"`, never `stalled`.
 #[test]
-fn a_stalled_line_defers_under_onbusy_wait() {
+fn a_hook_check_has_no_stall_end_under_onbusy_wait() {
     let repo = Repo::new();
     repo.stage("gate.sh", "printf x >> gate.log\n");
     repo.stage(
         "amont.conf",
-        "pre-commit  gate  *.txt  block  heavy sh gate.sh\n",
+        "set timeout 3\npre-commit  gate  *.txt  block  heavy sh gate.sh\n",
     );
     repo.commit("chore: base");
     trust(&repo);
     let slots = slot_dir("stall-wait");
     let _holder = Holder::hold(&slots.join("slot-0"));
     repo.stage("a.txt", "one\n");
+    let started = std::time::Instant::now();
     let (code, out) = hook(
         &repo,
         "pre-commit",
@@ -1365,7 +1381,12 @@ fn a_stalled_line_defers_under_onbusy_wait() {
         "",
         &[("GREENHARNESS_SLOT_STALL_S", "1")],
     );
+    let took = started.elapsed();
     assert_eq!(code, 0, "a deferred block gate must not block: {out}");
+    assert!(
+        took >= std::time::Duration::from_secs(3),
+        "the 1 s stall seam must not end a hook wait: took {took:?}\n{out}"
+    );
     assert!(out.contains("deferred to CI"), "{out}");
     assert!(
         out.contains("GREENGATE_ON_BUSY=now"),
@@ -1378,9 +1399,10 @@ fn a_stalled_line_defers_under_onbusy_wait() {
     assert_eq!(runs(&repo, "gate.log"), 0, "never run unqueued: {out}");
     let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
     assert!(
-        waits.contains("\"outcome\":\"deferred\",\"end\":\"stalled\""),
+        waits.contains("\"outcome\":\"deferred\",\"end\":\"ceiling\""),
         "{waits}"
     );
+    assert!(!waits.contains("\"end\":\"stalled\""), "{waits}");
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 
