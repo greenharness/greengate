@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v5.1.1
+
 A hook check no longer defers to CI because its line stalled (ADR-0022,
 amended for the hook path; programme host-slot-admission t18). Under `onBusy
 wait`, in land's pre-stage and in `onBusy defer`'s sibling extension a check
