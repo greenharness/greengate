@@ -1106,7 +1106,7 @@ pub fn run_named(ctx: &Ctx, name: &str, all_files: bool) -> Named {
 /// a rehearsal snapshot, where no push connection is open, no commit waits,
 /// and land's pre-stage needs the check's evidence: there it follows the
 /// busy policy the rehearsal sets, except in land's pre-stage, where a `warn`
-/// check waits at most `greengate.warnSlotWait` and then runs unqueued
+/// check waits at most `greengate.warnSlotWait` and then defers
 /// (`host_slots::wait_bounded_for_warn`). Only a heavy check can wait, so only it
 /// asks `severity`, which the caller answers from its stage's severity fold
 /// when it has one: a git-config read per check broke the commit's git-spawn
@@ -2138,12 +2138,14 @@ fn deferral_advice(
         names.join(", ")
     )];
     let mut any_block = false;
+    if !deferred.is_empty() {
+        lines.push("  wait for a slot, up to greengate.timeout:".to_string());
+    }
     for (name, severity) in deferred {
         match severity {
             Severity::Block => any_block = true,
             Severity::Warn => {}
         }
-        lines.push("  wait for a slot, up to greengate.timeout:".to_string());
         lines.push(format!(
             "    {}",
             highlight(&format!("GREENGATE_ON_BUSY=wait {BIN} run --raw {name}"))
@@ -3041,8 +3043,8 @@ mod tests {
         assert!(hint.contains("block checks"), "{hint}");
         assert_eq!(
             lines.len(),
-            8,
-            "roll-up, two labelled commands, the skip label and command, one hint: {said}"
+            7,
+            "roll-up, the wait label, two commands, the skip label and command, one hint: {said}"
         );
     }
 

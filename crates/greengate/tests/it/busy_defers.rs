@@ -847,12 +847,12 @@ fn the_run_now_advice_for_a_deferred_warn_gate_waits() {
     // it copies whole and no line outgrows an 80-column terminal.
     let label = out
         .lines()
-        .position(|line| line.trim() == "wait for a slot, up to greengate.timeout:")
+        .position(|text| text.trim() == "wait for a slot, up to greengate.timeout:")
         .unwrap_or_else(|| panic!("no wait-for-a-slot label: {out}"));
     assert!(!out.contains("run now:"), "{out}");
     let advice_lines: Vec<&str> = out.lines().skip(label).take(4).collect();
     assert!(
-        advice_lines.iter().all(|line| line.chars().count() <= 80),
+        advice_lines.iter().all(|text| text.chars().count() <= 80),
         "a roll-up line past 80 columns: {advice_lines:?}"
     );
     let advice = out
@@ -1287,11 +1287,21 @@ fn a_prestage_warn_gate_stops_waiting_at_warn_slot_wait() {
     let (repo, line) = warn_gate_repo(&marker, "set onBusy wait\nset warnSlotWait 2");
     let holder = hold_for(Holder::hold(&slots.join("slot-0")), 30);
     let started = std::time::Instant::now();
-    let (code, out) = hook(&repo, "pre-push", &[], &slots, &line, &PRESTAGE);
+    // The 1 s stall seam must not end a hook wait: only the ceiling does.
+    let mut env = PRESTAGE.to_vec();
+    env.push(("GREENHARNESS_SLOT_STALL_S", "1"));
+    let (code, out) = hook(&repo, "pre-push", &[], &slots, &line, &env);
     let took = started.elapsed();
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("running it anyway"), "{out}");
     assert!(out.contains("deferred to CI"), "{out}");
+    assert!(
+        took >= std::time::Duration::from_secs(2),
+        "the stall seam ended a hook wait: took {took:?}\n{out}"
+    );
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert!(waits.contains("\"end\":\"ceiling\""), "{waits}");
+    assert!(!waits.contains("\"end\":\"stalled\""), "{waits}");
     assert!(
         !marker.exists(),
         "a wait that ended never runs the gate: {out}"

@@ -688,8 +688,8 @@ fn land_waits_for_a_failing_warn_gate_on_a_busy_host() {
 }
 
 /// ADR-0022, hook path: a `block heavy` push gate that waits in land's
-/// pre-stage to its ceiling defers rather than run unqueued, and records an
-/// hour-long `deferred` completion, so land's own push does not refuse it as
+/// pre-stage to its ceiling defers rather than run unqueued, and records a
+/// `deferred` completion (an hour long), so land's own push does not refuse it as
 /// missing evidence: the branch reaches the remote and CI runs the gate. The
 /// stall seam is set low to show it does not end the wait.
 #[test]

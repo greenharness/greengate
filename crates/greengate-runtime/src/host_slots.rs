@@ -268,9 +268,9 @@ enum SlotWait {
     /// waiting commit, and land's pre-stage needs the evidence). Set by
     /// [`never_waits`].
     NeverWaits,
-    /// A heavy `warn` check of land's pre-stage: it waits while the line
-    /// moves, at most `greengate.warnSlotWait`, then defers (ADR-0022). Set
-    /// by [`wait_bounded_for_warn`].
+    /// A heavy `warn` check of land's pre-stage: it waits, with no stall end,
+    /// at most `greengate.warnSlotWait`, then defers (ADR-0022). Set by
+    /// [`wait_bounded_for_warn`].
     BoundedForWarn,
 }
 
@@ -402,6 +402,8 @@ fn defer_cause(
     use greenharness_slots::LineEnd;
     let human = |d: Duration| crate::hooks::common::human_secs(d.as_secs());
     match end {
+        // The hook path sets no stall window, so this arm fires only if a
+        // caller passes one.
         LineEnd::Stalled { window, position } => format!(
             "deferred to CI: the host slot line made no progress for {} (position {})",
             human(*window),
@@ -416,6 +418,8 @@ fn defer_cause(
                 human(*waited)
             ),
             BusyPolicy::Wait | BusyPolicy::Now => {
+                // `NeverWaits` always arrives as `Defer`; it is listed so the
+                // match covers every case.
                 let setting = match slot_wait {
                     SlotWait::BoundedForWarn => "greengate.warnSlotWait",
                     SlotWait::Policy | SlotWait::NeverWaits => "greengate.timeout",
