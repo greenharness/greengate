@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "greengate"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "greengate-runtime",
  "serde_json",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "greengate-fleet"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "crossterm",
  "greengate-runtime",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "greengate-runtime"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "greenharness-quiet",
  "greenharness-slots",
@@ -464,11 +464,11 @@ dependencies = [
 
 [[package]]
 name = "greenharness-quiet"
-version = "5.0.0"
+version = "5.1.0"
 
 [[package]]
 name = "greenharness-slots"
-version = "5.0.0"
+version = "5.1.0"
 
 [[package]]
 name = "greensummit"
