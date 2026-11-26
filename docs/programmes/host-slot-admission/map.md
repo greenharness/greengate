@@ -119,7 +119,7 @@ Next, in order:
    parts, and in what order, is t17's decision.
 5. ~~t17~~ closed 2026-11-25: the 2× trigger fired, and the person chose a narrow fix, with no revert of greengate, relais or greenbelay. Next was [t18](t18-plan-hook-stall-narrow-fix.md), with no stalled-line deferral on the hook path. t08 counts from the 5.1.1 install (t19).
 6. ~~t18~~ closed 2026-11-26: greengate 5.1.1 (hook waits have no stall end; #526, release #527, Release run 45847436802 success) installed 2026-11-26 16:24 CET; t19 is due from 2026-11-27 16:24. t11 closed with it: all its code is shipped and its measure is t19. Next: [t19](t19-count-after-5-1-1-install.md), the first half of t08; [t20](t20-queued-heartbeat-names-ceiling.md) (low).
-7. In flight 2026-11-26 (driver session f3dfb52d): t12 (relais, its release is v0.90.0 after another session's v0.89.0) and t13. Ready: [t16](t16-coordinator-queue-moving-line.md), unblocked by t11 (relais v0.83.0 shipped). t15 starts after t12, as both change the held marker relais exports.
+7. In flight 2026-11-26 (driver session f3dfb52d): t12 (relais, its release is v0.90.0 after another session's v0.89.0) and t13. [t16](t16-coordinator-queue-moving-line.md), unblocked by t11, counts 7 days after the relais v0.83.0 install (2026-11-25 02:26), so it is dated 2026-12-02. t15 starts after t12, as both change the held marker relais exports.
 
 The plan's "Full reviews" sidecar lists the findings carried into Phases 4–6.
 
