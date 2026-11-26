@@ -33,6 +33,8 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 
 2026-11-24: filed f08, f09 and f10 from the inbox. They are four tests that failed the host-slot-admission t11 lands at load 40–150 and pass alone; the branch touched none of them. Next, in order: f02 (due 2026-12-05), f07, then f09, f08 and f10. f09 comes first of the three because its fix (count waits, not seconds) is already clear.
 
+2026-11-26: filed f13 (a land refuses `evidence-missing` right after its own pre-stage stamped the tree; seen twice on 5.2.0) and f14 (`cluster_gates::concurrent_gates_each_get_their_own_job` flaked on release PR #534), from decisions topo-spotter-rename t21. Next, in order: f02 (due 2026-12-05), f13, f07, then f09, f08, f10, f14.
+
 ## Not yet specified
 
 ## Out of scope
