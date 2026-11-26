@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v5.2.0
+
 An agent session can move one of its own waiting jobs ahead in the host slot
 queue: `greengate slot promote <id> --reason <text> [--to N]` (ADR-0022,
 amended; programme host-slot-admission t13, under the person's rules in t06).
