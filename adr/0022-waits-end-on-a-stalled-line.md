@@ -4,12 +4,12 @@ status: accepted
 decisions:
   - key: hooks.host-concurrency
     scope: hook-binary
-    choice: "Every heavy job on the host (greengate's gates, relais's verification commands, and any command run through `greengate slot run`) takes host slots through one std-only crate, `greenharness-slots`. The crate counts physical cores (macOS `hw.physicalcpu`, Linux sysfs `core_cpus_list`, then `/proc/cpuinfo`), never more than the logical count, and that one count sizes the cap, the width and the load test. It also resolves the two host keys for every client, `greengate.hostCores` (1..=1024) and `greengate.hostSlots` (0..=64), from `GREENGATE_HOST_CORES` / `GREENGATE_HOST_SLOTS`, then the last `--global` or `--system` row, then the detected default, returning warnings for the caller to print. Automatic sizing (`greengate.hostSlots` unset): at most max(1, cores/2) slots; a further slot is taken only while the 1-minute load is below `cores + 4 × Σjobs(holders)`, Σjobs counting each lease's `jobs` once and `parallelism(1, cores, cap)` for a held slot with no record or a record naming none; when no slot is held, the first waiter is always admitted, whatever its weight; at most one new holder every 60 s. Waiters are served in ticket order, under one admission lock taken without blocking inside each caller's own deadline. A wait ends when its line has stalled (no admission anywhere and no change of the waiter's place for 300 s, the waiter's own marks on a monotonic clock; `GREENHARNESS_SLOT_STALL_S` is a test seam), at its caller's hard ceiling, or when a poll fails after the queue was joined; nothing runs outside the queue because a wait ended, and the journal line says which in `end`. Skipping the queue is a choice made up front and journalled `now`: `greengate slot run --now`, and `GREENGATE_ON_BUSY=now` for one run's hook checks. `greengate slot run` exits 75 at the end of a wait, its stall window never above `--max-wait`; `--on-timeout run` is refused. A holder records who it is in `holders/`. Only the process that took a slot holds it: slot descriptors are close-on-exec. `greengate.hostSlots N` fixes the count with no load test, and `0` turns slots off"
+    choice: "Every heavy job on the host (greengate's gates, relais's verification commands, and any command run through `greengate slot run`) takes host slots through one std-only crate, `greenharness-slots`. The crate counts physical cores (macOS `hw.physicalcpu`, Linux sysfs `core_cpus_list`, then `/proc/cpuinfo`), never more than the logical count, and that one count sizes the cap, the width and the load test. It also resolves the two host keys for every client, `greengate.hostCores` (1..=1024) and `greengate.hostSlots` (0..=64), from `GREENGATE_HOST_CORES` / `GREENGATE_HOST_SLOTS`, then the last `--global` or `--system` row, then the detected default, returning warnings for the caller to print. Automatic sizing (`greengate.hostSlots` unset): at most max(1, cores/2) slots; a further slot is taken only while the 1-minute load is below `cores + 4 × Σjobs(holders)`, Σjobs counting each lease's `jobs` once and `parallelism(1, cores, cap)` for a held slot with no record or a record naming none; when no slot is held, the first waiter is always admitted, whatever its weight; at most one new holder every 60 s. Waiters are served in ticket order, under one admission lock taken without blocking inside each caller's own deadline. A wait ends at its caller's hard ceiling, when its line has stalled, or when a poll fails after the queue was joined; nothing runs outside the queue because a wait ended, and the journal line says which in `end`. The stall rule (no admission anywhere and no change of the waiter's place for 300 s, the waiter's own marks on a monotonic clock; `GREENHARNESS_SLOT_STALL_S` is a test seam) applies to `greengate slot run` and relais, whose callers are waiting at a command. A hook check has no stall window (amended 2026-11-26, greengate 5.1.1): it waits in line to its ceiling, `greengate.timeout` (3600 s when 0), `greengate.warnSlotWait` for a heavy `warn` check of land's pre-stage, `slotWait` under `onBusy defer`, and defers there Skipping the queue is a choice made up front and journalled `now`: `greengate slot run --now`, and `GREENGATE_ON_BUSY=now` for one run's hook checks. `greengate slot run` exits 75 at the end of a wait, its stall window never above `--max-wait`; `--on-timeout run` is refused. A holder records who it is in `holders/`. Only the process that took a slot holds it: slot descriptors are close-on-exec. `greengate.hostSlots N` fixes the count with no load test, and `0` turns slots off"
     replaces: [ADR-0021]
     reason: "One holder at `jobs 2` drove the load to 12.3 by itself on a 6-core host, so a load test against the cores alone kept slots 2 and 3 shut while it ran (2026-11-22: 1 of 3 held, 5 waiting); and a budget that counted all of a wait's time in line timed out jobs whose line was moving, after which 38 checks ran unqueued in a week, some at load 400 to 563"
   - key: hooks.busy-policy
     scope: hook-binary
-    choice: "`set onBusy wait|defer` in greengate.conf (or `greengate.onBusy` in git config), default `wait`: a Heavy check waits while its line moves, up to `greengate.timeout` (3600 s when 0), and defers to CI when the line stalls for 300 s or the timeout runs out; under `defer`, a Heavy check whose slot does not free within `set slotWait` (default 60 s) while this greengate holds no slot defers, and one whose sibling in this process holds a slot waits as `wait` does. A heavy `warn` check of land's pre-stage waits while its line moves, up to `greengate.warnSlotWait` (600 s, never above the timeout), then defers. A deferred check is not run, never blocking, no stamp, never attested, so CI runs it; the push twin of a gate deferred at commit defers too. `GREENGATE_ON_BUSY` (`wait`, `defer`, or `now`, which runs every heavy check of that run unqueued at once, journalled `now`) overrides the file for one run; `now` is refused in the file and in git config, so no committed setting skips the queue"
+    choice: "`set onBusy wait|defer` in greengate.conf (or `greengate.onBusy` in git config), default `wait`: a Heavy check waits in line, with no stall end (5.1.1), up to `greengate.timeout` (3600 s when 0), and defers to CI when the timeout runs out; under `defer`, a Heavy check whose slot does not free within `set slotWait` (default 60 s) while this greengate holds no slot defers, and one whose sibling in this process holds a slot waits as `wait` does. A heavy `warn` check of land's pre-stage waits in line, with no stall end, up to `greengate.warnSlotWait` (600 s, never above the timeout), then defers. A deferred check is not run, never blocking, no stamp, never attested, so CI runs it; the push twin of a gate deferred at commit defers too. `GREENGATE_ON_BUSY` (`wait`, `defer`, or `now`, which runs every heavy check of that run unqueued at once, journalled `now`) overrides the file for one run; `now` is refused in the file and in git config, so no committed setting skips the queue"
     replaces: [ADR-0013]
     reason: "The person decided on 2026-11-22 (host-slot-admission t03) that a stalled check defers to CI and that not waiting is an explicit up-front choice: the unqueued fallback of ADR-0009 and ADR-0013 added load to a host that was already jammed"
   - key: hooks.gates-before-connection
@@ -49,6 +49,8 @@ deferrals and 29 unqueued runs, some started at load 445 to 563.
 - **A wait ends on a stalled line.** A wait ends after 300 s with no
   admission anywhere and no change of the waiter's place. A budget no longer
   ends a wait while the line moves; the caller's hard ceiling still ends it.
+  Hook path, amended 2026-11-26: see the Amendment below, a hook check has no
+  stall end.
   `slot run`'s `--max-wait` stays hard, because the Bash tool kills a command
   at 120 s, and `onBusy defer`'s `slotWait` stays hard, because a deferral is
   the repository's own choice.
@@ -62,6 +64,32 @@ deferrals and 29 unqueued runs, some started at load 445 to 563.
 - **relais** applies the same stall rule to its verification commands. Its
   own budget record, relais's `execution.resource-budgets`, is amended in the
   relais repository.
+
+## Amendment 2026-11-26: a hook check has no stall end
+
+Plan: [`docs/plans/2026-11-26-hook-waits-no-stall-end.md`](../docs/plans/2026-11-26-hook-waits-no-stall-end.md).
+Programme `docs/programmes/host-slot-admission`, tickets t17 and t18. It takes
+effect with greengate 5.1.1.
+
+In the 13.4 h after the 5.0.0 install, hook deferrals ran at 141.8 per 12 h
+against a baseline of 31.8 (4.5×, past the plan's 2× rollback rule). 75 of the
+158 were `"end":"stalled"`. A commit or a push can wait as it did before 5.0;
+the stall end suits a command someone watches (`slot run`, relais). So the hook
+path (`onBusy wait`, land's pre-stage `warn` gates, `onBusy defer`'s sibling
+extension) waits to its ceiling and defers there. Nothing else changes:
+`slot run` keeps its stall end and exit 75, `--now` and `GREENGATE_ON_BUSY=now`
+stay, relais stays on the crate's stall rule.
+
+Ceilings stay deferrals, never unqueued runs: "nothing runs outside the queue
+because a wait ended" holds, and so does greenbelay's `heavy-build-unqueued`.
+Of the 261 ceiling deferrals counted since the 5.0 install, 229 ended at the
+60 s `slotWait` (a deferral since ADR-0013), 18 at 0 s and 14 at the 600 s
+`warnSlotWait`; none ended at `greengate.timeout`.
+
+Consequences: a hook check beside a stuck holder can now wait up to
+`greengate.timeout`, so the roll-up's first command is labelled `wait for a
+slot, up to greengate.timeout:` and the ceiling cause names the setting. The
+`now` skip stays offered. Rollback: reinstall 5.1.0 and note it here.
 
 ## Consequences
 

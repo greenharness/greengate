@@ -76,8 +76,8 @@ impl Reason {
 }
 
 /// What a deferral of this run came from, for the roll-up: only an `onBusy
-/// defer` `slotWait` is stopped by `set onBusy wait`; a line that ended
-/// defers under either policy.
+/// defer` `slotWait` is stopped by `set onBusy wait`; a ceiling or a failed
+/// poll defers under either policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeferredBy {
     SlotWait,
@@ -178,8 +178,8 @@ pub const ON_BUSY_ENV: &str = "GREENGATE_ON_BUSY";
 /// `hooks.busy-policy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusyPolicy {
-    /// Wait while the line moves, up to `greengate.timeout`, then defer the
-    /// check to CI (ADR-0022): the default.
+    /// Wait in line, with no stall end, up to `greengate.timeout`, then defer
+    /// the check to CI (ADR-0022, amended for the hook path): the default.
     Wait,
     /// Wait up to `slot_wait`, then defer the check to CI.
     Defer { slot_wait: Duration },
@@ -268,9 +268,9 @@ enum SlotWait {
     /// waiting commit, and land's pre-stage needs the evidence). Set by
     /// [`never_waits`].
     NeverWaits,
-    /// A heavy `warn` check of land's pre-stage: it waits while the line
-    /// moves, at most `greengate.warnSlotWait`, then defers (ADR-0022). Set
-    /// by [`wait_bounded_for_warn`].
+    /// A heavy `warn` check of land's pre-stage: it waits, with no stall end,
+    /// at most `greengate.warnSlotWait`, then defers (ADR-0022). Set by
+    /// [`wait_bounded_for_warn`].
     BoundedForWarn,
 }
 
@@ -394,10 +394,16 @@ fn refusal() -> std::io::Error {
 }
 
 /// Why a wait that ended in line defers, as the refused spawn says it.
-fn defer_cause(end: &greenharness_slots::LineEnd, policy: BusyPolicy) -> String {
+fn defer_cause(
+    end: &greenharness_slots::LineEnd,
+    policy: BusyPolicy,
+    slot_wait: SlotWait,
+) -> String {
     use greenharness_slots::LineEnd;
     let human = |d: Duration| crate::hooks::common::human_secs(d.as_secs());
     match end {
+        // The hook path sets no stall window, so this arm fires only if a
+        // caller passes one.
         LineEnd::Stalled { window, position } => format!(
             "deferred to CI: the host slot line made no progress for {} (position {})",
             human(*window),
@@ -412,7 +418,16 @@ fn defer_cause(end: &greenharness_slots::LineEnd, policy: BusyPolicy) -> String 
                 human(*waited)
             ),
             BusyPolicy::Wait | BusyPolicy::Now => {
-                format!("deferred to CI: no host slot within {}", human(*waited))
+                // `NeverWaits` always arrives as `Defer`; it is listed so the
+                // match covers every case.
+                let setting = match slot_wait {
+                    SlotWait::BoundedForWarn => "greengate.warnSlotWait",
+                    SlotWait::Policy | SlotWait::NeverWaits => "greengate.timeout",
+                };
+                format!(
+                    "deferred to CI: no host slot within {} ({setting})",
+                    human(*waited)
+                )
             }
         },
     }
@@ -427,14 +442,16 @@ enum WaitPlan {
 }
 
 /// The [`WaitPlan`] for a check: one row of the plan's table per arm.
-/// `ceiling` is `greengate.timeout` (3600 s when 0), `stall` the stall
-/// window, `seen` whether this run already deferred on a busy host.
+/// `ceiling` is `greengate.timeout` (3600 s when 0), `seen` whether this run
+/// already deferred on a busy host. A hook check has no stall window: it waits
+/// until its ceiling, as a commit or a push can, and defers there (ADR-0022,
+/// amended for the hook path in 5.1.1); the stall end belongs to `slot run`
+/// and relais.
 fn wait_plan(
     slot_wait: SlotWait,
     policy: BusyPolicy,
     ceiling: Duration,
     warn_wait: Duration,
-    stall: Duration,
     seen: HostSeen,
 ) -> WaitPlan {
     let queue =
@@ -442,8 +459,8 @@ fn wait_plan(
     match (slot_wait, policy) {
         (_, BusyPolicy::Now) => WaitPlan::Now,
         (SlotWait::NeverWaits, _) => queue(None, Duration::ZERO),
-        (SlotWait::BoundedForWarn, _) => queue(Some(stall), warn_wait.min(ceiling)),
-        (SlotWait::Policy, BusyPolicy::Wait) => queue(Some(stall), ceiling),
+        (SlotWait::BoundedForWarn, _) => queue(None, warn_wait.min(ceiling)),
+        (SlotWait::Policy, BusyPolicy::Wait) => queue(None, ceiling),
         (SlotWait::Policy, BusyPolicy::Defer { slot_wait }) => match seen {
             // The host was already measured busy by this run: defer now.
             HostSeen::Busy => queue(None, Duration::ZERO),
@@ -455,7 +472,7 @@ fn wait_plan(
 /// The bounds of the second wait an `onBusy defer` check takes after its
 /// `slotWait` ran out: while a sibling check of this process holds a slot,
 /// the host is busy with this commit's own work, which is not a reason to
-/// defer, so it waits as `wait` does, while the line moves, up to the
+/// defer, so it waits as `wait` does, with no stall window, up to the
 /// ceiling; else one more pass, as a sibling may have released between the
 /// last poll and now.
 fn sibling_bounds(
@@ -463,12 +480,11 @@ fn sibling_bounds(
     held_in_process: usize,
     ceiling: Duration,
     elapsed: Duration,
-    stall: Duration,
 ) -> greenharness_slots::WaitBounds {
     let waits_on_sibling = held_in_process > 0 && !matches!(slot_wait, SlotWait::NeverWaits);
     if waits_on_sibling {
         greenharness_slots::WaitBounds {
-            window: Some(stall),
+            window: None,
             ceiling: ceiling.saturating_sub(elapsed),
         }
     } else {
@@ -477,17 +493,6 @@ fn sibling_bounds(
             ceiling: Duration::ZERO,
         }
     }
-}
-
-/// The stall window, read from [`greenharness_slots::STALL_ENV`] here, at the
-/// binary's edge, its warning said once.
-fn stall_window() -> Duration {
-    let setting = std::env::var(greenharness_slots::STALL_ENV).ok();
-    let (window, warning) = greenharness_slots::Stall::window_from(setting.as_deref());
-    if let Some(warning) = warning {
-        say_once(&warning);
-    }
-    window
 }
 
 impl Drop for CheckGuard {
@@ -541,7 +546,7 @@ pub fn never_waits() {
 /// The check running on this thread is a heavy `warn` check of land's
 /// pre-stage, where somebody waits for its evidence: it waits for a slot at
 /// most `greengate.warnSlotWait` (and never longer than `greengate.timeout`), under
-/// either busy policy, while its line moves, then defers (ADR-0022).
+/// either busy policy, with no stall end, then defers (ADR-0022).
 pub fn wait_bounded_for_warn() {
     CURRENT.with(|current| current.borrow_mut().slot_wait = SlotWait::BoundedForWarn);
 }
@@ -623,14 +628,7 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
         } else {
             HostSeen::NotYet
         };
-        let plan = wait_plan(
-            slot_wait,
-            policy,
-            ceiling,
-            warn_slot_wait(settings),
-            stall_window(),
-            seen,
-        );
+        let plan = wait_plan(slot_wait, policy, ceiling, warn_slot_wait(settings), seen);
         let slot_cap = sizing.cap_for(machine.cores);
         let cap = u64::from(slot_cap);
         // Hook checks take one slot; the width is set whether a slot is
@@ -679,7 +677,6 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
                 greenharness_slots::held_in_process(),
                 ceiling,
                 started.elapsed(),
-                stall_window(),
             );
             got = wait_for_slot(sizing, machine, holder, more);
         }
@@ -702,7 +699,7 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
         let ended = got.as_ref().err().and_then(Reason::ended);
         let defer = ended.is_some();
         let end = ended.map(greenharness_slots::LineEnd::end);
-        let cause = ended.map_or(String::new(), |end| defer_cause(end, policy));
+        let cause = ended.map_or(String::new(), |end| defer_cause(end, policy, slot_wait));
         let by_slot_wait = matches!(
             (policy, ended),
             (
@@ -945,13 +942,13 @@ mod tests {
     fn each_caller_waits_by_its_row_of_the_table() {
         use greenharness_slots::WaitBounds;
         let s = |n| Duration::from_secs(n);
-        let (ceiling, warn, stall) = (s(3600), s(600), s(300));
+        let (ceiling, warn) = (s(3600), s(600));
         let defer = BusyPolicy::Defer { slot_wait: s(60) };
         let queue = |window, ceiling| WaitPlan::Queue(WaitBounds { window, ceiling });
-        let row = |slot_wait, policy, ceiling, seen| {
-            wait_plan(slot_wait, policy, ceiling, warn, stall, seen)
-        };
-        // `onBusy wait`, the default (rehearsal and pre-stage too).
+        let row =
+            |slot_wait, policy, ceiling, seen| wait_plan(slot_wait, policy, ceiling, warn, seen);
+        // `onBusy wait`, the default (rehearsal and pre-stage too): no stall
+        // window on the hook path, only the ceiling.
         assert_eq!(
             row(
                 SlotWait::Policy,
@@ -959,10 +956,10 @@ mod tests {
                 ceiling,
                 HostSeen::NotYet
             ),
-            queue(Some(stall), ceiling)
+            queue(None, ceiling)
         );
-        // A `warn` check of land's pre-stage: the stall, under warnSlotWait,
-        // which never outlasts the ceiling.
+        // A `warn` check of land's pre-stage: no stall window, under
+        // warnSlotWait, which never outlasts the ceiling.
         assert_eq!(
             row(
                 SlotWait::BoundedForWarn,
@@ -970,7 +967,7 @@ mod tests {
                 ceiling,
                 HostSeen::NotYet
             ),
-            queue(Some(stall), warn)
+            queue(None, warn)
         );
         assert_eq!(
             row(
@@ -979,7 +976,7 @@ mod tests {
                 s(100),
                 HostSeen::NotYet
             ),
-            queue(Some(stall), s(100))
+            queue(None, s(100))
         );
         // `onBusy defer`: slotWait stays hard, with no stall rule; none at
         // all once this run measured the host busy.
@@ -1009,17 +1006,20 @@ mod tests {
     }
 
     /// The sibling-holder extension: with a sibling of this process holding
-    /// a slot, the second wait goes on while the line moves, to the rest of
+    /// a slot, the second wait goes on, with no stall window, to the rest of
     /// the ceiling; without one it is a single last poll.
     #[test]
-    fn the_sibling_extension_waits_while_the_line_moves() {
+    fn the_sibling_extension_waits_to_the_ceiling() {
         let s = |n| Duration::from_secs(n);
-        let with_sibling = sibling_bounds(SlotWait::Policy, 1, s(3600), s(60), s(300));
-        assert_eq!(with_sibling.window, Some(s(300)));
+        let with_sibling = sibling_bounds(SlotWait::Policy, 1, s(3600), s(60));
+        assert_eq!(
+            with_sibling.window, None,
+            "no stall window on the hook path"
+        );
         assert_eq!(with_sibling.ceiling, s(3540));
-        let alone = sibling_bounds(SlotWait::Policy, 0, s(3600), s(60), s(300));
+        let alone = sibling_bounds(SlotWait::Policy, 0, s(3600), s(60));
         assert_eq!((alone.window, alone.ceiling), (None, Duration::ZERO));
-        let never = sibling_bounds(SlotWait::NeverWaits, 1, s(3600), s(60), s(300));
+        let never = sibling_bounds(SlotWait::NeverWaits, 1, s(3600), s(60));
         assert_eq!((never.window, never.ceiling), (None, Duration::ZERO));
     }
 
@@ -1038,6 +1038,7 @@ mod tests {
             BusyPolicy::Defer {
                 slot_wait: Duration::from_secs(60),
             },
+            SlotWait::Policy,
         );
         assert!(cause.contains("made no progress for 5m00s"), "{cause}");
         assert!(cause.contains("(position 2)"), "{cause}");
@@ -1048,6 +1049,7 @@ mod tests {
             BusyPolicy::Defer {
                 slot_wait: Duration::from_secs(60),
             },
+            SlotWait::Policy,
         );
         assert!(
             slot_wait.ends_with("(greengate.onBusy defer)"),
@@ -1058,13 +1060,24 @@ mod tests {
                 waited: Duration::from_secs(3600),
             },
             BusyPolicy::Wait,
+            SlotWait::Policy,
         );
         assert!(ceiling.contains("no host slot within 1h00m"), "{ceiling}");
+        assert!(ceiling.ends_with("(greengate.timeout)"), "{ceiling}");
+        let warn = defer_cause(
+            &LineEnd::Ceiling {
+                waited: Duration::from_secs(600),
+            },
+            BusyPolicy::Wait,
+            SlotWait::BoundedForWarn,
+        );
+        assert!(warn.ends_with("(greengate.warnSlotWait)"), "{warn}");
         let failed = defer_cause(
             &LineEnd::PollFailed {
                 error: std::io::Error::other("busy disk"),
             },
             BusyPolicy::Wait,
+            SlotWait::Policy,
         );
         assert!(failed.contains("busy disk"), "{failed}");
     }

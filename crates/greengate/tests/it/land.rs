@@ -687,15 +687,16 @@ fn land_waits_for_a_failing_warn_gate_on_a_busy_host() {
     land_with_a_warn_gate_on_a_busy_host(1);
 }
 
-/// ADR-0022: a `block heavy` push gate whose line stalls in land's pre-stage
-/// defers rather than run unqueued, and records an hour-long `deferred`
-/// completion, so land's own push does not refuse it as missing evidence:
-/// the branch reaches the remote and CI runs the gate.
+/// ADR-0022, hook path: a `block heavy` push gate that waits in land's
+/// pre-stage to its ceiling defers rather than run unqueued, and records a
+/// `deferred` completion (an hour long), so land's own push does not refuse it as
+/// missing evidence: the branch reaches the remote and CI runs the gate. The
+/// stall seam is set low to show it does not end the wait.
 #[test]
 #[cfg(unix)]
-fn a_gate_deferred_on_a_stalled_line_still_lets_land_push() {
+fn a_gate_deferred_at_the_ceiling_still_lets_land_push() {
     use crate::busy_defers::{slot_dir, Holder};
-    let fx = fixture("feat/stalled");
+    let fx = fixture("feat/ceiling");
     let log = fx.r.path(".git/gate.log");
     fx.r.stage(
         "gate.sh",
@@ -703,20 +704,20 @@ fn a_gate_deferred_on_a_stalled_line_still_lets_land_push() {
     );
     fx.r.stage(
         "amont.conf",
-        "set timeout 600\npre-push  gate  *.txt  block  heavy sh gate.sh\n",
+        "set timeout 4\npre-push  gate  *.txt  block  heavy sh gate.sh\n",
     );
     fx.r.commit("chore: the gate");
     crate::tree_gates::trust_and_install(&fx.r);
     let pushed = head(&fx);
 
-    let slots = slot_dir("land-stalled");
+    let slots = slot_dir("land-ceiling");
     let holder = Holder::hold(&slots.join("slot-0")); // never released
     let ran = land_on_a_host(&fx, &slots, &[("GREENHARNESS_SLOT_STALL_S", "2")]);
     drop(holder);
     let said = format!("{}{}", ran.stdout, ran.stderr);
 
     assert_eq!(ran.code, 0, "{said}");
-    assert_eq!(tip(&fx, "feat/stalled"), pushed, "{said}");
+    assert_eq!(tip(&fx, "feat/ceiling"), pushed, "{said}");
     assert!(!said.contains("evidence-missing"), "{said}");
     assert!(said.contains("deferred to CI"), "{said}");
     assert_eq!(
@@ -740,7 +741,8 @@ fn a_gate_deferred_on_a_stalled_line_still_lets_land_push() {
         "no deferral record: {done}\n{said}"
     );
     let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
-    assert!(waits.contains("\"end\":\"stalled\""), "{waits}");
+    assert!(waits.contains("\"end\":\"ceiling\""), "{waits}");
+    assert!(!waits.contains("\"end\":\"stalled\""), "{waits}");
     let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
 }
 

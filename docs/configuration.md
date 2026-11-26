@@ -942,7 +942,11 @@ set by the repository (ADR-0013), says what happens when no slot frees.
 
   ```
   ! 1 check(s) deferred to CI, no host slot freed: pre-commit-cargo-test
-    run now: GREENGATE_ON_BUSY=wait greengate run pre-commit-cargo-test · stop deferring: set onBusy wait
+    wait for a slot, up to greengate.timeout:
+      GREENGATE_ON_BUSY=wait greengate run --raw pre-commit-cargo-test
+    skip the queue (the host is busy):
+      GREENGATE_ON_BUSY=now greengate run --raw pre-commit-cargo-test
+    stop deferring the block checks: set onBusy wait
   ```
 
 Declare `defer` only where the repository's CI runs every heavy gate: a

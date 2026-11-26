@@ -164,7 +164,9 @@ A plain push and a commit release their slot after each check.
 
 ## When a wait ends
 
-A wait ends, from 5.0 (ADR-0022), when its line has **stalled**: no
+A hook check's wait ends, from 5.1.1, at its ceiling and nowhere before: it has no
+stall window (ADR-0022, amended). `greengate slot run` and relais keep the
+stall rule. A line has **stalled** when no
 admission anywhere (the `admitted-at` stamp) and no change of the waiter's
 place for 300 s. The waiter's own marks run on a monotonic clock, so a
 laptop's sleep cannot stall a moving line; a stamp ahead of now counts as just
@@ -177,8 +179,8 @@ it:
 
 | Caller | Stall window | Ceiling | At the end |
 |---|---|---|---|
-| hook check, `onBusy wait` (and every rehearsal) | 300 s | `greengate.timeout` (3600 s when 0) | defers to CI |
-| heavy `warn` check of land's pre-stage | 300 s | `greengate.warnSlotWait` (600 s, never above the timeout) | defers |
+| hook check, `onBusy wait` (and every rehearsal) | none | `greengate.timeout` (3600 s when 0) | defers to CI |
+| heavy `warn` check of land's pre-stage | none | `greengate.warnSlotWait` (600 s, never above the timeout) | defers |
 | hook check, `onBusy defer` | none | `slotWait` (60 s) | defers |
 | `greengate slot run` | 300 s, never above `--max-wait` | `--max-wait` (90 s) | exits 75 (74 when the queue failed) |
 | relais verification command | 300 s | the run's total budget | blocks `admission_wait_exhausted` |
