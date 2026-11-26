@@ -12,7 +12,8 @@
 //! slot-0 … slot-{cap-1}   the slots; held = flocked
 //! admission               the one admission lock (taken without blocking)
 //! admitted-at             when the last holder was admitted, for the ramp
-//! queue/<nanos>-<pid>     a waiter's ticket, flocked for as long as it waits
+//! queue/<nanos>-<pid>-<n> a waiter's ticket, flocked for as long as it
+//!                         waits; holds who waits (JSON) from 5.2
 //! holders/slot-N.who      who holds slot N (JSON), while it does
 //! waits.jsonl             one line per acquisition, and one per released
 //!                         lease, for measurement
@@ -29,6 +30,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod host;
+mod reorder;
+
+pub use reorder::{
+    promote, promote_in, promote_in_waiting, queue, queue_in, Moved, Promote, QueuedJob, Refused,
+    AGE_FLOOR, PROMOTE_BUDGET, PROMOTE_LOCK_WAIT, PROMOTE_WINDOW,
+};
 
 /// Exported to the command a slot holder runs; an amont (or a wrapper)
 /// started under it does not queue again for the slot its parent holds.
@@ -695,7 +702,16 @@ pub struct Waiter {
     machine: Machine,
     weight: u32,
     holder: Holder,
-    ticket: Option<(PathBuf, File)>,
+    /// `{pid}-{seq}`: the id part of this waiter's ticket name, the name the
+    /// CLI uses for the job.
+    id: String,
+    /// The (dev, inode) of the ticket file: how the waiter finds its ticket,
+    /// never by a cached path, because a promotion ([`promote_in`]) renames
+    /// it. A rename keeps it, and no other waiter shares it, even one in
+    /// another pid namespace with the same id.
+    key: (u64, u64),
+    /// The ticket's open, flocked file, while this waiter is in the queue.
+    ticket: Option<File>,
 }
 
 impl Waiter {
@@ -730,11 +746,7 @@ impl Waiter {
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let seq = SEQ.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
-        let hidden = queue.join(format!(".new-{pid}-{seq}"));
-        let file = platform::try_lock(&hidden)?
-            .ok_or_else(|| io::Error::other("a fresh ticket was already locked"))?;
-        let visible = queue.join(format!("{nanos:024}-{pid}-{seq}"));
-        fs::rename(&hidden, &visible)?;
+        let id = format!("{pid}-{seq}");
         let weight = weight.max(1);
         let mut holder = holder;
         if holder.jobs.is_none() {
@@ -744,14 +756,35 @@ impl Waiter {
                 sizing.cap_for(machine.cores),
             ));
         }
+        let hidden = queue.join(format!(".new-{id}"));
+        let mut file = platform::try_lock(&hidden)?
+            .ok_or_else(|| io::Error::other("a fresh ticket was already locked"))?;
+        // Who waits, written before the ticket is visible: the queue view
+        // and a promotion read it. A failed write leaves an empty ticket,
+        // which waits as an older client's does and is never moved.
+        let _ = file.write_all(ticket_json(&holder, now_ms()).as_bytes()); // best-effort: see above
+        let key = platform::file_key(&file.metadata()?);
+        let visible = queue.join(format!("{nanos:024}-{id}"));
+        if let Err(error) = fs::rename(&hidden, &visible) {
+            let _ = fs::remove_file(&hidden); // best-effort: a hidden ticket is never read
+            return Err(error);
+        }
         Ok(Waiter {
             dir: dir.to_path_buf(),
             sizing,
             machine,
             weight,
             holder,
-            ticket: Some((visible, file)),
+            id,
+            key,
+            ticket: Some(file),
         })
+    }
+
+    /// This waiter's id, `{pid}-{seq}`: what `greengate slots` lists and
+    /// [`promote_in`] takes.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// Ask once, without blocking.
@@ -776,12 +809,18 @@ impl Waiter {
         let Some(_admission) = platform::try_lock(&self.dir.join("admission"))? else {
             return Ok(Poll::Waiting(Queue::default()));
         };
-        let mine = self.ticket.as_ref().map(|(p, _)| p.clone());
-        let live = live_tickets(&self.dir, mine.as_deref())?;
-        let position = mine
-            .as_ref()
-            .and_then(|m| live.iter().position(|t| t == m))
-            .unwrap_or(0);
+        let live = live_tickets(&self.dir, Some(self.key))?;
+        // Found by inode, never by a cached path: a promotion renames
+        // tickets (t05). A ticket that is gone is an error, never the head.
+        let Some(position) = live
+            .iter()
+            .position(|t| platform::path_key(t) == Some(self.key))
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("ticket {} is gone from the queue", self.id),
+            ));
+        };
         let cap = self.sizing.cap_for(probe.cores);
         let Probed { free, held } = probe_slots(&self.dir, cap)?;
         let weight = self.weight.min(cap) as usize;
@@ -874,11 +913,24 @@ impl Waiter {
         }))
     }
 
+    /// Remove this waiter's ticket, found by inode. A promotion may rename it
+    /// between the read and the removal (leaving holds no admission lock),
+    /// so a vanished name is looked up once more. Whatever is left is
+    /// unlocked once the file drops, and cleanup removes it.
     fn leave(&mut self) {
-        if let Some((path, file)) = self.ticket.take() {
-            let _ = fs::remove_file(&path); // best-effort: cleanup removes an unlocked ticket
-            drop(file);
+        let Some(file) = self.ticket.take() else {
+            return;
+        };
+        for _ in 0..2 {
+            let Some(path) = find_ticket(&self.dir, self.key) else {
+                break;
+            };
+            match fs::remove_file(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                _ => break, // best-effort: cleanup removes an unlocked ticket
+            }
         }
+        drop(file);
     }
 }
 
@@ -1345,6 +1397,8 @@ pub fn record_wait_named(
 /// Append one line to `waits.jsonl` in a single write. Best-effort.
 // holds-until: t08 finds `waits.jsonl` past 3x its 232-lines-per-12-hours
 // baseline; then rotation becomes its own ticket (the t09 plan's Non-goals).
+// A rotation must keep the last 24 h of `promoted` rows: the promotion
+// budget is counted from them (`reorder::moves_in_window`).
 fn append_journal(dir: &Path, line: &str) {
     if let Ok(mut f) = OpenOptions::new()
         .create(true)
@@ -1411,8 +1465,9 @@ fn admitted_at(dir: &Path) -> u128 {
 }
 
 /// Visible tickets in order, removing the ones whose waiter died (their
-/// lock is free). `mine` is never probed: this process holds it.
-fn live_tickets(dir: &Path, mine: Option<&Path>) -> io::Result<Vec<PathBuf>> {
+/// lock is free). The ticket whose (dev, inode) is `mine` is never probed:
+/// this process holds it.
+fn live_tickets(dir: &Path, mine: Option<(u64, u64)>) -> io::Result<Vec<PathBuf>> {
     let mut live = Vec::new();
     for entry in fs::read_dir(dir.join("queue"))? {
         let path = entry?.path();
@@ -1423,7 +1478,7 @@ fn live_tickets(dir: &Path, mine: Option<&Path>) -> io::Result<Vec<PathBuf>> {
         if name.starts_with('.') {
             continue;
         }
-        if Some(path.as_path()) == mine {
+        if mine.is_some() && platform::path_key(&path) == mine {
             live.push(path);
             continue;
         }
@@ -1436,6 +1491,38 @@ fn live_tickets(dir: &Path, mine: Option<&Path>) -> io::Result<Vec<PathBuf>> {
     }
     live.sort();
     Ok(live)
+}
+
+/// The id part, `{pid}-{seq}`, of a visible ticket's name
+/// `{nanos:024}-{pid}-{seq}`.
+fn ticket_id(path: &Path) -> Option<&str> {
+    ticket_parts(path.file_name()?.to_str()?).map(|(_, id)| id)
+}
+
+/// A visible ticket name's nanos and id; `None` for a hidden or foreign name.
+fn ticket_parts(name: &str) -> Option<(u128, &str)> {
+    let (nanos, id) = name.split_once('-')?;
+    if nanos.len() != 24 || id.is_empty() {
+        return None;
+    }
+    Some((nanos.parse().ok()?, id))
+}
+
+/// The visible ticket whose (dev, inode) is `key`, read without a lock.
+fn find_ticket(dir: &Path, key: (u64, u64)) -> Option<PathBuf> {
+    fs::read_dir(dir.join("queue"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| ticket_id(p).is_some() && platform::path_key(p) == Some(key))
+}
+
+/// What a ticket holds from crate 5.2: the waiter's [`Holder`] fields and
+/// `joined_ms`, when it joined the queue (its name's nanos stop being its
+/// arrival once it is moved).
+fn ticket_json(holder: &Holder, joined_ms: u128) -> String {
+    let record = holder.to_json();
+    format!("{{\"joined_ms\":{joined_ms},{}", &record[1..])
 }
 
 /// Remove what a dead process left in `holders/`, as dead queue tickets are
@@ -1694,6 +1781,29 @@ mod platform {
         }
     }
 
+    /// The (dev, inode) of an open file: a ticket's identity across renames.
+    pub fn file_key(meta: &std::fs::Metadata) -> (u64, u64) {
+        (meta.dev(), meta.ino())
+    }
+
+    /// The (dev, inode) of `path`, without following a symlink; `None` when
+    /// it is gone.
+    pub fn path_key(path: &Path) -> Option<(u64, u64)> {
+        path.symlink_metadata().ok().map(|m| file_key(&m))
+    }
+
+    /// Whether another holder has `path` locked, by a non-blocking flock
+    /// released at once, on a read-only open without `O_CREAT` (flock works
+    /// on a read-only descriptor). Never creates the file, so a ticket
+    /// renamed or removed meanwhile is never recreated empty under its old
+    /// name: `None` when it is gone or cannot be opened.
+    pub fn is_locked(path: &Path) -> Option<bool> {
+        let file = std::fs::File::open(path).ok()?;
+        // SAFETY: a valid fd we own; flock touches no memory.
+        let taken = unsafe { libc_flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0;
+        Some(!taken) // the lock, when taken, drops with `file` here
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn load1() -> Option<f64> {
         extern "C" {
@@ -1732,6 +1842,17 @@ mod platform {
     }
     pub fn try_lock(_path: &Path) -> std::io::Result<Option<std::fs::File>> {
         Ok(None)
+    }
+    // No ticket is ever made here (`try_lock` takes nothing): these exist so
+    // the queue code compiles.
+    pub fn file_key(_meta: &std::fs::Metadata) -> (u64, u64) {
+        (0, 0)
+    }
+    pub fn path_key(path: &Path) -> Option<(u64, u64)> {
+        path.symlink_metadata().ok().map(|m| file_key(&m))
+    }
+    pub fn is_locked(_path: &Path) -> Option<bool> {
+        Some(true)
     }
     pub fn load1() -> Option<f64> {
         None
