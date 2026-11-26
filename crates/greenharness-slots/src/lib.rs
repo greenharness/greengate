@@ -33,8 +33,8 @@ pub mod host;
 mod reorder;
 
 pub use reorder::{
-    promote, promote_in, promote_in_waiting, queue, queue_in, Moved, Promote, QueuedJob, Refused,
-    AGE_FLOOR, PROMOTE_BUDGET, PROMOTE_LOCK_WAIT, PROMOTE_WINDOW,
+    promote_in, promote_in_waiting, queue_in, wait_text, JobState, Moved, Promote, PromoteError,
+    QueuedJob, Refused, AGE_FLOOR, PROMOTE_BUDGET, PROMOTE_LOCK_WAIT, PROMOTE_WINDOW,
 };
 
 /// Exported to the command a slot holder runs; an amont (or a wrapper)

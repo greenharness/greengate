@@ -148,10 +148,10 @@ between two neighbours), keeping its id. A failed append moves nothing; a
 failed rename leaves a counted move that did not happen. Passed waiters read
 a larger `Behind` and count it as a change of place for the stall rule.
 
-Exit status: 0 moved (stdout: `moved <id> from 3 to 0, past 3 jobs; 2 of 3
+Exit status: 0 moved (stderr: `moved <id> from 3 to 0, past 3 jobs; 2 of 3
 moves left in 24 h`), 1 refused or slots off, 2 a usage error, 74 an I/O
 failure (queue or journal), 75 the admission lock stayed held for 10 s.
-Refusals and errors go to stderr.
+Every message goes to stderr; the queue view (`slots`) is the stdout a script reads.
 
 ## Cores
 
@@ -298,6 +298,6 @@ holder record.
   number of waiters and, from 5.2, the queue: one line per job, `position`,
   `id`, wait, session and command, within 80 columns (`gone` for a waiter
   that died, unnumbered; `old client` for an empty ticket). `--json` gains
-  `queue`: `id`, `position` (`null` when gone), `waited_ms`, `session`,
+  `queue`: `id`, `position` and `waited_ms` (both `null` when gone), `session`,
   `tool`, `command`, `repo` (`null` for an old client's ticket) and `gone`.
   The listing takes no lock and changes nothing.

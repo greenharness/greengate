@@ -9,8 +9,8 @@
 //! past a job that has waited [`AGE_FLOOR`] or more, and every move is
 //! journalled as a `promoted` row with its reason.
 
-use super::{append_journal, escape, live_tickets, platform, raw, ticket_parts, unescape, Holder};
-use std::fs::{self, OpenOptions};
+use super::{append_journal, escape, platform, raw, ticket_parts, unescape, Holder};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,13 +26,29 @@ pub const PROMOTE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// waiter is never starved.
 pub const AGE_FLOOR: Duration = Duration::from_secs(20 * 60);
 
-/// How long a promotion waits for the admission lock. Each poll holds it
-/// for a few milliseconds, so this is only ever reached on a stuck holder.
+/// How long a promotion waits for the admission lock in all. Each poll holds
+/// it for a few milliseconds, so this is only reached on a stuck holder.
 pub const PROMOTE_LOCK_WAIT: Duration = Duration::from_secs(10);
 
-/// One second in nanoseconds: how far before the head a job moved to the
-/// head is named, leaving room for later midpoints behind it.
+/// The lock is first tried this long without a word; a wait past it is said
+/// once, on stderr, and the rest of [`PROMOTE_LOCK_WAIT`] follows.
+const LOCK_FIRST_WAIT: Duration = Duration::from_secs(1);
+
+/// One second in nanoseconds: how far before the head a job moved to the head
+/// is named, leaving room for later midpoints behind it.
 const HEAD_GAP_NANOS: u128 = 1_000_000_000;
+
+/// Where a queued job is now: a ticket's flock is held or free, so these
+/// two are the whole of it (not `#[non_exhaustive]`, so a caller's match is
+/// exhaustive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    /// Waiting, at this place (0 the head).
+    Waiting { position: usize },
+    /// Its waiter died; the next poll removes its ticket. Not numbered, so a
+    /// live job's position is the `--to` a promotion uses.
+    Gone,
+}
 
 /// One job in the queue, as [`queue_in`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,27 +56,26 @@ const HEAD_GAP_NANOS: u128 = 1_000_000_000;
 pub struct QueuedJob {
     /// `{pid}-{seq}`: the name [`promote_in`] takes.
     pub id: String,
-    /// Its place among the live jobs, 0 the head; `None` for a gone one.
-    pub position: Option<usize>,
+    pub state: JobState,
     /// Who waits, from the ticket; `None` for an older client's empty one.
     pub holder: Option<Holder>,
     /// When it joined the queue, ms since the epoch.
     pub joined_ms: u128,
-    /// Its waiter died (the ticket's flock is free); the next poll removes it.
-    pub gone: bool,
 }
 
-/// What a ticket says about its job, parsed.
+/// A ticket as read: its name, its contents and whether its waiter still
+/// holds the flock.
 struct Ticket {
     path: PathBuf,
     nanos: u128,
     id: String,
     holder: Option<Holder>,
     joined_ms: u128,
+    locked: bool,
 }
 
 impl Ticket {
-    fn read(path: PathBuf) -> Option<Ticket> {
+    fn read(path: PathBuf, locked: bool) -> Option<Ticket> {
         let name = path.file_name()?.to_str()?;
         let (nanos, id) = ticket_parts(name)?;
         let id = id.to_string();
@@ -76,6 +91,7 @@ impl Ticket {
             id,
             holder,
             joined_ms,
+            locked,
         })
     }
 
@@ -84,21 +100,15 @@ impl Ticket {
     }
 }
 
-/// The queue in [`super::dir`], for `greengate slots`.
-pub fn queue() -> io::Result<Vec<QueuedJob>> {
-    queue_in(&super::dir())
-}
-
-/// The queue in `dir`, in order, read without the admission lock: an
-/// observation. Nothing is removed or created. A ticket's liveness is a
-/// non-blocking flock on a read-only open, released at once (a pid says
-/// nothing across pid namespaces); a dead one is listed `gone`, unnumbered,
-/// so the live positions are those a promotion uses. A ticket renamed or
-/// removed since the directory was read is skipped.
-pub fn queue_in(dir: &Path) -> io::Result<Vec<QueuedJob>> {
-    let mut names: Vec<PathBuf> = fs::read_dir(dir.join("queue"))?
+/// Every visible ticket in order, each with whether its waiter still holds
+/// the flock. The one ordering every position is counted from, read-only:
+/// nothing is removed or created (a ticket renamed or removed since the
+/// listing is skipped). A pid says nothing across pid namespaces, so
+/// liveness is the flock alone.
+fn read_queue(dir: &Path) -> io::Result<Vec<Ticket>> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir.join("queue"))?
         .filter_map(Result::ok)
-        .map(|e| e.path())
+        .map(|entry| entry.path())
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
@@ -106,29 +116,37 @@ pub fn queue_in(dir: &Path) -> io::Result<Vec<QueuedJob>> {
                 .is_some()
         })
         .collect();
-    names.sort();
-    let mut jobs = Vec::new();
-    let mut position = 0;
-    for path in names {
-        let Some(locked) = platform::is_locked(&path) else {
-            continue; // renamed or removed since the listing
-        };
-        let Some(ticket) = Ticket::read(path) else {
-            continue;
-        };
-        let gone = !locked;
-        jobs.push(QueuedJob {
-            id: ticket.id,
-            position: (!gone).then_some(position),
-            holder: ticket.holder,
-            joined_ms: ticket.joined_ms,
-            gone,
-        });
-        if !gone {
-            position += 1;
-        }
-    }
-    Ok(jobs)
+    paths.sort();
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            let locked = platform::is_locked(&path)?;
+            Ticket::read(path, locked)
+        })
+        .collect())
+}
+
+/// The queue in `dir`, in order, read without the admission lock: an
+/// observation. Live jobs are numbered from 0; a gone one is not numbered.
+pub fn queue_in(dir: &Path) -> io::Result<Vec<QueuedJob>> {
+    let mut live = 0;
+    Ok(read_queue(dir)?
+        .into_iter()
+        .map(|t| {
+            let state = if t.locked {
+                live += 1;
+                JobState::Waiting { position: live - 1 }
+            } else {
+                JobState::Gone
+            };
+            QueuedJob {
+                id: t.id,
+                state,
+                holder: t.holder,
+                joined_ms: t.joined_ms,
+            }
+        })
+        .collect())
 }
 
 /// A request to move one job ahead.
@@ -145,8 +163,6 @@ pub struct Promote<'a> {
     pub to: usize,
     /// The tool asking, for the journal row (`greengate`).
     pub tool: &'a str,
-    /// Now, ms since the epoch: the age floor and the budget window.
-    pub now_ms: u128,
 }
 
 /// A move that was made.
@@ -163,7 +179,8 @@ pub struct Moved {
     pub budget: usize,
 }
 
-/// Why a move was refused: each names the limit it hit ([`Refused::limit`]).
+/// Why a move was refused. Each names the limit it hit ([`Refused::limit`]);
+/// the words say the fact, and a caller adds its own hints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refused {
@@ -225,17 +242,16 @@ impl Refused {
         }
     }
 
-    /// One line saying why, after `refused (<limit>): `.
+    /// One line of fact, after `refused (<limit>): `.
     pub fn describe(&self) -> String {
         match self {
-            Refused::NoReason => "a move needs a reason (--reason <text>)".to_string(),
-            Refused::NoSession => format!(
-                "no session id: set by the agent ({}), and only a session's own jobs move",
-                super::SESSION_ENVS.join(", ")
-            ),
+            Refused::NoReason => "a move needs a reason".to_string(),
+            Refused::NoSession => {
+                "the caller has no session id; only a session's own jobs move".to_string()
+            }
             Refused::NotQueued { id } => format!("no waiting job {id}"),
             Refused::Ambiguous { id, positions } => format!(
-                "two waiting jobs are named {id} (positions {}); no --to tells them apart",
+                "two waiting jobs are named {id} (positions {}); neither can be picked by id",
                 positions
                     .iter()
                     .map(usize::to_string)
@@ -257,7 +273,7 @@ impl Refused {
                 frees_in_ms,
             } => format!(
                 "{used} of {budget} moves used in 24 h; the next frees in {}",
-                minutes(*frees_in_ms)
+                wait_text(*frees_in_ms)
             ),
             Refused::AgeFloor {
                 id,
@@ -266,86 +282,198 @@ impl Refused {
                 ..
             } => format!(
                 "{id} would pass {blocker}, which has waited {} (limit {}m)",
-                minutes(*waited_ms),
+                wait_text(*waited_ms),
                 AGE_FLOOR.as_secs() / 60
             ),
-            Refused::NoRoom { id, to } => {
-                format!("no name sorts {id} at {to}; try another --to")
+            Refused::NoRoom { id, to } => format!("no name sorts {id} at {to}"),
+        }
+    }
+}
+
+/// A wait or a remaining time for a person: `<1m`, `23m`, `3h12m`.
+pub fn wait_text(ms: u128) -> String {
+    let minutes = ms / 60_000;
+    if ms < 60_000 {
+        "<1m".to_string()
+    } else if minutes >= 60 {
+        format!("{}h{:02}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+/// Why a promotion did not finish. A refusal is not one of these: it is an
+/// `Ok` answer naming its limit ([`Refused`]).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PromoteError {
+    /// The admission lock stayed held for [`PROMOTE_LOCK_WAIT`]; nothing moved.
+    LockBusy { waited: Duration },
+    /// A file the move reads or writes failed. `step` says what it was doing
+    /// and `path` which file.
+    Io {
+        step: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+}
+
+impl std::fmt::Display for PromoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromoteError::LockBusy { waited } => write!(
+                f,
+                "the admission lock stayed held for {}s; nothing moved",
+                waited.as_secs()
+            ),
+            PromoteError::Io { step, path, source } => {
+                write!(f, "{step} {}: {source}", path.display())
             }
         }
     }
 }
 
-/// `3h12m`, `23m`, `0m`: a duration in ms, rounded down to the minute.
-fn minutes(ms: u128) -> String {
-    let m = ms / 60_000;
-    if m >= 60 {
-        format!("{}h{:02}m", m / 60, m % 60)
-    } else {
-        format!("{m}m")
+impl std::error::Error for PromoteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PromoteError::Io { source, .. } => Some(source),
+            PromoteError::LockBusy { .. } => None,
+        }
     }
 }
 
-/// [`promote_in`] in [`super::dir`].
-pub fn promote(request: &Promote<'_>) -> io::Result<Result<Moved, Refused>> {
-    promote_in(&super::dir(), request)
+/// [`promote_in_waiting`] in [`super::dir`], without a note on the lock wait.
+pub fn promote_in(
+    dir: &Path,
+    request: &Promote<'_>,
+) -> Result<Result<Moved, Refused>, PromoteError> {
+    promote_with(dir, request, super::now_ms, || {})
 }
 
-/// Move one job ahead, under t06's rules. `Ok(Err(_))` is a refusal naming
-/// its limit, journalled best-effort as `promote_refused`; `Err(_)` is an
-/// I/O failure, `WouldBlock` when the admission lock stayed held for
-/// [`PROMOTE_LOCK_WAIT`]. `on_lock_wait` runs once when the lock is not free
-/// at the first try, so a caller can say it waits.
-pub fn promote_in(dir: &Path, request: &Promote<'_>) -> io::Result<Result<Moved, Refused>> {
-    promote_in_waiting(dir, request, || {})
-}
-
-/// [`promote_in`], calling `on_lock_wait` once when the admission lock is
-/// not free at the first try.
+/// Move one job ahead, under t06's rules. `Ok(Ok(_))` is a move made;
+/// `Ok(Err(_))` a refusal naming its limit, journalled best-effort as
+/// `promote_refused`; `Err(_)` a failure, with the file and step it failed
+/// at. The clock is read under the admission lock, after any wait for it,
+/// so a job that crosses the age floor while the call waits is not passed.
+/// `on_lock_wait` runs once, when the lock is not free at the first try.
 pub fn promote_in_waiting(
     dir: &Path,
     request: &Promote<'_>,
     on_lock_wait: impl FnOnce(),
-) -> io::Result<Result<Moved, Refused>> {
-    let outcome = decide(dir, request, on_lock_wait)?;
-    if let Err(refused) = &outcome {
-        record_refusal(dir, request, refused);
-    }
-    Ok(outcome)
+) -> Result<Result<Moved, Refused>, PromoteError> {
+    promote_with(dir, request, super::now_ms, on_lock_wait)
 }
 
-fn decide(
+/// [`promote_in_waiting`] against a given clock: the seam the tests drive.
+fn promote_with(
     dir: &Path,
     request: &Promote<'_>,
+    clock: impl FnOnce() -> u128,
     on_lock_wait: impl FnOnce(),
-) -> io::Result<Result<Moved, Refused>> {
+) -> Result<Result<Moved, Refused>, PromoteError> {
+    super::safe_dir(dir).map_err(|e| PromoteError::Io {
+        step: "preparing the slot directory",
+        path: dir.to_path_buf(),
+        source: io::Error::other(e),
+    })?;
     if request.reason.trim().is_empty() {
-        return Ok(Err(Refused::NoReason));
+        return refused_now(dir, request, clock(), Refused::NoReason);
     }
     if request.session.is_empty() {
-        return Ok(Err(Refused::NoSession));
+        return refused_now(dir, request, clock(), Refused::NoSession);
     }
-    super::safe_dir(dir).map_err(io::Error::other)?;
-    let lock = dir.join("admission");
-    let _admission = match platform::try_lock(&lock)? {
-        Some(file) => file,
-        None => {
-            on_lock_wait();
-            super::lock_within(&lock, PROMOTE_LOCK_WAIT)?.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!(
-                        "the admission lock stayed held for {}s",
-                        PROMOTE_LOCK_WAIT.as_secs()
-                    ),
-                )
-            })?
+    let _admission = take_admission(&dir.join("admission"), on_lock_wait)?;
+    let now = clock();
+    let tickets: Vec<Ticket> = read_queue(dir)
+        .map_err(|source| PromoteError::Io {
+            step: "reading the queue in",
+            path: dir.join("queue"),
+            source,
+        })?
+        .into_iter()
+        .filter(|t| t.locked)
+        .collect();
+    let mv = match judge(dir, request, now, &tickets)? {
+        Ok(mv) => mv,
+        Err(refused) => {
+            record_refusal(dir, request, now, &refused);
+            return Ok(Err(refused));
         }
     };
-    let tickets: Vec<Ticket> = live_tickets(dir, None)?
-        .into_iter()
-        .filter_map(Ticket::read)
-        .collect();
+    // The row first: a lost rename overcounts one move, a lost row would
+    // escape the budget (no signal between the two can leave a move
+    // unjournalled).
+    append_strict(dir, &promoted_row(request, now, &mv)).map_err(|source| PromoteError::Io {
+        step: "appending the promoted row to",
+        path: dir.join("waits.jsonl"),
+        source,
+    })?;
+    fs::rename(&mv.path, &mv.renamed).map_err(|source| PromoteError::Io {
+        step: "journalled, but renaming the ticket failed in",
+        path: dir.join("queue"),
+        source,
+    })?;
+    Ok(Ok(Moved {
+        id: mv.id,
+        from: mv.from,
+        to: mv.to,
+        passed: mv.from - mv.to,
+        used: mv.used,
+        budget: PROMOTE_BUDGET,
+    }))
+}
+
+/// A refusal decided before the lock is taken: journalled with the clock as
+/// read now.
+fn refused_now(
+    dir: &Path,
+    request: &Promote<'_>,
+    now: u128,
+    refused: Refused,
+) -> Result<Result<Moved, Refused>, PromoteError> {
+    record_refusal(dir, request, now, &refused);
+    Ok(Err(refused))
+}
+
+/// Take the admission lock: at once, or after a wait the caller is told of
+/// once. [`PROMOTE_LOCK_WAIT`] in all.
+fn take_admission(lock: &Path, on_lock_wait: impl FnOnce()) -> Result<File, PromoteError> {
+    let io = |source| PromoteError::Io {
+        step: "taking the admission lock at",
+        path: lock.to_path_buf(),
+        source,
+    };
+    if let Some(file) = super::lock_within(lock, LOCK_FIRST_WAIT).map_err(io)? {
+        return Ok(file);
+    }
+    on_lock_wait();
+    super::lock_within(lock, PROMOTE_LOCK_WAIT - LOCK_FIRST_WAIT)
+        .map_err(io)?
+        .ok_or(PromoteError::LockBusy {
+            waited: PROMOTE_LOCK_WAIT,
+        })
+}
+
+/// What a granted move will do: the ticket to rename, its new name and the
+/// row to journal.
+struct Move {
+    id: String,
+    from: usize,
+    to: usize,
+    command: String,
+    used: usize,
+    path: PathBuf,
+    renamed: PathBuf,
+}
+
+/// Decide a move against the live tickets, under the lock. `Ok(Err(_))` is a
+/// refusal; the I/O this reads (the journal, for the budget) can fail.
+fn judge(
+    dir: &Path,
+    request: &Promote<'_>,
+    now: u128,
+    tickets: &[Ticket],
+) -> Result<Result<Move, Refused>, PromoteError> {
     let at: Vec<usize> = (0..tickets.len())
         .filter(|&i| tickets[i].id == request.id)
         .collect();
@@ -382,12 +510,15 @@ fn decide(
             to,
         }));
     }
-    // The clock is read under the lock, after any wait for it: a job that
-    // crossed the age floor while this call waited is not passed. A test's
-    // later `now_ms` wins, so the floor and the window can be driven.
-    let now = request.now_ms.max(super::now_ms());
     let window = PROMOTE_WINDOW.as_millis();
-    let moves = moves_in_window(dir, request.session, now.saturating_sub(window))?;
+    let moves =
+        moves_in_window(dir, request.session, now.saturating_sub(window)).map_err(|source| {
+            PromoteError::Io {
+                step: "reading the budget from",
+                path: dir.join("waits.jsonl"),
+                source,
+            }
+        })?;
     if moves.len() >= PROMOTE_BUDGET {
         let oldest = moves.iter().min().copied().unwrap_or(now);
         return Ok(Err(Refused::Budget {
@@ -418,35 +549,22 @@ fn decide(
         }
         lo + (hi - lo) / 2
     };
-    if to == 0 && nanos >= hi {
+    if nanos >= hi {
         return Ok(Err(Refused::NoRoom { id, to }));
     }
-    let renamed = dir.join("queue").join(format!("{nanos:024}-{id}"));
-    // The row first: a lost rename overcounts one move, a lost row would
-    // escape the budget (no signal between the two can leave a move
-    // unjournalled).
-    append_strict(
-        dir,
-        &promoted_row(request, now, &id, from, to, &holder.command),
-    )?;
-    fs::rename(&target.path, &renamed).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("the move of {id} was journalled but its rename failed: {error}"),
-        )
-    })?;
-    Ok(Ok(Moved {
-        id,
+    Ok(Ok(Move {
+        id: id.clone(),
         from,
         to,
-        passed: from - to,
+        command: holder.command.clone(),
         used: moves.len() + 1,
-        budget: PROMOTE_BUDGET,
+        path: target.path.clone(),
+        renamed: dir.join("queue").join(format!("{nanos:024}-{id}")),
     }))
 }
 
 /// The `at_ms` of this session's `promoted` rows at or after `since_ms`. A
-/// missing journal has none; an unreadable one is an error, never zero.
+/// missing journal has none; any other read failure is an error, never zero.
 /// Records are split at each `{"at_ms":` start, not only at newlines: every
 /// journal row begins so, and a best-effort writer's cut-short line would
 /// otherwise swallow the row appended after it.
@@ -476,33 +594,26 @@ fn records(text: &str) -> impl Iterator<Item = &str> {
         .map(move |(start, end)| text[start..end].trim_end())
 }
 
-fn promoted_row(
-    request: &Promote<'_>,
-    now: u128,
-    id: &str,
-    from: usize,
-    to: usize,
-    command: &str,
-) -> String {
+fn promoted_row(request: &Promote<'_>, now: u128, mv: &Move) -> String {
     format!(
-        "{{\"at_ms\":{},\"tool\":\"{}\",\"pid\":{},\"session\":\"{}\",\"outcome\":\"promoted\",\"id\":\"{}\",\"from\":{from},\"to\":{to},\"passed\":{},\"command\":\"{}\",\"reason\":\"{}\"}}\n",
-        now,
+        "{{\"at_ms\":{now},\"tool\":\"{}\",\"pid\":{},\"session\":\"{}\",\"outcome\":\"promoted\",\"id\":\"{}\",\"from\":{},\"to\":{},\"passed\":{},\"command\":\"{}\",\"reason\":\"{}\"}}\n",
         escape(request.tool),
         std::process::id(),
         escape(request.session),
-        escape(id),
-        from - to,
-        escape(command),
+        escape(&mv.id),
+        mv.from,
+        mv.to,
+        mv.from - mv.to,
+        escape(&mv.command),
         escape(request.reason.trim()),
     )
 }
 
 /// A refusal's row, best-effort: it never counts toward the budget, and a
 /// lost one costs one sample.
-fn record_refusal(dir: &Path, request: &Promote<'_>, refused: &Refused) {
+fn record_refusal(dir: &Path, request: &Promote<'_>, now: u128, refused: &Refused) {
     let line = format!(
-        "{{\"at_ms\":{},\"tool\":\"{}\",\"pid\":{},\"session\":\"{}\",\"outcome\":\"promote_refused\",\"id\":\"{}\",\"limit\":\"{}\"}}\n",
-        request.now_ms,
+        "{{\"at_ms\":{now},\"tool\":\"{}\",\"pid\":{},\"session\":\"{}\",\"outcome\":\"promote_refused\",\"id\":\"{}\",\"limit\":\"{}\"}}\n",
         escape(request.tool),
         std::process::id(),
         escape(request.session),
@@ -565,13 +676,14 @@ mod tests {
     /// The position a waiter reads once the admission lock is free (a poll
     /// that missed the lock says nothing: `reason: None`).
     fn place(w: &mut Waiter) -> usize {
-        loop {
+        for _ in 0..200_000 {
             match w.poll().unwrap() {
                 Poll::Waiting(q) if q.reason.is_some() => return q.position,
                 Poll::Waiting(_) => std::thread::yield_now(),
                 Poll::Granted(_) => panic!("granted while a slot is held"),
             }
         }
+        panic!("no answer with the admission lock free after 200k polls");
     }
 
     fn ask<'a>(id: &'a str, session: &'a str, to: usize) -> Promote<'a> {
@@ -581,7 +693,6 @@ mod tests {
             reason: "the person waits on this",
             to,
             tool: "test",
-            now_ms: 0,
         }
     }
 
@@ -592,11 +703,26 @@ mod tests {
         }
     }
 
+    fn promote_at(
+        dir: &Path,
+        request: &Promote<'_>,
+        at: u128,
+    ) -> Result<Result<Moved, Refused>, PromoteError> {
+        promote_with(dir, request, || at, || {})
+    }
+
+    fn refused_at(dir: &Path, request: &Promote<'_>, at: u128) -> Refused {
+        match promote_at(dir, request, at) {
+            Ok(Err(refused)) => refused,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
     fn ids(dir: &Path) -> Vec<String> {
         queue_in(dir)
             .unwrap()
             .into_iter()
-            .filter(|j| !j.gone)
+            .filter(|j| matches!(j.state, JobState::Waiting { .. }))
             .map(|j| j.id)
             .collect()
     }
@@ -791,13 +917,17 @@ mod tests {
         journal.push_str(&row(now - 2_000, ME, "promoted"));
         fs::write(d.join("waits.jsonl"), &journal).unwrap();
         // Two counted: one move left.
-        let moved = promote_in(&d, &ask(mine.id(), ME, 0)).unwrap().unwrap();
+        let moved = promote_at(&d, &ask(mine.id(), ME, 0), now)
+            .unwrap()
+            .unwrap();
         assert_eq!((moved.used, moved.budget), (3, 3));
         let _b = waiter(&d, OTHER, "b");
         let r = refused(&d, &ask(mine.id(), ME, 0));
         assert_eq!(r.limit(), "already-ahead");
         let late = waiter(&d, ME, "late");
-        let r = refused(&d, &ask(late.id(), ME, 0));
+        let before = ids(&d);
+        let r = refused_at(&d, &ask(late.id(), ME, 0), now);
+        assert_eq!(ids(&d), before, "a refused move changes nothing");
         match r {
             Refused::Budget {
                 used,
@@ -845,13 +975,15 @@ mod tests {
         let moved = promote_in(&d, &ask(mine.id(), ME, 1)).unwrap().unwrap();
         assert_eq!((moved.from, moved.to), (3, 1));
         // Every job past the floor: no place is offered.
-        let r = refused(
+        let r = match promote_with(
             &d,
-            &Promote {
-                now_ms: now_ms() + 25 * 60 * 1000,
-                ..ask(_b.id(), OTHER, 0)
-            },
-        );
+            &ask(_b.id(), OTHER, 0),
+            || now_ms() + 25 * 60 * 1000,
+            || {},
+        ) {
+            Ok(Err(refused)) => refused,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
         assert!(
             matches!(r, Refused::AgeFloor { furthest: None, .. }),
             "{r:?}"
@@ -887,7 +1019,7 @@ mod tests {
         promote_in(&d, &ask(mine.id(), ME, 0)).unwrap().unwrap();
         let jobs = queue_in(&d).unwrap();
         let old = jobs.iter().find(|j| j.id == "999999-2").unwrap();
-        assert_eq!(old.position, Some(1));
+        assert_eq!(old.state, JobState::Waiting { position: 1 });
         assert!(old.holder.is_none());
         drop(mine);
         assert_eq!(ids(&d), vec!["999999-2".to_string()]);
@@ -934,7 +1066,10 @@ mod tests {
         let jobs = queue_in(&d).unwrap();
         let view: Vec<(Option<usize>, &str, bool)> = jobs
             .iter()
-            .map(|j| (j.position, j.id.as_str(), j.gone))
+            .map(|j| match j.state {
+                JobState::Waiting { position } => (Some(position), j.id.as_str(), false),
+                JobState::Gone => (None, j.id.as_str(), true),
+            })
             .collect();
         assert_eq!(
             view,

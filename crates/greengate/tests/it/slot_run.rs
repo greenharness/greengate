@@ -621,13 +621,15 @@ fn a_session_moves_its_own_waiting_job_to_the_head() {
     .output()
     .expect("promote");
     assert_eq!(moved.status.code(), Some(0), "{}", text(&moved));
+    // Every message goes to stderr: the exit status is the result.
     assert!(
-        String::from_utf8_lossy(&moved.stdout).starts_with(&format!(
+        String::from_utf8_lossy(&moved.stderr).starts_with(&format!(
             "moved {id} from 1 to 0, past 1 job; 2 of 3 moves left"
         )),
         "{}",
         text(&moved)
     );
+    assert!(moved.stdout.is_empty(), "{}", text(&moved));
     let queue = queue_of(&slots);
     assert_eq!(queue[0]["id"], id.as_str(), "{queue:?}");
     let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
