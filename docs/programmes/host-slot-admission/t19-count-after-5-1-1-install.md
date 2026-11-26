@@ -2,7 +2,7 @@
 type = "task"
 mode = "afk"
 status = "open"
-due = "2026-11-28"
+due = "2026-11-27"
 blocked_by = []
 repos = ["amont"]
 +++
@@ -10,7 +10,9 @@ repos = ["amont"]
 
 ## Question
 
-greengate 5.1.1 was installed on this machine at about 2026-11-27 (provisional: the release PR's follow-up sets the install time and this due date, install plus 24 h)
+greengate 5.1.1 was installed on this machine at 2026-11-26 16:24 CET (brew; `greengate --version` printed
+`greengate 5.1.1`; release #527, Release run 45847436802 conclusion success),
+so the count is due from 2026-11-27 16:24 CET
 ([t18](t18-plan-hook-stall-narrow-fix.md)). After 24 hours, does
 `waits.jsonl` show no hook deferral on a stalled line, and what is the hook
 deferral rate beside the baseline? This is the first half of

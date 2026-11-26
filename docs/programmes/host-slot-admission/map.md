@@ -48,6 +48,7 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 - [A hand-set held marker skips the queue](t10-held-marker-is-trusted.md): never set by hand in 7 days; the real hole is an inline marker on `amont slot run` or `git commit`. The marker becomes `held:<lease>`, checked live by one shared reader; a forged one queues with a journalled line. Build: t15.
 - [The journal holds up a day after the 4.13 install](t14-journal-measure-after-install.md): met the plan's `## Measure`; p95 of `waited_ms` 1.23× baseline, no rollback.
 - [The journal 24 hours after the 5.0 install](t17-count-after-5-0-install.md): hook deferrals were 4.5× baseline (141.8 per 12 h against 31.8), past the 2× trigger. The person chose a narrow fix over a revert: 5.0, relais 0.83 and greenbelay 6.15 stay. Plan: t18.
+- [Build: admission counts holders, waits end on a stalled line](t11-build-admission-and-waits.md): shipped in greengate 5.0.0, relais v0.83.0 and greenbelay 6.15.0; the hook path narrowed in 5.1.1 (t18); its measure is t19.
 - [Hook waits end at the ceiling, not on a stall](t18-plan-hook-stall-narrow-fix.md): greengate 5.1.1 (5.1.0 was already out) gives a hook check no stall window, so it waits to its ceiling and defers there; `slot run`, `--now`, `holders` and relais stay on crate 5. Ceiling deferrals stay deferred (229 of 261 are `onBusy defer`'s 60 s `slotWait`; only 14 were unqueued before 5.0). ADR-0022 amended. The 24 h count is [t19](t19-count-after-5-1-1-install.md), and the plain 2× rule may still fire on `slotWait` rows.
 
 ## Handoff
@@ -116,7 +117,7 @@ Next, in order:
    greenbelay back to 6.14.0 or forward without the `--now` advice, and
    relais back to 0.82.0 or a stated decision to keep it on crate 5. Which
    parts, and in what order, is t17's decision.
-5. ~~t18~~ closed 2026-11-26: greengate 5.1.1 (hook waits have no stall end; branch `fix/hsa-t18`). Next: [t19](t19-count-after-5-1-1-install.md), due 24 h after the 5.1.1 install, the first half of t08; [t20](t20-queued-heartbeat-names-ceiling.md) (low).
+5. ~~t18~~ closed 2026-11-26: greengate 5.1.1 (hook waits have no stall end; #526, release #527, Release run 45847436802 success) installed 2026-11-26 16:24 CET; t19 is due from 2026-11-27 16:24. t11 closed with it: all its code is shipped and its measure is t19. Next: [t19](t19-count-after-5-1-1-install.md), due 24 h after the 5.1.1 install, the first half of t08; [t20](t20-queued-heartbeat-names-ceiling.md) (low).
 5b. ~~t17~~ closed 2026-11-25: the 2× trigger fired, and the person chose a narrow fix, with no revert of greengate, relais or greenbelay. Next is [t18](t18-plan-hook-stall-narrow-fix.md): plan greengate 5.0.1, with no stalled-line deferral on the hook path. t08 counts from the 5.0.1 install.
 6. Then t12, t13, t15, and [t16](t16-coordinator-queue-moving-line.md) once
    relais ships.
