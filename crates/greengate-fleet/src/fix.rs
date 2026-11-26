@@ -1012,6 +1012,12 @@ mod tests {
             .map(|w| w["warning"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(kinds, ["aval_hook_unjudged", "aval_hook_ignored"]);
+
+        // Stale plans an install, and the key carries the plan's repository.
+        r.greentopo_hook.state = GreentopoHookState::Stale;
+        let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json["install_aval_hook"]["repo"].is_string(), "{json}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

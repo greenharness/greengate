@@ -170,6 +170,8 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
     let mut binary: Option<String> = None;
     let mut agents_md = false;
     let mut greentopo_hook = false;
+    // The spelling the user typed, so a usage error names the flag they gave.
+    let mut hook_flag = "--greentopo-hook";
     let mut remove_unrecognized = false;
     let mut migrate = false;
     let mut thresholds = greengate_runtime::gate_evidence::Thresholds::default();
@@ -240,6 +242,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
             "--aval-hook" => {
                 eprintln!("{FLEET_BIN}: --aval-hook is deprecated, use --greentopo-hook");
                 greentopo_hook = true;
+                hook_flag = "--aval-hook";
             }
             "--remove-unrecognized" => remove_unrecognized = true,
             "--migrate" => migrate = true,
@@ -252,7 +255,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
     }
     let ignored = [
         (agents_md, "--agents-md"),
-        (greentopo_hook, "--greentopo-hook"),
+        (greentopo_hook, hook_flag),
         (remove_unrecognized, "--remove-unrecognized"),
         (binary.is_some(), "--binary"),
     ];
