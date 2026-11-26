@@ -11,12 +11,12 @@
 
 mod apply;
 mod attest;
-mod aval_hook;
 mod bypasses;
 mod checks;
 mod downgrades;
 mod fix;
 mod gates;
+mod greentopo_hook;
 mod migrate;
 mod progress;
 mod scan;
@@ -66,10 +66,12 @@ const USAGE: &str = concat!(
     greengate_runtime::bin!(),
     ")
   --agents-md    with fix/install: also roll out the AGENTS.md pointer
-  --aval-hook    with fix/install: also re-run `greentopo hook install` where a
+  --greentopo-hook
+                 with fix/install: also re-run `greentopo hook install` where a
                  repository keeps an .adr.yaml and its session hook is behind
-                 the aval on PATH. Reports, never edits, a .gitignore that
-                 would drop the hook's files.
+                 the greentopo on PATH. Reports, never edits, a .gitignore that
+                 would drop the hook's files. `--aval-hook` is its old name,
+                 still accepted, with a warning, until the next major.
   --migrate      with fix: rename the committed greengate 3.x names
                  (amont.conf, amont.pack, the AGENTS.md markers) in each
                  repository that has them, one commit each through its own
@@ -127,10 +129,10 @@ struct Args {
     /// content across up to 96 repositories is a materially bigger action
     /// than the untracked `.git/hooks` shims apply already writes.
     agents_md: bool,
-    /// Re-run `aval hook install` where a corpus's session hook is behind the
-    /// installed aval. Opt-in for the same reason as `agents_md`: tracked
+    /// Re-run `greentopo hook install` where a corpus's session hook is behind the
+    /// installed greentopo. Opt-in for the same reason as `agents_md`: tracked
     /// content, across every repository that decides anything.
-    aval_hook: bool,
+    greentopo_hook: bool,
     /// Also delete `pre-commit-*` / `pre-push-*` files this tool did not write.
     ///
     /// Deliberately NOT called `--remove-stale`, and the naming is the safety
@@ -167,7 +169,9 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
     let mut apply = false;
     let mut binary: Option<String> = None;
     let mut agents_md = false;
-    let mut aval_hook = false;
+    let mut greentopo_hook = false;
+    // The spelling the user typed, so a usage error names the flag they gave.
+    let mut hook_flag = "--greentopo-hook";
     let mut remove_unrecognized = false;
     let mut migrate = false;
     let mut thresholds = greengate_runtime::gate_evidence::Thresholds::default();
@@ -231,7 +235,15 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
             "--stale-pushes" => thresholds.stale_runs = number(&mut it, "--stale-pushes")? as usize,
             "--stale-days" => thresholds.stale_days = number(&mut it, "--stale-days")?,
             "--agents-md" => agents_md = true,
-            "--aval-hook" => aval_hook = true,
+            "--greentopo-hook" => greentopo_hook = true,
+            // The old name (aval became greentopo, ADR-0072). Flag names are
+            // public interface (cli.compat.interface-is-public): accepted with
+            // a warning naming the replacement until the next major removes it.
+            "--aval-hook" => {
+                eprintln!("{FLEET_BIN}: --aval-hook is deprecated, use --greentopo-hook");
+                greentopo_hook = true;
+                hook_flag = "--aval-hook";
+            }
             "--remove-unrecognized" => remove_unrecognized = true,
             "--migrate" => migrate = true,
             "--binary" => {
@@ -243,7 +255,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
     }
     let ignored = [
         (agents_md, "--agents-md"),
-        (aval_hook, "--aval-hook"),
+        (greentopo_hook, hook_flag),
         (remove_unrecognized, "--remove-unrecognized"),
         (binary.is_some(), "--binary"),
     ];
@@ -278,7 +290,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
         apply,
         binary,
         agents_md,
-        aval_hook,
+        greentopo_hook,
         remove_unrecognized,
         migrate,
     })
@@ -672,7 +684,7 @@ fn main() -> ExitCode {
                     &installed,
                     intent,
                     args.agents_md,
-                    args.aval_hook,
+                    args.greentopo_hook,
                     args.remove_unrecognized,
                 )
             })
@@ -900,11 +912,11 @@ fn report_fix(plans: &[fix::FixPlan]) {
         if let Some(w) = &p.write_agents_md {
             println!("  write {}", shown(&w.path));
         }
-        if p.install_aval_hook.is_some() {
+        if p.install_greentopo_hook.is_some() {
             println!(
                 "  run   greentopo hook install  ({} · {})",
-                aval_hook::SCRIPT_PATH,
-                aval_hook::SETTINGS_PATH
+                greentopo_hook::SCRIPT_PATH,
+                greentopo_hook::SETTINGS_PATH
             );
         }
     }
@@ -930,9 +942,9 @@ fn report_fix(plans: &[fix::FixPlan]) {
             .iter()
             .map(|p| p.write.iter().filter(|w| w.changes).count()
                 + usize::from(p.write_agents_md.is_some())
-                // aval writes two files; the count is a plan, the apply
-                // report carries what aval actually said it wrote.
-                + 2 * usize::from(p.install_aval_hook.is_some()))
+                // greentopo writes two files; the count is a plan, the apply
+                // report carries what greentopo actually said it wrote.
+                + 2 * usize::from(p.install_greentopo_hook.is_some()))
             .sum::<usize>()
     );
     println!();
@@ -1082,23 +1094,23 @@ fn report_warnings(plans: &[fix::FixPlan]) {
                         shown(&p.repo)
                     ));
                 }
-                fix::Warning::AvalHookIgnored { paths } => {
+                fix::Warning::GreentopoHookIgnored { paths } => {
                     // The remedy is spelled out because the symptom is
-                    // silent: `aval hook install` succeeds, the hook runs for
+                    // silent: `greentopo hook install` succeeds, the hook runs for
                     // whoever typed it, and the commit never carries it.
                     lines.push(format!(
-                        "  {}  ({}: .gitignore drops the aval session hook — it ships to nobody.\n      \
+                        "  {}  ({}: .gitignore drops the greentopo session hook — it ships to nobody.\n      \
                          Track it: `.claude/*` then `!{}`, `!.claude/hooks/`, `.claude/hooks/*`, `!{}`)",
                         greengate_runtime::ui::sanitize(&paths.join(", ")),
                         shown(&p.repo),
-                        aval_hook::SETTINGS_PATH,
-                        aval_hook::SCRIPT_PATH
+                        greentopo_hook::SETTINGS_PATH,
+                        greentopo_hook::SCRIPT_PATH
                     ));
                 }
-                fix::Warning::AvalHookUnjudged { why } => {
+                fix::Warning::GreentopoHookUnjudged { why } => {
                     lines.push(format!(
-                        "  {}  ({}: aval session hook not judged — {})",
-                        aval_hook::SCRIPT_PATH,
+                        "  {}  ({}: greentopo session hook not judged — {})",
+                        greentopo_hook::SCRIPT_PATH,
                         shown(&p.repo),
                         greengate_runtime::ui::sanitize(why)
                     ));
@@ -1263,6 +1275,19 @@ mod tests {
             panic!("a home without ~/Developer must be refused");
         };
         assert!(err.contains("--root"), "{err}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `--aval-hook`, the flag's name before aval became greentopo, still
+    /// means `--greentopo-hook` until a major release removes it.
+    #[test]
+    fn the_old_hook_flag_still_parses() {
+        let home = std::env::temp_dir().join(format!("fleet-old-flag-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(home.join("Developer"));
+        for flag in ["--greentopo-hook", "--aval-hook"] {
+            let a = parse(&["fix".into(), flag.into()], Some(&home)).expect(flag);
+            assert!(a.greentopo_hook, "{flag}");
+        }
         let _ = std::fs::remove_dir_all(&home);
     }
 

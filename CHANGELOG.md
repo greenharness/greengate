@@ -25,6 +25,13 @@ true place; new API: `Waiter::id`, `queue_in`, `promote_in`. Only tickets
 written by 5.2 or later can be moved: relais and older binaries queue as
 before and are passed like any other job.
 
+`greengate-fleet fix --greentopo-hook` is the new name of `--aval-hook`, and
+the fleet's human output says greentopo where it said aval (programme
+topo-spotter-rename t21). `--aval-hook` still works and warns, until the next
+major removes it. The `--json` keys keep their old names (`aval_hook`,
+`no_aval`, `install_aval_hook`, `aval_hook_ignored`, `aval_hook_unjudged`),
+because renaming a `--json` field is a major change.
+
 ## v5.1.1
 
 A hook check no longer defers to CI because its line stalled (ADR-0022,

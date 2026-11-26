@@ -152,10 +152,13 @@ pub struct Repo {
     /// Whether `AGENTS.md` carries an up-to-date pointer at this check's own
     /// generated block, and if not, why.
     pub agents_md: AgentsMdState,
-    /// Whether aval's session hook is current here, for a repository that
+    /// Whether greentopo's session hook is current here, for a repository that
     /// keeps an `.adr.yaml` — and what git would do with its files. `NoCorpus`
     /// for the many repositories that decide nothing, without a spawn.
-    pub aval_hook: crate::aval_hook::AvalHook,
+    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
+    // renaming it is a major, after a minor that warns.
+    #[serde(rename = "aval_hook")]
+    pub greentopo_hook: crate::greentopo_hook::GreentopoHook,
     /// Where this repo's hooks resolve to, and whether that is inside it.
     pub hooks_dir: HooksDir,
     /// Set when another repository already seen in this scan shares this one's
@@ -892,7 +895,7 @@ fn inspect(
             _ => Some(false),
         },
         agents_md: agents_md_state(repo),
-        aval_hook: crate::aval_hook::state(repo, crate::aval_hook::PROGRAM),
+        greentopo_hook: crate::greentopo_hook::state(repo, crate::greentopo_hook::PROGRAM),
         hooks_dir,
         shares_hooks_with,
         attest: crate::attest::read(repo),

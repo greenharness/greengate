@@ -1,20 +1,20 @@
-//! Whether each decision-bearing repository's `aval` session hook is current.
+//! Whether each decision-bearing repository's `greentopo` session hook is current.
 //!
 //! `greentopo hook install` writes two tracked files — `.claude/hooks/greentopo-heads.sh`
 //! and a `SessionStart` entry in `.claude/settings.json` — so that an agent
 //! session opens with the repository's decision heads and adopted rules in
-//! front of it. The script's bytes are its version: every aval release that
+//! front of it. The script's bytes are its version: every greentopo release that
 //! changes it leaves every repository behind until somebody re-runs the
 //! command there, which is the same silent drift the `AGENTS.md` pointer had
 //! before `--agents-md` existed, spread across every repository that keeps an
 //! `.adr.yaml`.
 //!
-//! This module never renders the hook. The template is aval's, its notion of
-//! "current" is aval's, and a copy here would be a second way to be stale —
-//! so both questions are put to the `aval` binary and only its exit code is
+//! This module never renders the hook. The template is greentopo's, its notion of
+//! "current" is greentopo's, and a copy here would be a second way to be stale —
+//! so both questions are put to the `greentopo` binary and only its exit code is
 //! read (`0` current, `1` out of date), which is the contract its `--check`
 //! documents. A repository with no `.adr.yaml` is not asked at all: there is
-//! no corpus for the hook to print, and `aval hook install --check` would
+//! no corpus for the hook to print, and `greentopo hook install --check` would
 //! report it as stale.
 //!
 //! What git would do with the files is reported alongside, from `git
@@ -30,7 +30,7 @@ use std::process::Command;
 
 use serde::Serialize;
 
-/// The registry aval reads. Its presence is what makes a repository a corpus.
+/// The registry greentopo reads. Its presence is what makes a repository a corpus.
 pub const REGISTRY: &str = ".adr.yaml";
 /// The program that judges and writes the session hook. aval became
 /// greentopo (ADR-0072); the hook it writes is `greentopo-heads.sh`.
@@ -41,18 +41,21 @@ pub const SETTINGS_PATH: &str = ".claude/settings.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum AvalHookState {
+pub enum GreentopoHookState {
     /// No `.adr.yaml` here. Not applicable, and nothing was spawned to find out.
     NoCorpus,
-    /// A corpus, and no `aval` on `PATH` to judge its hook with. Absence of
+    /// A corpus, and no `greentopo` on `PATH` to judge its hook with. Absence of
     /// evidence: reported, never read as "current".
-    NoAval,
-    /// `aval hook install --check` exited 0.
+    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
+    // renaming it is a major, after a minor that warns.
+    #[serde(rename = "no_aval")]
+    NoGreentopo,
+    /// `greentopo hook install --check` exited 0.
     Current,
-    /// `aval hook install --check` exited 1: at least one of the two files
+    /// `greentopo hook install --check` exited 1: at least one of the two files
     /// would be written.
     Stale,
-    /// aval answered with something other than 0 or 1 — a usage error from a
+    /// greentopo answered with something other than 0 or 1 — a usage error from a
     /// version that spells the subcommand differently, a corpus it will not
     /// load. Carried verbatim rather than mapped onto a state it did not say.
     Unknown { why: String },
@@ -60,42 +63,42 @@ pub enum AvalHookState {
 
 /// One repository's answer, plus what git would do with the files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AvalHook {
-    pub state: AvalHookState,
+pub struct GreentopoHook {
+    pub state: GreentopoHookState,
     /// The hook's paths that `git check-ignore` matched. Non-empty means a
     /// current hook still ships to nobody. Always empty for `NoCorpus`.
     pub ignored: Vec<String>,
 }
 
-impl Default for AvalHook {
+impl Default for GreentopoHook {
     fn default() -> Self {
-        AvalHook {
-            state: AvalHookState::NoCorpus,
+        GreentopoHook {
+            state: GreentopoHookState::NoCorpus,
             ignored: Vec::new(),
         }
     }
 }
 
-/// Ask aval about `repo`. `aval` is the binary to run — `"aval"` in
+/// Ask greentopo about `repo`. `greentopo` is the binary to run — `"greentopo"` in
 /// production, a fake under test — and nothing is spawned for a repository
 /// without a registry.
-pub fn state(repo: &Path, aval: &str) -> AvalHook {
+pub fn state(repo: &Path, greentopo: &str) -> GreentopoHook {
     if !repo.join(REGISTRY).is_file() {
-        return AvalHook::default();
+        return GreentopoHook::default();
     }
-    let state = match Command::new(aval)
+    let state = match Command::new(greentopo)
         .args(["hook", "install", "--check"])
         .current_dir(repo)
         .output()
     {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => AvalHookState::NoAval,
-        Err(e) => AvalHookState::Unknown { why: e.to_string() },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => GreentopoHookState::NoGreentopo,
+        Err(e) => GreentopoHookState::Unknown { why: e.to_string() },
         Ok(out) => match out.status.code() {
-            Some(0) => AvalHookState::Current,
-            Some(1) => AvalHookState::Stale,
-            code => AvalHookState::Unknown {
+            Some(0) => GreentopoHookState::Current,
+            Some(1) => GreentopoHookState::Stale,
+            code => GreentopoHookState::Unknown {
                 why: format!(
-                    "aval hook install --check exited {}: {}",
+                    "greentopo hook install --check exited {}: {}",
                     code.map_or("by signal".to_string(), |c| c.to_string()),
                     first_line(&out.stderr).unwrap_or_else(
                         || first_line(&out.stdout).unwrap_or_else(|| "no output".to_string())
@@ -104,23 +107,23 @@ pub fn state(repo: &Path, aval: &str) -> AvalHook {
             },
         },
     };
-    AvalHook {
+    GreentopoHook {
         state,
         ignored: ignored(repo),
     }
 }
 
-/// Run `aval hook install` in `repo`. Returns how many files aval reports
+/// Run `greentopo hook install` in `repo`. Returns how many files greentopo reports
 /// having written, from the `wrote` lines of its own report.
-pub fn install(repo: &Path, aval: &str) -> Result<usize, String> {
-    let out = Command::new(aval)
+pub fn install(repo: &Path, greentopo: &str) -> Result<usize, String> {
+    let out = Command::new(greentopo)
         .args(["hook", "install"])
         .current_dir(repo)
         .output()
-        .map_err(|e| format!("{aval}: {e}"))?;
+        .map_err(|e| format!("{greentopo}: {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "aval hook install exited {}: {}",
+            "greentopo hook install exited {}: {}",
             out.status
                 .code()
                 .map_or("by signal".to_string(), |c| c.to_string()),
@@ -168,21 +171,24 @@ mod tests {
     use std::path::PathBuf;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("fleet-aval-hook-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!(
+            "fleet-greentopo-hook-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
-    /// A stand-in `aval` whose `--check` exits `check_rc` and whose `install`
+    /// A stand-in `greentopo` whose `--check` exits `check_rc` and whose `install`
     /// prints `wrote` lines. Records what it was asked in `<dir>/calls`.
     /// A `/bin/sh` script, so unix-only — the same `cfg` every executable
     /// fixture in this crate carries; the two tests below that need no fake
     /// binary run everywhere.
     #[cfg(unix)]
-    fn fake_aval(d: &Path, check_rc: i32) -> String {
+    fn fake_greentopo(d: &Path, check_rc: i32) -> String {
         use std::os::unix::fs::PermissionsExt;
-        let p = d.join("aval");
+        let p = d.join("greentopo");
         std::fs::write(
             &p,
             format!(
@@ -206,7 +212,7 @@ mod tests {
         // file open for writing (rust-lang/rust#114554). CI hit it once in
         // ~160 parallel tests. Probe until the window closes; the probe's own
         // `--probe` argument exits before the script records the call, so the
-        // tests that assert on what aval was asked see nothing of it.
+        // tests that assert on what greentopo was asked see nothing of it.
         for _ in 0..200 {
             match Command::new(&p).arg("--probe").output() {
                 Err(e) if e.raw_os_error() == Some(26) => {
@@ -237,24 +243,27 @@ mod tests {
     #[test]
     fn a_repo_without_a_registry_is_not_asked() {
         let d = dir("no-corpus");
-        let aval = fake_aval(&d, 1);
+        let greentopo = fake_greentopo(&d, 1);
         let repo = d.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        assert_eq!(state(&repo, &aval), AvalHook::default());
+        assert_eq!(state(&repo, &greentopo), GreentopoHook::default());
         assert_eq!(calls(&d), "", "no spawn for a repository with no corpus");
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[cfg(unix)]
     #[test]
-    fn avals_exit_code_is_the_state() {
-        for (rc, want) in [(0, AvalHookState::Current), (1, AvalHookState::Stale)] {
+    fn greentopos_exit_code_is_the_state() {
+        for (rc, want) in [
+            (0, GreentopoHookState::Current),
+            (1, GreentopoHookState::Stale),
+        ] {
             let d = dir(&format!("rc{rc}"));
-            let aval = fake_aval(&d, rc);
+            let greentopo = fake_greentopo(&d, rc);
             let repo = d.join("repo");
             std::fs::create_dir_all(&repo).unwrap();
             std::fs::write(repo.join(REGISTRY), "dir: docs/adr\n").unwrap();
-            let got = state(&repo, &aval);
+            let got = state(&repo, &greentopo);
             assert_eq!(got.state, want);
             assert!(calls(&d).contains("hook install --check"));
             let _ = std::fs::remove_dir_all(&d);
@@ -263,20 +272,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_exit_code_aval_did_not_promise_is_unknown_not_a_state() {
+    fn an_exit_code_greentopo_did_not_promise_is_unknown_not_a_state() {
         let d = dir("rc2");
-        let aval = fake_aval(&d, 2);
+        let greentopo = fake_greentopo(&d, 2);
         let repo = d.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join(REGISTRY), "dir: docs/adr\n").unwrap();
-        let got = state(&repo, &aval);
+        let got = state(&repo, &greentopo);
         assert!(
-            matches!(got.state, AvalHookState::Unknown { ref why } if why.contains("exited 2")),
+            matches!(got.state, GreentopoHookState::Unknown { ref why } if why.contains("exited 2")),
             "{got:?}"
         );
         assert_ne!(
             got.state,
-            AvalHookState::Stale,
+            GreentopoHookState::Stale,
             "unknown must never plan an install"
         );
         let _ = std::fs::remove_dir_all(&d);
@@ -284,12 +293,15 @@ mod tests {
 
     #[test]
     fn a_missing_binary_is_reported_not_read_as_current() {
-        let d = dir("no-aval");
+        let d = dir("no-greentopo");
         let repo = d.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join(REGISTRY), "dir: docs/adr\n").unwrap();
-        let got = state(&repo, &d.join("definitely-not-aval").display().to_string());
-        assert_eq!(got.state, AvalHookState::NoAval);
+        let got = state(
+            &repo,
+            &d.join("definitely-not-greentopo").display().to_string(),
+        );
+        assert_eq!(got.state, GreentopoHookState::NoGreentopo);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -297,14 +309,14 @@ mod tests {
     #[test]
     fn a_gitignored_hook_is_named() {
         let d = dir("ignored");
-        let aval = fake_aval(&d, 0);
+        let greentopo = fake_greentopo(&d, 0);
         let repo = d.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git_repo(&repo);
         std::fs::write(repo.join(REGISTRY), "dir: docs/adr\n").unwrap();
         std::fs::write(repo.join(".gitignore"), ".claude/\n").unwrap();
-        let got = state(&repo, &aval);
-        assert_eq!(got.state, AvalHookState::Current);
+        let got = state(&repo, &greentopo);
+        assert_eq!(got.state, GreentopoHookState::Current);
         assert_eq!(
             got.ignored,
             vec![SCRIPT_PATH.to_string(), SETTINGS_PATH.to_string()]
@@ -316,24 +328,24 @@ mod tests {
             ".claude/*\n!.claude/settings.json\n!.claude/hooks/\n.claude/hooks/*\n!.claude/hooks/greentopo-heads.sh\n",
         )
         .unwrap();
-        assert!(state(&repo, &aval).ignored.is_empty());
+        assert!(state(&repo, &greentopo).ignored.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[cfg(unix)]
     #[test]
-    fn install_counts_what_aval_says_it_wrote() {
+    fn install_counts_what_greentopo_says_it_wrote() {
         let d = dir("install");
-        let aval = fake_aval(&d, 1);
+        let greentopo = fake_greentopo(&d, 1);
         let repo = d.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        assert_eq!(install(&repo, &aval), Ok(2));
+        assert_eq!(install(&repo, &greentopo), Ok(2));
         assert!(calls(&d).lines().any(|l| l == "hook install"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn a_failed_install_carries_avals_words() {
+    fn a_failed_install_carries_greentopos_words() {
         let d = dir("install-fail");
         let repo = d.join("repo");
         std::fs::create_dir_all(&repo).unwrap();

@@ -231,37 +231,39 @@ pub fn apply(plan: &FixPlan) -> Outcome {
         }
     }
 
-    if let Some(h) = &plan.install_aval_hook {
-        // Re-ask aval at the moment of action, same rule as `AGENTS.md`: the
+    if let Some(h) = &plan.install_greentopo_hook {
+        // Re-ask greentopo at the moment of action, same rule as `AGENTS.md`: the
         // scan may be stale, and a repository somebody re-installed in the
         // meantime must not be written a third time. The state is read from
         // the same binary the plan's scan used — `greentopo` on PATH — because
-        // "current" is aval's judgment, not this crate's. Only `Stale`
+        // "current" is greentopo's judgment, not this crate's. Only `Stale`
         // proceeds: `Current` is nothing to do, and every other answer is
         // what the plan would have warned about instead of planning.
-        match crate::aval_hook::state(&h.repo, crate::aval_hook::PROGRAM).state {
-            crate::aval_hook::AvalHookState::Stale => {
-                match crate::aval_hook::install(&h.repo, crate::aval_hook::PROGRAM) {
+        match crate::greentopo_hook::state(&h.repo, crate::greentopo_hook::PROGRAM).state {
+            crate::greentopo_hook::GreentopoHookState::Stale => {
+                match crate::greentopo_hook::install(&h.repo, crate::greentopo_hook::PROGRAM) {
                     Ok(n) => written += n,
                     Err(e) => {
                         return Outcome::Failed {
                             error: e,
                             at: h
                                 .repo
-                                .join(crate::aval_hook::SCRIPT_PATH)
+                                .join(crate::greentopo_hook::SCRIPT_PATH)
                                 .display()
                                 .to_string(),
                         }
                     }
                 }
             }
-            crate::aval_hook::AvalHookState::Current => {}
+            crate::greentopo_hook::GreentopoHookState::Current => {}
             other => {
                 return Outcome::Failed {
-                    error: format!("aval session hook: state changed since the plan — {other:?}"),
+                    error: format!(
+                        "greentopo session hook: state changed since the plan — {other:?}"
+                    ),
                     at: h
                         .repo
-                        .join(crate::aval_hook::SCRIPT_PATH)
+                        .join(crate::greentopo_hook::SCRIPT_PATH)
                         .display()
                         .to_string(),
                 }
@@ -694,7 +696,7 @@ mod tests {
                 changes: true,
             }],
             write_agents_md: None,
-            install_aval_hook: None,
+            install_greentopo_hook: None,
         };
 
         assert_eq!(

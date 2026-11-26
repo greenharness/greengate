@@ -1660,7 +1660,7 @@ mod tests {
     /// cannot happen.
     #[test]
     fn a_push_stage_in_a_snapshot_holds_no_connection() {
-        let push = ["pre-push-adr-lint-cli-probe"];
+        let push = ["pre-push-greenspotter-cli-probe"];
         assert!(holds_a_push_connection(&push, false));
         assert!(!holds_a_push_connection(&push, true));
         assert!(!holds_a_push_connection(&["pre-commit-clippy"], false));

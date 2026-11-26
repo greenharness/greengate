@@ -2766,14 +2766,15 @@ mod tests {
     /// something only where there is a staged change to judge.
     #[test]
     fn docs_skip_is_a_marker_and_refused_on_pre_push() {
-        let Line::Usable(d) = one("pre-commit  adr  *+.adr.yaml  block  docs-skip aval check\n")
+        let Line::Usable(d) =
+            one("pre-commit  adr  *+.adr.yaml  block  docs-skip greentopo check\n")
         else {
             panic!("docs-skip should parse on pre-commit");
         };
         assert!(d.docs_skip);
-        assert_eq!(d.program, "aval");
+        assert_eq!(d.program, "greentopo");
         assert_eq!(
-            why(&one("pre-push  adr  *  block  docs-skip aval check\n")),
+            why(&one("pre-push  adr  *  block  docs-skip greentopo check\n")),
             ParseError::DocsSkipOnPrePush
         );
     }
