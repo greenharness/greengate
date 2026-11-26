@@ -23,8 +23,8 @@ it is off?
   greengate `slot promote` command.
 - The plan's deliberate low review findings, which can ride the same change:
   no hint after a `no-room` refusal, the session variable list copied by hand
-  into a hint, no test for the `--` operand, the hints and the 1 s lock-wait
-  notice, the I/O error's cause printed twice, a bad promote still creating
+  into a hint, no test for the `--` operand, the hints, the 1 s lock-wait
+  notice or the 10 s lock-busy exit 75, the I/O error's cause printed twice, a bad promote still creating
   the slot directory.
 
 ## Answer looks like

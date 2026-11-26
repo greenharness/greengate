@@ -15,7 +15,8 @@ release #531, Release run 45889748609 success) was installed on this machine
 at 2026-11-26 21:21 CET (brew; `greengate --version` printed
 `greengate 5.2.0`). Over the seven days that follow, how many `promoted` lines
 does each session write, how many `promote_refused` lines by `limit`, and is
-p95 `waited_ms` still within t14's baseline? Does t06's limit (3 moves per
+p95 `waited_ms` within 1.5× of t14's baseline (the plan's rollback trigger)?
+Zero moves in 7 days reads as agents not finding the command. Does t06's limit (3 moves per
 session per day, never past a 20-minute waiter) hold, or does it need a new
 value?
 
@@ -29,4 +30,6 @@ value?
 ## Answer looks like
 
 Counts by session and by refusal limit, the p95 beside t14's, and a verdict:
-the limits stay, or a named new value with its reason.
+the limits stay, or a named new value with its reason. Above 1.5× of t14's
+p95, promotion is turned off: through [t23](t23-promote-off-switch.md)'s switch
+when it has shipped, else by reinstalling greengate 5.1.1.

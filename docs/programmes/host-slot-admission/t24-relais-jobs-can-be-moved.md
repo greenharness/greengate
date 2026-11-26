@@ -17,7 +17,8 @@ agent cannot move its own relais job under t06's own-session rule. Two
 questions: does relais bump to crate 5.2 so its tickets carry an owner, and
 whose session does a relais job belong to (the run's, or the Claude session
 that dispatched it)? The answer also decides how a move shows in relais's
-pane.
+pane. It waits for [t12](t12-build-relais-setup-lease.md), which changes the
+same relais slot code (`verify/heavy.rs`, `verify/mod.rs`).
 
 ## Look at
 
