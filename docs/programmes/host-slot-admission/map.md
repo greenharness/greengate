@@ -110,17 +110,16 @@ Next, in order:
    12 h (103 deferrals from 2026-11-21 18:00 over 38.9 h), 4.5× (commit
    c5acb1f0 on the unmerged branch `docs/hsa-t17-count`, owned by another
    session). t17's verdict and the rollback are pending there; do not count
-   again here. t08 waits on t17.
+   again here. t08 waits on t17. (Superseded by items 5 and 6.)
 
    greengate 4.13 has no `--now`, and relais 0.83 admits by crate 5's rule, so
    a rollback has three parts: greengate back to 4.13 (t17's recipe),
    greenbelay back to 6.14.0 or forward without the `--now` advice, and
    relais back to 0.82.0 or a stated decision to keep it on crate 5. Which
    parts, and in what order, is t17's decision.
-5. ~~t18~~ closed 2026-11-26: greengate 5.1.1 (hook waits have no stall end; #526, release #527, Release run 45847436802 success) installed 2026-11-26 16:24 CET; t19 is due from 2026-11-27 16:24. t11 closed with it: all its code is shipped and its measure is t19. Next: [t19](t19-count-after-5-1-1-install.md), due 24 h after the 5.1.1 install, the first half of t08; [t20](t20-queued-heartbeat-names-ceiling.md) (low).
-5b. ~~t17~~ closed 2026-11-25: the 2× trigger fired, and the person chose a narrow fix, with no revert of greengate, relais or greenbelay. Next is [t18](t18-plan-hook-stall-narrow-fix.md): plan greengate 5.0.1, with no stalled-line deferral on the hook path. t08 counts from the 5.0.1 install.
-6. Then t12, t13, t15, and [t16](t16-coordinator-queue-moving-line.md) once
-   relais ships.
+5. ~~t17~~ closed 2026-11-25: the 2× trigger fired, and the person chose a narrow fix, with no revert of greengate, relais or greenbelay. Next was [t18](t18-plan-hook-stall-narrow-fix.md), with no stalled-line deferral on the hook path. t08 counts from the 5.1.1 install (t19).
+6. ~~t18~~ closed 2026-11-26: greengate 5.1.1 (hook waits have no stall end; #526, release #527, Release run 45847436802 success) installed 2026-11-26 16:24 CET; t19 is due from 2026-11-27 16:24. t11 closed with it: all its code is shipped and its measure is t19. Next: [t19](t19-count-after-5-1-1-install.md), the first half of t08; [t20](t20-queued-heartbeat-names-ceiling.md) (low).
+7. In flight 2026-11-26 (driver session f3dfb52d): t12 (relais, its release is v0.90.0 after another session's v0.89.0) and t13. Ready: [t16](t16-coordinator-queue-moving-line.md), unblocked by t11 (relais v0.83.0 shipped). t15 starts after t12, as both change the held marker relais exports.
 
 The plan's "Full reviews" sidecar lists the findings carried into Phases 4–6.
 
