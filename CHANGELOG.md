@@ -8,7 +8,27 @@ missing here.
 
 ## Unreleased
 
-`greengate-fleet fix --greentopo-hook` is the new name of `--aval-hook`, and the fleet's human output says greentopo where it said aval (programme topo-spotter-rename t21). `--aval-hook` still works and warns, until the next major removes it. The `--json` keys keep their old names (`aval_hook`, `no_aval`, `install_aval_hook`, `aval_hook_ignored`, `aval_hook_unjudged`), because renaming a `--json` field is a major change.
+An agent session can move one of its own waiting jobs ahead in the host slot
+queue: `greengate slot promote <id> --reason <text> [--to N]` (ADR-0022,
+amended; programme host-slot-admission t13, under the person's rules in t06).
+A move goes up to the head, at most 3 times per session in a rolling 24 h,
+never past a job that has waited 20 minutes or more, and never moves another
+session's job. Each is journalled in `waits.jsonl` as a `promoted` line with
+its reason, and a refusal names its limit (a `promote_refused` line).
+`greengate slots` now lists the queue (position, id, wait, session, command)
+and `--json` gains `queue`; `slot run` prints its id and the promote command
+when it starts to wait. In `greenharness-slots`, a ticket now holds who waits,
+and a waiter finds its ticket by inode, so a renamed ticket is read at its
+true place; new API: `Waiter::id`, `queue_in`, `promote_in`. Only tickets
+written by 5.2 or later can be moved: relais and older binaries queue as
+before and are passed like any other job.
+
+`greengate-fleet fix --greentopo-hook` is the new name of `--aval-hook`, and
+the fleet's human output says greentopo where it said aval (programme
+topo-spotter-rename t21). `--aval-hook` still works and warns, until the next
+major removes it. The `--json` keys keep their old names (`aval_hook`,
+`no_aval`, `install_aval_hook`, `aval_hook_ignored`, `aval_hook_unjudged`),
+because renaming a `--json` field is a major change.
 
 ## v5.1.1
 

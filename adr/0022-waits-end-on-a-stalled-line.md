@@ -4,7 +4,7 @@ status: accepted
 decisions:
   - key: hooks.host-concurrency
     scope: hook-binary
-    choice: "Every heavy job on the host (greengate's gates, relais's verification commands, and any command run through `greengate slot run`) takes host slots through one std-only crate, `greenharness-slots`. The crate counts physical cores (macOS `hw.physicalcpu`, Linux sysfs `core_cpus_list`, then `/proc/cpuinfo`), never more than the logical count, and that one count sizes the cap, the width and the load test. It also resolves the two host keys for every client, `greengate.hostCores` (1..=1024) and `greengate.hostSlots` (0..=64), from `GREENGATE_HOST_CORES` / `GREENGATE_HOST_SLOTS`, then the last `--global` or `--system` row, then the detected default, returning warnings for the caller to print. Automatic sizing (`greengate.hostSlots` unset): at most max(1, cores/2) slots; a further slot is taken only while the 1-minute load is below `cores + 4 × Σjobs(holders)`, Σjobs counting each lease's `jobs` once and `parallelism(1, cores, cap)` for a held slot with no record or a record naming none; when no slot is held, the first waiter is always admitted, whatever its weight; at most one new holder every 60 s. Waiters are served in ticket order, under one admission lock taken without blocking inside each caller's own deadline. A wait ends at its caller's hard ceiling, when its line has stalled, or when a poll fails after the queue was joined; nothing runs outside the queue because a wait ended, and the journal line says which in `end`. The stall rule (no admission anywhere and no change of the waiter's place for 300 s, the waiter's own marks on a monotonic clock; `GREENHARNESS_SLOT_STALL_S` is a test seam) applies to `greengate slot run` and relais, whose callers are waiting at a command. A hook check has no stall window (amended 2026-11-26, greengate 5.1.1): it waits in line to its ceiling, `greengate.timeout` (3600 s when 0), `greengate.warnSlotWait` for a heavy `warn` check of land's pre-stage, `slotWait` under `onBusy defer`, and defers there Skipping the queue is a choice made up front and journalled `now`: `greengate slot run --now`, and `GREENGATE_ON_BUSY=now` for one run's hook checks. `greengate slot run` exits 75 at the end of a wait, its stall window never above `--max-wait`; `--on-timeout run` is refused. A holder records who it is in `holders/`. Only the process that took a slot holds it: slot descriptors are close-on-exec. `greengate.hostSlots N` fixes the count with no load test, and `0` turns slots off"
+    choice: "Every heavy job on the host (greengate's gates, relais's verification commands, and any command run through `greengate slot run`) takes host slots through one std-only crate, `greenharness-slots`. The crate counts physical cores (macOS `hw.physicalcpu`, Linux sysfs `core_cpus_list`, then `/proc/cpuinfo`), never more than the logical count, and that one count sizes the cap, the width and the load test. It also resolves the two host keys for every client, `greengate.hostCores` (1..=1024) and `greengate.hostSlots` (0..=64), from `GREENGATE_HOST_CORES` / `GREENGATE_HOST_SLOTS`, then the last `--global` or `--system` row, then the detected default, returning warnings for the caller to print. Automatic sizing (`greengate.hostSlots` unset): at most max(1, cores/2) slots; a further slot is taken only while the 1-minute load is below `cores + 4 × Σjobs(holders)`, Σjobs counting each lease's `jobs` once and `parallelism(1, cores, cap)` for a held slot with no record or a record naming none; when no slot is held, the first waiter is always admitted, whatever its weight; at most one new holder every 60 s. Waiters are served in ticket order, under one admission lock taken without blocking inside each caller's own deadline. An agent session may move one of its own waiting jobs ahead, up to the head, with `greengate slot promote <id> --reason <text>` (amended 2026-11-26, greengate 5.2.0): the ticket is renamed to sort earlier under the admission lock after a `promoted` line with the reason is journalled; at most 3 moves per session in a rolling 24 h, never past a job that has waited 20 minutes or more, never another session's job, and only a ticket that records its waiter (crate 5.2 or later); a refusal names its limit. A wait ends at its caller's hard ceiling, when its line has stalled, or when a poll fails after the queue was joined; nothing runs outside the queue because a wait ended, and the journal line says which in `end`. The stall rule (no admission anywhere and no change of the waiter's place for 300 s, the waiter's own marks on a monotonic clock; `GREENHARNESS_SLOT_STALL_S` is a test seam) applies to `greengate slot run` and relais, whose callers are waiting at a command. A hook check has no stall window (amended 2026-11-26, greengate 5.1.1): it waits in line to its ceiling, `greengate.timeout` (3600 s when 0), `greengate.warnSlotWait` for a heavy `warn` check of land's pre-stage, `slotWait` under `onBusy defer`, and defers there Skipping the queue is a choice made up front and journalled `now`: `greengate slot run --now`, and `GREENGATE_ON_BUSY=now` for one run's hook checks. `greengate slot run` exits 75 at the end of a wait, its stall window never above `--max-wait`; `--on-timeout run` is refused. A holder records who it is in `holders/`. Only the process that took a slot holds it: slot descriptors are close-on-exec. `greengate.hostSlots N` fixes the count with no load test, and `0` turns slots off"
     replaces: [ADR-0021]
     reason: "One holder at `jobs 2` drove the load to 12.3 by itself on a 6-core host, so a load test against the cores alone kept slots 2 and 3 shut while it ran (2026-11-22: 1 of 3 held, 5 waiting); and a budget that counted all of a wait's time in line timed out jobs whose line was moving, after which 38 checks ran unqueued in a week, some at load 400 to 563"
   - key: hooks.busy-policy
@@ -90,6 +90,29 @@ Consequences: a hook check beside a stuck holder can now wait up to
 `greengate.timeout`, so the roll-up's first command is labelled `wait for a
 slot, up to greengate.timeout:` and the ceiling cause names the setting. The
 `now` skip stays offered. Rollback: reinstall 5.1.0 and note it here.
+
+## Amendment 2026-11-26: a session may move its own job ahead
+
+Plan: [`docs/plans/2026-11-26-agent-moves-own-job-ahead.md`](../docs/plans/2026-11-26-agent-moves-own-job-ahead.md).
+Programme `docs/programmes/host-slot-admission`, tickets t05 (mechanism), t06
+(rules, the person's decision) and t13 (build). It takes effect with
+greengate 5.2.0.
+
+The person asked for an agent to be able to reorder the queue. "Served in
+ticket order" stays: a move changes the order by renaming a ticket within
+`queue/` to an earlier name, under the admission lock, and every reader of
+the queue already reads it under that lock. A waiter now finds its ticket by
+the inode of the file it holds, so it reads its true place after a rename.
+The rules are t06's: own session only, up to the head, a reason journalled as
+a `promoted` line, 3 moves per session per rolling 24 h, and an age floor of
+20 minutes no move passes, so a long waiter is never starved. relais's
+coordinator queue is not reordered; its host-slot waits are, once it links
+crate 5.2.
+
+Consequences: `waits.jsonl` gains `promoted` and `promote_refused` lines
+(no `waited_ms`), and a rotation must keep 24 h of `promoted` lines. A
+passed waiter's stall clock counts its move back as a change of place.
+Rollback: reinstall 5.1.1, and note it here.
 
 ## Consequences
 

@@ -20,7 +20,7 @@ why.
 | `slot-0` … `slot-{cap-1}` | the slots. A slot is held while a process holds `flock(LOCK_EX)` on its file. |
 | `admission` | the one admission lock. Every admission decision is made under it, taken with `LOCK_NB` and retried inside the caller's own deadline, so a stopped holder of it never holds a hook past its own deadline. |
 | `admitted-at` | the time of the last admission, in ms since the epoch, for the ramp. |
-| `queue/<nanos>-<pid>-<n>` | a waiter's ticket, flocked for as long as it waits. It is created hidden (`.new-…`), locked, then renamed into place, so a visible ticket is never unlocked. A visible ticket whose lock is free belongs to a waiter that died, and is removed. |
+| `queue/<nanos>-<pid>-<n>` | a waiter's ticket, flocked for as long as it waits. It is created hidden (`.new-…`), locked, then renamed into place, so a visible ticket is never unlocked. A visible ticket whose lock is free belongs to a waiter that died, and is removed. From 5.2 it holds the waiter's holder record plus `joined_ms`, written before it is visible; an empty ticket is an older client's. A waiter finds its ticket by the (dev, inode) of the file it holds, not its name, because a [promotion](#moving-a-job-ahead) renames it. `<pid>-<n>` is the job's id. |
 | `holders/slot-N.who` | who holds slot N, as a JSON object (`lease`, `pid`, `tool`, `repo`, `command`, `session`, `started_ms`, and `jobs` when the writer knows it). `lease` (`<pid>-<n>`, from 4.13) is the same in every record of one lease and survives a rename, so a reader counts a lease once. It is written after the slot is won, through a hidden temp file and a rename and removed before it is released. A reader trusts it only while `pid` is alive. A hidden `.slot-N.who.<pid>.tmp` beside it is a rename in flight; when a slot is granted, those whose `pid` is dead are removed, as dead queue tickets are. So is a `slot-N.who` whose slot's flock is free (its holder was killed, or exited through `process::exit` on a signal): the free flock, not the pid, proves the holder is gone, so a reused pid does not make it count again once a slot has been granted since. It lives in a subdirectory so an old client counting `slot-*` files never mistakes it for a slot. |
 | `waits.jsonl` | one line per acquisition and, from 4.13, one per released lease; see [The journal](#the-journal). |
 
@@ -61,6 +61,13 @@ is an interrupted holder, not a lost write. A release line is appended after
 the slot is freed, so a successor's line can come before it: order by
 `at_ms`, not by line.
 
+**Promotion lines**, from 5.2, one per [move](#moving-a-job-ahead): `at_ms`,
+`tool`, `pid`, `session`, `"outcome":"promoted"`, `id`, `from`, `to`,
+`passed`, `command`, `reason`. A refused move writes one
+`"outcome":"promote_refused"` line with `id`, `session` and `limit`. Neither
+has `waited_ms`. A rotation of the journal must keep the last 24 h of
+`promoted` lines: the move budget is counted from them.
+
 Wait lines only (a release line has no `waited_ms`; `-R` with `fromjson?`
 skips a half-appended last line):
 
@@ -81,7 +88,8 @@ jq -sR '[split("\n")[] | fromjson? ] | sort_by(.at_ms) as $rows
 
 ## Admission
 
-Only the oldest live ticket may take slots. It takes `weight` slots, all or
+Only the oldest live ticket (the first by name, which a
+[move](#moving-a-job-ahead) can change) may take slots. It takes `weight` slots, all or
 none, under the admission lock, when:
 
 - **no slot is held:** the floor. The first waiter on an empty host is
@@ -107,6 +115,43 @@ A waiter that is not admitted says why, after whom it waits behind:
 `(load 31.0 >= 14 (6 cores + 4×2 holder jobs))` or
 `(one new holder per minute)`. The first such line is followed, once, by
 `see: greengate slots`.
+
+## Moving a job ahead
+
+An agent session can move one of its own waiting jobs ahead, up to the head
+(programme host-slot-admission t06, the person's decision; ADR-0022):
+
+```sh
+greengate slot promote <id> --reason <text> [--to N]
+```
+
+`<id>` is the job's `<pid>-<n>`, as `greengate slots` lists it and as
+`slot run` prints it when it starts to wait. `--to` is the place to move to,
+0 (the head) by default. Under the admission lock, the move is refused, by
+name, when:
+
+| Limit | When |
+|---|---|
+| `no-reason` | the reason is empty |
+| `no-session` | the caller has no session id (`CLAUDE_CODE_SESSION_ID`, `RELAIS_SESSION_ID`, `CLAUDE_SESSION_ID`) |
+| `not-queued`, `ambiguous` | no live ticket has the id, or two do (waiters in two pid namespaces) |
+| `old-client` | the ticket is empty: an older client's, which finds itself by path |
+| `own-session` | the job belongs to another session, the person's included |
+| `already-ahead` | the job is at or before the place asked for |
+| `budget` | the session made 3 moves in the last 24 h (rolling); the refusal says when the next frees |
+| `age-floor` | the move would pass a job that has waited 20 min or more; the refusal names it and the furthest `--to` that passes none |
+| `no-room` | no name sorts between the place's neighbours |
+
+Otherwise the `promoted` line is appended first, then the ticket is renamed
+to sort just before the job at `--to` (1 s before the head, or the midpoint
+between two neighbours), keeping its id. A failed append moves nothing; a
+failed rename leaves a counted move that did not happen. Passed waiters read
+a larger `Behind` and count it as a change of place for the stall rule.
+
+Exit status: 0 moved (stderr: `moved <id> from 3 to 0, past 3 jobs; 2 of 3
+moves left in 24 h`), 1 refused or slots off, 2 a usage error, 74 an I/O
+failure (queue or journal), 75 the admission lock stayed held for 10 s.
+Every message goes to stderr; the queue view (`slots`) is the stdout a script reads.
 
 ## Cores
 
@@ -247,5 +292,12 @@ holder record.
   nothing, saying which. `--now` runs it at once, unqueued and width-bound. From
   5.0 `--on-timeout run` exits 2, and `--on-timeout exit` warns that it is
   deprecated.
-- `greengate slots [--json]` lists the holders, the old-client slots and the
-  number of waiters.
+- `greengate slot promote <id> --reason <text> [--to N]` moves one of the
+  session's own waiting jobs ahead; see [Moving a job ahead](#moving-a-job-ahead).
+- `greengate slots [--json]` lists the holders, the old-client slots, the
+  number of waiters and, from 5.2, the queue: one line per job, `position`,
+  `id`, wait, session and command, within 80 columns (`gone` for a waiter
+  that died, unnumbered; `old client` for an empty ticket). `--json` gains
+  `queue`: `id`, `position` and `waited_ms` (both `null` when gone), `session`,
+  `tool`, `command`, `repo` (`null` for an old client's ticket) and `gone`.
+  The listing takes no lock and changes nothing.

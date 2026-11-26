@@ -36,13 +36,167 @@ pub fn slot_command(args: &[OsString]) -> i32 {
     let (own, cmd) = split_at_dashes(args);
     match own.first().and_then(|a| a.to_str()) {
         Some("run") => run(&own[1..], cmd),
+        Some("promote") => promote(&own[1..], cmd),
         _ => {
             eprintln!(
                 "{BIN}: usage: {BIN} slot run [--weight N] [--max-wait S | --now] -- <command…>"
             );
+            eprintln!("       {BIN} slot promote <id> --reason <text> [--to N]");
             2
         }
     }
+}
+
+/// `slot promote <id> --reason <text> [--to N]` (host-slot-admission t06;
+/// ADR-0022): move one of this session's waiting jobs ahead. Every message
+/// goes to stderr; the exit status carries the result: 0 moved, 1 refused or
+/// slots off, 2 usage, 74 an I/O failure, 75 the admission lock stayed held
+/// (nothing moved).
+fn promote(own: &[OsString], operands: &[OsString]) -> i32 {
+    let (id, reason, to) = match parse_promote(own, operands) {
+        Ok(parsed) => parsed,
+        Err(why) => {
+            eprintln!("{BIN}: slot promote: {why}");
+            eprintln!("  usage: {BIN} slot promote <id> --reason <text> [--to N]");
+            return 2;
+        }
+    };
+    let settings = crate::config::Settings::default();
+    let (sizing, _) = crate::host_slots::sizing_and_machine(&settings);
+    if sizing.is_none() || !greenharness_slots::SUPPORTED {
+        eprintln!("{BIN}: host slots are off here, so no job waits to be moved");
+        return 1;
+    }
+    // Read at the binary's edge: the crate reads no environment for it.
+    let session = greenharness_slots::session_id();
+    let request = greenharness_slots::Promote {
+        id: &id,
+        session: &session,
+        reason: &reason,
+        to,
+        tool: BIN,
+    };
+    let dir = greenharness_slots::dir();
+    let answer = greenharness_slots::promote_in_waiting(&dir, &request, || {
+        eprintln!("{BIN}: waiting for the admission lock…");
+    });
+    match answer {
+        Ok(Ok(moved)) => {
+            let jobs = if moved.passed == 1 { "job" } else { "jobs" };
+            eprintln!(
+                "moved {} from {} to {}, past {} {jobs}; {} of {} moves left in 24 h",
+                moved.id,
+                moved.from,
+                moved.to,
+                moved.passed,
+                moved.budget.saturating_sub(moved.used),
+                moved.budget
+            );
+            0
+        }
+        Ok(Err(refused)) => {
+            eprintln!(
+                "{BIN}: slot promote refused ({}): {}",
+                refused.limit(),
+                refused.describe()
+            );
+            for hint in refusal_hints(&refused, &id) {
+                eprintln!("  {hint}");
+            }
+            1
+        }
+        Err(greenharness_slots::PromoteError::LockBusy { waited }) => {
+            eprintln!(
+                "{BIN}: slot promote: the admission lock stayed held for {}s; nothing moved",
+                waited.as_secs()
+            );
+            let to_flag = if to > 0 {
+                format!(" --to {to}")
+            } else {
+                String::new()
+            };
+            eprintln!("  retry: {BIN} slot promote {id}{to_flag} --reason <text>");
+            BUSY_EXIT
+        }
+        Err(error) => {
+            eprintln!("{BIN}: slot promote: {error}");
+            QUEUE_FAILED_EXIT
+        }
+    }
+}
+
+/// What to do next after a refusal, beside its one line.
+fn refusal_hints(refused: &greenharness_slots::Refused, id: &str) -> Vec<String> {
+    use greenharness_slots::Refused;
+    match refused {
+        Refused::NoSession => vec![
+            "the session comes from CLAUDE_CODE_SESSION_ID, RELAIS_SESSION_ID or CLAUDE_SESSION_ID"
+                .to_string(),
+        ],
+        Refused::NoReason => vec![format!("{BIN} slot promote {id} --reason <text>")],
+        Refused::NotQueued { .. } | Refused::Ambiguous { .. } => {
+            vec![format!("see: {BIN} slots")]
+        }
+        Refused::AgeFloor {
+            furthest: Some(n), ..
+        } => vec![format!(
+            "try: {BIN} slot promote {id} --to {n} --reason <text>"
+        )],
+        _ => Vec::new(),
+    }
+}
+
+/// `<id> --reason <text> [--to N]`: flags as `--flag value` or
+/// `--flag=value`, in any order; `operands` are the words after `--`, taken
+/// as the job's id only (a flag there is not a flag).
+fn parse_promote(
+    own: &[OsString],
+    operands: &[OsString],
+) -> Result<(String, String, usize), String> {
+    let mut id = None;
+    let mut reason = None;
+    let mut to = 0;
+    let mut words = own.iter();
+    while let Some(word) = words.next() {
+        let word = word.to_str().ok_or("an argument is not valid UTF-8")?;
+        let (name, inline) = match word.split_once('=') {
+            Some((n, v)) if n.starts_with("--") => (n, Some(v.to_string())),
+            _ => (word, None),
+        };
+        let mut value = |flag: &str| -> Result<String, String> {
+            match inline.clone() {
+                Some(v) => Ok(v),
+                None => words
+                    .next()
+                    .and_then(|v| v.to_str())
+                    .map(str::to_string)
+                    .ok_or(format!("{flag} needs a value")),
+            }
+        };
+        match name {
+            "--reason" => reason = Some(value("--reason")?),
+            "--to" => {
+                to = value("--to")?
+                    .parse()
+                    .map_err(|_| "--to is a whole number from 0".to_string())?
+            }
+            flag if flag.starts_with('-') => return Err(format!("unknown argument {flag:?}")),
+            job if id.is_none() => id = Some(job.to_string()),
+            extra => return Err(format!("one job at a time, not also {extra:?}")),
+        }
+    }
+    for word in operands {
+        let job = word.to_str().ok_or("an argument is not valid UTF-8")?;
+        if id.is_some() {
+            return Err(format!("one job at a time, not also {job:?}"));
+        }
+        id = Some(job.to_string());
+    }
+    let id = id.ok_or("name the job to move: its id from `slots`")?;
+    let reason = reason
+        .filter(|r| !r.trim().is_empty())
+        .ok_or("--reason <text> is required: it is journalled with the move")?;
+    Ok((id, reason, to))
 }
 
 /// The arguments before `--`, and the command after it.
@@ -238,13 +392,15 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
         ceiling: max_wait,
     };
     let mut last_said: Option<Instant> = None;
+    let id = waiter.id().to_string();
     let ended = greenharness_slots::wait_in_line(waiter, bounds, |queue| {
         let due = last_said.map_or(true, |t| t.elapsed() >= Duration::from_secs(30));
         if due && (!queue.holders.is_empty() || queue.unknown > 0) {
             eprintln!("{BIN}: {}", crate::host_slots::behind(queue));
-            // The pointer once, not on every 30 s repeat.
+            // The pointers once, not on every 30 s repeat.
             if last_said.is_none() {
                 eprintln!("  see: {BIN} slots");
+                eprintln!("  id {id}; move ahead: {BIN} slot promote {id} --reason <text>");
             }
             last_said = Some(Instant::now());
         }
@@ -412,7 +568,7 @@ pub fn slots_command(args: &[OsString]) -> i32 {
     let Some(sizing) = host.slots.value else {
         if json {
             println!(
-                "{{\"cap\":0,{cores_json},\"held\":0,\"holders\":[],\"unknown\":0,\"waiting\":0}}"
+                "{{\"cap\":0,{cores_json},\"held\":0,\"holders\":[],\"unknown\":0,\"waiting\":0,\"queue\":[]}}"
             );
         } else {
             let by = match host.slots.source {
@@ -434,6 +590,16 @@ pub fn slots_command(args: &[OsString]) -> i32 {
         }
     };
     let held = status.holders.len() + status.unknown;
+    // The queue is an observation beside the count: a listing that cannot be
+    // read shows no lines rather than failing the command.
+    let queue = match greenharness_slots::queue_in(&greenharness_slots::dir()) {
+        Ok(queue) => queue,
+        Err(e) => {
+            eprintln!("{BIN}: slots: cannot list the queue: {e}");
+            Vec::new()
+        }
+    };
+    let now = greenharness_slots::now_ms();
     let mode = match sizing {
         greenharness_slots::Sizing::Auto => format!(
             "auto: load {}, {}",
@@ -452,16 +618,17 @@ pub fn slots_command(args: &[OsString]) -> i32 {
             .iter()
             .map(greenharness_slots::Holder::to_json)
             .collect();
+        let queue: Vec<String> = queue.iter().map(|job| queue_json(job, now)).collect();
         println!(
-            "{{\"cap\":{},{cores_json},\"held\":{held},\"holders\":[{}],\"unknown\":{},\"waiting\":{}}}",
+            "{{\"cap\":{},{cores_json},\"held\":{held},\"holders\":[{}],\"unknown\":{},\"waiting\":{},\"queue\":[{}]}}",
             status.cap,
             holders.join(","),
             status.unknown,
-            status.waiting
+            status.waiting,
+            queue.join(",")
         );
         return 0;
     }
-    let now = greenharness_slots::now_ms();
     println!("host slots: {held} of {} held ({mode})", status.cap);
     for h in &status.holders {
         let jobs = h.jobs.map_or("-".to_string(), |j| j.to_string());
@@ -476,7 +643,84 @@ pub fn slots_command(args: &[OsString]) -> i32 {
         println!("  {} unknown (old client)", status.unknown);
     }
     println!("waiting: {}", status.waiting);
+    for job in &queue {
+        println!("{}", queue_line(job, now));
+    }
     0
+}
+
+/// The widest a `slots` line may be.
+const COLUMNS: usize = 80;
+
+fn queue_line(job: &greenharness_slots::QueuedJob, now_ms: u128) -> String {
+    match job.state {
+        greenharness_slots::JobState::Waiting { position } => line_of(
+            Some(position),
+            &job.id,
+            job.holder.as_ref(),
+            Some(now_ms.saturating_sub(job.joined_ms)),
+        ),
+        greenharness_slots::JobState::Gone => line_of(None, &job.id, job.holder.as_ref(), None),
+    }
+}
+
+/// One queued job from its parts; `waited_ms` is `None` for a gone job. The
+/// position is `-` for a gone job; a live job's is the `--to` a promotion uses.
+fn line_of(
+    position: Option<usize>,
+    id: &str,
+    holder: Option<&greenharness_slots::Holder>,
+    waited_ms: Option<u128>,
+) -> String {
+    let position = position.map_or("-".to_string(), |p| p.to_string());
+    let (session, what) = match (holder, waited_ms) {
+        (_, None) => ("-", "gone".to_string()),
+        (None, Some(_)) => ("-", "old client".to_string()),
+        (Some(h), Some(_)) => {
+            let repo = std::path::Path::new(&h.repo)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| h.repo.clone());
+            (
+                h.short_session(),
+                format!("{}: {} ({repo})", h.tool, h.command),
+            )
+        }
+    };
+    let wait = waited_ms.map_or("-".to_string(), greenharness_slots::wait_text);
+    let head = format!("  {position:>2}  {id}  {wait}  {session}  ");
+    let room = COLUMNS.saturating_sub(head.chars().count());
+    let what = if what.chars().count() > room {
+        let cut: String = what.chars().take(room.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        what
+    };
+    format!("{head}{what}")
+}
+
+/// One queued job for `slots --json`: `position`, `waited_ms` and `gone` follow
+/// its state; `session` to `repo` are `null` for an older client's ticket.
+fn queue_json(job: &greenharness_slots::QueuedJob, now_ms: u128) -> String {
+    use crate::json::escape;
+    let text = |s: Option<&str>| s.map_or("null".to_string(), |s| format!("\"{}\"", escape(s)));
+    let h = job.holder.as_ref();
+    let (position, waited, gone) = match job.state {
+        greenharness_slots::JobState::Waiting { position } => (
+            position.to_string(),
+            now_ms.saturating_sub(job.joined_ms).to_string(),
+            false,
+        ),
+        greenharness_slots::JobState::Gone => ("null".to_string(), "null".to_string(), true),
+    };
+    format!(
+        "{{\"id\":\"{}\",\"position\":{position},\"waited_ms\":{waited},\"session\":{},\"tool\":{},\"command\":{},\"repo\":{},\"gone\":{gone}}}",
+        escape(&job.id),
+        text(h.map(|h| h.session.as_str()).filter(|s| !s.is_empty())),
+        text(h.map(|h| h.tool.as_str())),
+        text(h.map(|h| h.command.as_str())),
+        text(h.map(|h| h.repo.as_str())),
+    )
 }
 
 #[cfg(test)]
@@ -511,6 +755,70 @@ mod tests {
             cores_phrase(128, 256, Source::LimitedByAffinity)
         );
         assert!(header.len() <= 80, "{} columns: {header}", header.len());
+    }
+
+    /// A queue line stays within 80 columns with a 7-digit pid and a
+    /// 200-character command, and keeps its leading fields whole.
+    #[test]
+    fn a_queue_line_fits_80_columns() {
+        let holder = greenharness_slots::Holder {
+            pid: 4_194_303,
+            tool: "greengate slot run".to_string(),
+            repo: "/Users/x/Developer/Perso/a-rather-long-worktree-name".to_string(),
+            command: "c".repeat(200),
+            session: "0b1c2d3e-aaaa-bbbb".to_string(),
+            started_ms: 0,
+            jobs: Some(2),
+        };
+        let line = line_of(Some(12), "4194303-17", Some(&holder), Some(3_900_000));
+        assert!(line.chars().count() <= COLUMNS, "{line}");
+        assert!(
+            line.starts_with("  12  4194303-17  1h05m  0b1c2d3e  greengate slot run: c"),
+            "{line}"
+        );
+        assert!(line.ends_with('…'), "{line}");
+        assert_eq!(line_of(None, "1-0", None, None), "   -  1-0  -  -  gone");
+        assert_eq!(
+            line_of(Some(0), "1-0", None, Some(0)),
+            "   0  1-0  <1m  -  old client"
+        );
+    }
+
+    #[test]
+    fn promote_takes_one_job_a_reason_and_an_optional_place() {
+        let (id, reason, to) = parse_promote(
+            &os(&["123-4", "--reason", "the person waits", "--to=2"]),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            (id.as_str(), reason.as_str(), to),
+            ("123-4", "the person waits", 2)
+        );
+        assert_eq!(
+            parse_promote(&os(&["--reason=r", "9-0"]), &[]).unwrap().2,
+            0
+        );
+        assert!(parse_promote(&os(&["9-0"]), &[])
+            .unwrap_err()
+            .contains("--reason"));
+        assert!(parse_promote(&os(&["9-0", "--reason", " "]), &[])
+            .unwrap_err()
+            .contains("--reason"));
+        assert!(parse_promote(&os(&["--reason", "r"]), &[])
+            .unwrap_err()
+            .contains("name the job"));
+        assert!(parse_promote(&os(&["9-0", "8-0", "--reason", "r"]), &[])
+            .unwrap_err()
+            .contains("one job"));
+        assert!(
+            parse_promote(&os(&["9-0", "--reason", "r", "--to", "x"]), &[])
+                .unwrap_err()
+                .contains("--to")
+        );
+        assert!(parse_promote(&os(&["9-0", "--why", "r"]), &[])
+            .unwrap_err()
+            .contains("unknown"));
     }
 
     #[test]
