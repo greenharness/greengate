@@ -120,7 +120,8 @@ Next, in order:
    parts, and in what order, is t17's decision.
 5. ~~t17~~ closed 2026-11-25: the 2× trigger fired, and the person chose a narrow fix, with no revert of greengate, relais or greenbelay. Next was [t18](t18-plan-hook-stall-narrow-fix.md), with no stalled-line deferral on the hook path. t08 counts from the 5.1.1 install (t19).
 6. ~~t18~~ closed 2026-11-26: greengate 5.1.1 (hook waits have no stall end; #526, release #527, Release run 45847436802 success) installed 2026-11-26 16:24 CET; t19 is due from 2026-11-27 16:24. t11 closed with it: all its code is shipped and its measure is t19. Next: [t19](t19-count-after-5-1-1-install.md), the first half of t08; [t20](t20-queued-heartbeat-names-ceiling.md) (low).
-7. In flight 2026-11-26 (driver session f3dfb52d): t12 (relais, its release is v0.90.0 after another session's v0.89.0) and t13. [t16](t16-coordinator-queue-moving-line.md), unblocked by t11, counts 7 days after the relais v0.83.0 install (2026-11-25 02:26), so it is dated 2026-12-02. t15 starts after t12, as both change the held marker relais exports.
+7. ~~t13~~ closed 2026-11-26: greengate 5.2.0 (`slot promote`; #530, release #531, Release run 45889748609 success) installed 2026-11-26 21:21 CET. No relais change. Follow-ups filed: [t22](t22-count-after-5-2-0-install.md) (7-day count, due 2026-12-03), [t23](t23-promote-off-switch.md) (off switch, plus the plan's low review findings), [t24](t24-relais-jobs-can-be-moved.md) (relais jobs movable, after t12), and `follow-ups/f12-slot-flag-allowlist.md` (outside the Destination).
+8. In flight 2026-11-26 (driver session f3dfb52d): t12 (relais, its release is v0.90.0 after another session's v0.89.0). [t16](t16-coordinator-queue-moving-line.md), unblocked by t11, counts 7 days after the relais v0.83.0 install (2026-11-25 02:26), so it is dated 2026-12-02. t15 starts after t12, as both change the held marker relais exports.
 
 The plan's "Full reviews" sidecar lists the findings carried into Phases 4–6.
 
@@ -149,7 +150,6 @@ No steps are left to the person.
 - Whether outside load the queue does not own (many agent sessions, swap
   pressure) needs its own defence beyond the load test, such as memory pressure
   as an admission input.
-- How a reorder shows in relais's pane (greengate's view is in t13).
 - A detached wait for `greengate slot run`. The Bash tool kills a command at
   120 s, so `--max-wait` stays a hard deadline (t11's Decision log), and a
   moving line longer than that still ends a wait. 6 of 50 `slot run` timeouts
