@@ -4,8 +4,12 @@
 # own gate on a loaded workstation. Two host-level knobs must not reach
 # them from the machine:
 #
-# - GREENHARNESS_HOST_SLOT=held: a fixture's heavy check would otherwise queue on
-#   the real host slots, behind the very suite that is running it.
+# - GREENGATE_HOST_SLOTS=0 (slots off): a fixture's heavy check would otherwise
+#   queue on the real host slots, behind the very suite that is running it.
+#   GREENHARNESS_HOST_SLOT is forced empty beside it, so the real holder's
+#   `held:<lease>` (from the gate running this suite) never reaches a fixture.
+#   A bare `held` is no longer the escape: the reader refuses it once the
+#   held-marker rollout ends (host-slot-admission t15).
 # - GREENGATE_IDLE_LOAD_SCALE=1: every kill-time bound in timing.rs would
 #   otherwise stretch with the machine's load average.
 #
@@ -13,10 +17,9 @@
 # `cargo_pins_the_host_knobs_for_tests` in host_slots.rs fails if this file
 # stops reaching the tests.
 #
-# `force`: without it a value the shell already exports wins, and an empty
-# GREENHARNESS_HOST_SLOT reads as "not held" — a fixture then queued on the real
-# slots behind the suite running it. Fixtures that start greengate also pin
-# both through `common::amont_cmd`, which holds when cargo runs from
+# `force`: without it a value the shell already exports wins (a
+# GREENGATE_HOST_SLOTS=1 would turn the slots back on for every fixture).
+# Fixtures that start greengate also pin both through `common::amont_cmd`, which holds when cargo runs from
 # outside this repository and never reads this file.
 [env]
 # The developer's machine state stays out of reach of everything the test
@@ -27,7 +30,8 @@
 # they need. A fixture that names its own `GIT_CONFIG_GLOBAL` still wins.
 XDG_CONFIG_HOME = { value = "target/test-sandbox/config", relative = true, force = true }
 GIT_CONFIG_GLOBAL = { value = "target/test-sandbox/gitconfig", relative = true, force = true }
-GREENHARNESS_HOST_SLOT = { value = "held", force = true }
+GREENHARNESS_HOST_SLOT = { value = "", force = true }
+GREENGATE_HOST_SLOTS = { value = "0", force = true }
 GREENGATE_IDLE_LOAD_SCALE = { value = "1", force = true }
 # Shortens greengate's own fixed waits by this factor in the test build only
 # (crates/greengate-runtime/src/clock.rs), and the fixtures' sleeps with them

@@ -133,9 +133,11 @@ impl Repo {
     /// (ADR-0009). These tests run under amont's own `pre-push-cargo-test`,
     /// on a workstation that is often loaded: without
     /// `GREENGATE_IDLE_LOAD_SCALE=1` every kill-time bound in `timing.rs`
-    /// stretches with the load average, and without `GREENHARNESS_HOST_SLOT=held`
-    /// a fixture's heavy check would queue on the real host slots behind the
-    /// very suite that is running it. The slot and load fixtures use
+    /// stretches with the load average, and without `GREENGATE_HOST_SLOTS=0`
+    /// (slots off) a fixture's heavy check would queue on the real host slots
+    /// behind the very suite that is running it. The held marker is removed
+    /// beside it: a bare `held` is refused once the held-marker rollout ends,
+    /// and the real holder's `held:<lease>` must not reach a fixture. The slot and load fixtures use
     /// [`Repo::hook_watched_unpinned`], which sets neither.
     pub fn pin_host_env(cmd: &mut Command) {
         // The developer's machine state stays out of reach: greengate 4.0's
@@ -144,7 +146,8 @@ impl Repo {
         // `GIT_CONFIG_GLOBAL` sets it after this, and wins.
         sandbox_env(cmd);
         cmd.env("GREENGATE_IDLE_LOAD_SCALE", "1");
-        cmd.env("GREENHARNESS_HOST_SLOT", "held");
+        cmd.env("GREENGATE_HOST_SLOTS", "0");
+        cmd.env_remove("GREENHARNESS_HOST_SLOT");
         // amont's own gate sets FORCE_COLOR for the tools it runs on a
         // terminal, `cargo test` among them; a fixture must not inherit it,
         // or every captured output would be painted. A test about colour sets
@@ -260,6 +263,7 @@ impl Repo {
             // `.cargo/config.toml` pins both for the whole test process;
             // an unpinned fixture starts from neither and sets its own.
             cmd.env_remove("GREENHARNESS_HOST_SLOT");
+            cmd.env_remove("GREENGATE_HOST_SLOTS");
             cmd.env_remove("GREENGATE_IDLE_LOAD_SCALE");
         }
         // Pinned or not, the developer's global config and config home stay

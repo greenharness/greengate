@@ -888,7 +888,9 @@ frees means is the repository's [busy policy](#greengateonbusy--what-a-heavy-che
 by default, after `greengate.timeout`, the check runs unqueued with a note. Waiters are served first come,
 first served. A held slot is released when the check ends, and by the kernel
 if greengate dies. An greengate started by a check that holds a slot
-(`GREENHARNESS_HOST_SLOT` set) does not queue. Windows has no slots.
+(`GREENHARNESS_HOST_SLOT=held:<lease>` naming a live lease, see
+[host slots](host-slots.md#who-holds-a-slot)) does not queue; any other value
+queues, with one line saying why. Windows has no slots.
 
 Unset, the count follows the machine (ADR-0021): at most half the physical
 cores (`max(1, cores/2)`, see [`greengate.hostCores`](#greengatehostcores--the-core-count-the-slots-are-sized-from)).

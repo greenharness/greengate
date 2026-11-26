@@ -194,8 +194,24 @@ An invalid value is a warning that names the fix for its source
 Only the process that took the slot holds it. Slot descriptors are
 close-on-exec, so a command's children, and any daemon it leaves behind,
 never hold it. `greengate slot run` frees the slot when its command exits.
-`GREENHARNESS_HOST_SLOT=held` in a command's environment means its parent holds a
-slot, and an greengate or wrapper started under it does not queue again.
+A holder exports `GREENHARNESS_HOST_SLOT=held:<lease>` to the command it runs,
+naming its lease id (`<pid>-<seq>`, the `lease` of its `holders/` records). A
+greengate, relais or wrapper started under it does not queue again, once the
+crate's one reader (`held_marker`) finds that lease live: a holder record
+naming it, its writer alive, and one of its slots locked. Any other value
+(`1`, a path, a dead lease, typed by hand) queues like no marker, with two
+lines on stderr and one `marker_refused` row in `waits.jsonl` naming the
+reason (`malformed`, `unknown_lease`, `dead_pid`, `slot_free`, `io`, `bare`):
+
+```text
+greengate: GREENHARNESS_HOST_SLOT=1 names no live lease (malformed); queueing
+  unset it; only a slot holder sets it
+```
+
+The bare `held` older binaries export is accepted until both tools write
+the new form (greengate 5.5, relais's t15 release), then refused (`bare`).
+Tests escape the real queue with slots off (`GREENGATE_HOST_SLOTS=0`), never
+with a marker.
 
 ## Handoff inside a rehearsal
 
@@ -271,8 +287,8 @@ caps `-parallel` as well.
 - **Unqueued runs are bounded too.** A check that runs after its slot wait
   timed out runs when the host is busiest.
 - **Nothing is set** when slots are off (`greengate.hostSlots 0`), unsupported
-  (Windows), or the command is nested under a holder (`GREENHARNESS_HOST_SLOT=held`),
-  whose bounds it inherits.
+  (Windows), or the command is nested under a holder (a live
+  `GREENHARNESS_HOST_SLOT=held:<lease>`), whose bounds it inherits.
 - `greengate slots` shows each holder's `jobs`, or `-` for a record written
   without it.
 
@@ -286,7 +302,7 @@ holder record.
 ## Commands
 
 - `greengate slot run [--weight N] [--max-wait S | --now] -- <cmd…>` waits for a
-  slot, then runs the command with `GREENHARNESS_HOST_SLOT=held` and passes its
+  slot, then runs the command with the held marker set and passes its
   exit status through. When the line stalls for 300 s, or `--max-wait` runs out
   (default 90 s, under Claude Code's 120 s Bash timeout), it exits 75 and runs
   nothing, saying which. `--now` runs it at once, unqueued and width-bound. From

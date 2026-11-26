@@ -568,9 +568,36 @@ pub fn current_check() -> Option<String> {
     })
 }
 
-/// Whether this process was started by an amont that holds a slot.
-fn nested() -> bool {
-    std::env::var_os(HELD_ENV).is_some_and(|v| !v.is_empty())
+/// This process's held marker, read once: every check and thread of one run
+/// gets the same answer, so a parent lease ending midway cannot admit some
+/// checks and queue others.
+static MARKER: std::sync::OnceLock<greenharness_slots::Marker> = std::sync::OnceLock::new();
+
+/// The once-per-process row of a refused marker.
+static MARKER_LOG: greenharness_slots::MarkerLog = greenharness_slots::MarkerLog::new();
+
+fn marker() -> &'static greenharness_slots::Marker {
+    MARKER.get_or_init(greenharness_slots::held_marker)
+}
+
+/// Whether an ancestor holds a slot for this process: its
+/// `GREENHARNESS_HOST_SLOT` names a live lease (`greenharness_slots::held_marker`).
+pub fn nested() -> bool {
+    marker().is_held()
+}
+
+/// For a command about to queue: when its marker was refused, the journal's
+/// `marker_refused` row and the two lines to print, the first time only.
+pub fn marker_refused_note() -> Option<String> {
+    let marker = marker();
+    MARKER_LOG
+        .record(
+            &greenharness_slots::dir(),
+            crate::names::SLOT_HOLDER,
+            marker,
+        )
+        .then(|| greenharness_slots::refused_line(BIN, marker))
+        .flatten()
 }
 
 /// Called before a tool is spawned. For the first tool of a heavy check,
@@ -660,6 +687,10 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
                 return Ok(false);
             }
         };
+        // A marker that names no live lease queues like none, said once.
+        if let Some(line) = marker_refused_note() {
+            crate::hooks::common::say(&line);
+        }
         let sink = crate::live::current_sink();
         if let Some((stage, idx)) = &sink {
             stage.queue(*idx, Some((Instant::now(), cap)));
@@ -1118,19 +1149,26 @@ mod tests {
     }
 
     /// `.cargo/config.toml` reaches the test binaries: without it the
-    /// integration fixtures would queue on the real host slots.
+    /// integration fixtures would queue on the real host slots. Slots are
+    /// off, not a bare held marker, which the reader refuses once the
+    /// rollout ends (host-slot-admission t15); the marker is forced empty so
+    /// a real holder's `held:<lease>` does not leak in.
     #[test]
     fn cargo_pins_the_host_knobs_for_tests() {
-        assert_eq!(std::env::var(HELD_ENV).as_deref(), Ok("held"));
+        assert_eq!(std::env::var(HELD_ENV).as_deref(), Ok(""));
+        assert_eq!(
+            std::env::var(greenharness_slots::host::SLOTS_ENV).as_deref(),
+            Ok("0")
+        );
         assert_eq!(
             std::env::var("GREENGATE_IDLE_LOAD_SCALE").as_deref(),
             Ok("1")
         );
     }
 
-    /// A light check never asks. A heavy one run by an amont that holds a
-    /// slot (the test process has `GREENHARNESS_HOST_SLOT=held` from
-    /// `.cargo/config.toml`) is nested: it settles without a slot.
+    /// A light check never asks. A heavy one with slots off (the test
+    /// process has `GREENGATE_HOST_SLOTS=0` from `.cargo/config.toml`)
+    /// settles without a slot.
     #[test]
     fn a_light_check_never_takes_a_slot() {
         let settings = crate::config::Settings::default();
@@ -1139,13 +1177,13 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_heavy_check_settles_without_a_slot() {
+    fn a_heavy_check_with_slots_off_settles_without_a_slot() {
         let settings = crate::config::Settings::default();
         let _g = enter_check("pre-commit-clippy", weight_of("pre-commit-clippy"));
         assert_eq!(current_check().as_deref(), Some("clippy"));
         assert!(!before_spawn(&settings).unwrap());
         assert!(CURRENT.with(|c| c.borrow().settled));
-        // Nested: the parent's bounds are inherited, so none is set here.
+        // No slot: no width is set here.
         let mut cmd = std::process::Command::new("true");
         bound(&mut cmd);
         assert_eq!(cmd.get_envs().count(), 0);

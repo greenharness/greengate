@@ -30,15 +30,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod host;
+mod marker;
 mod reorder;
+
+pub use marker::{
+    held_marker, held_marker_in, held_value, refused_line, Marker, MarkerLog, Refusal,
+    MARKER_PREFIX,
+};
 
 pub use reorder::{
     promote_in, promote_in_waiting, queue_in, wait_text, JobState, Moved, Promote, PromoteError,
     QueuedJob, Refused, AGE_FLOOR, PROMOTE_BUDGET, PROMOTE_LOCK_WAIT, PROMOTE_WINDOW,
 };
 
-/// Exported to the command a slot holder runs; an amont (or a wrapper)
-/// started under it does not queue again for the slot its parent holds.
+/// Exported to the command a slot holder runs, as `held:<lease>`
+/// ([`Lease::marker`]); a greengate (or a wrapper) started under it does not
+/// queue again for the slot its parent holds, once [`held_marker`] finds that
+/// lease live.
 pub const HELD_ENV: &str = "GREENHARNESS_HOST_SLOT";
 
 /// A diagnostic, and the seam tests use: the slot directory.
@@ -523,6 +531,17 @@ fn write_record(path: &Path, json: &str) -> io::Result<()> {
 }
 
 impl Lease {
+    /// The lease id, `<pid>-<seq>`: the one its holder records carry.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// `held:<id>`: the [`HELD_ENV`] value a holder of this lease exports, so
+    /// a command it runs does not queue again ([`held_marker`]).
+    pub fn marker(&self) -> String {
+        held_value(&self.id)
+    }
+
     /// How many slots this lease holds.
     pub fn weight(&self) -> usize {
         self.files.len()

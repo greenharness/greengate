@@ -322,8 +322,8 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
         .join(" ");
 
     // Already inside a slot (a wrapped command running this one): no second
-    // queue for the slot the parent holds.
-    let nested = std::env::var_os(greenharness_slots::HELD_ENV).is_some_and(|v| !v.is_empty());
+    // queue for the slot the parent holds, once its marker names a live lease.
+    let nested = crate::host_slots::nested();
     let settings = crate::config::Settings::default();
     let (sizing, machine) = crate::host_slots::sizing_and_machine(&settings);
     let (Some(sizing), false, true) = (sizing, nested, greenharness_slots::SUPPORTED) else {
@@ -364,6 +364,10 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
     if now {
         record(0, "now", None);
         return spawn(program, rest, Launch::Unqueued, Some(jobs));
+    }
+    // A marker that names no live lease queues like none, said once.
+    if let Some(line) = crate::host_slots::marker_refused_note() {
+        eprintln!("{line}");
     }
     // Read at the binary's edge: the crate reads no environment for it.
     let setting = std::env::var(greenharness_slots::STALL_ENV).ok();

@@ -8,6 +8,21 @@ missing here.
 
 ## Unreleased
 
+A hand-set `GREENHARNESS_HOST_SLOT` no longer skips the host slot queue
+(ADR-0022, amended; programme host-slot-admission t10 and t15). The marker a
+holder exports becomes `held:<lease>`, its lease id, and one reader in
+`greenharness-slots` admits a child without queueing only when that lease is
+live: a holder record names it, its writer is alive, and its slot is locked.
+This release reads both forms, so the bare `held` that greengate and
+relais still export keeps working; `1`, a path or a dead lease now queue,
+with two lines on stderr saying why and one `marker_refused` row in
+`waits.jsonl` (no `waited_ms`; a `reason` and `ppid`). The next release
+writes the new form, and the one after refuses the bare one. New API in
+`greenharness-slots`: `held_marker`, `held_marker_in`, `Marker`, `Refusal`,
+`MarkerLog`, `refused_line`, `held_value`, `Lease::id` and `Lease::marker`.
+greengate's own tests now run with slots off (`GREENGATE_HOST_SLOTS=0`)
+instead of a bare marker.
+
 ## v5.3.0
 
 `greengate-fleet fix --greentopo-hook` is the new name of `--aval-hook`, and

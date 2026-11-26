@@ -1,10 +1,10 @@
 //! `amont slot run` and `amont slots` (ADR-0014): any command queues for a
 //! host slot, and the queue says who holds it.
 //!
-//! Unpinned, like `busy_defers.rs`: `.cargo/config.toml` sets
-//! `GREENHARNESS_HOST_SLOT=held` for the test process, which would make every
-//! wrapper nested. Each test removes it and uses a slot directory of its own
-//! with one fixed slot, so no load test or ramp is involved.
+//! Unpinned, like `busy_defers.rs`: `.cargo/config.toml` turns slots off for
+//! the test process. Each test turns them on again, removes any held marker,
+//! and uses a slot directory of its own with one fixed slot, so no load test
+//! or ramp is involved.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -338,8 +338,24 @@ fn now_skips_the_queue_and_is_journalled() {
 #[test]
 fn a_nested_wrapper_runs_at_once_and_flags_after_dashes_pass_through() {
     let slots = slot_dir("nested");
-    let mut holder = spawn(&slots, &["slot", "run", "--", "sleep", "3"]);
+    // The holder's command records the marker it was given: the child below
+    // carries exactly that, as a real child inherits it.
+    let given = slots.join("marker");
+    let record = format!(
+        "printf %s \"$GREENHARNESS_HOST_SLOT\" > '{}'; sleep 3",
+        given.display()
+    );
+    let mut holder = spawn(&slots, &["slot", "run", "--", "sh", "-c", &record]);
     until_held(&slots);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let marker = loop {
+        let marker = std::fs::read_to_string(&given).unwrap_or_default();
+        if !marker.is_empty() {
+            break marker;
+        }
+        assert!(Instant::now() < deadline, "the holder exported no marker");
+        std::thread::sleep(Duration::from_millis(20));
+    };
     let started = Instant::now();
     let out = amont(
         &slots,
@@ -354,7 +370,7 @@ fn a_nested_wrapper_runs_at_once_and_flags_after_dashes_pass_through() {
             "--help",
         ],
     )
-    .env("GREENHARNESS_HOST_SLOT", "held")
+    .env("GREENHARNESS_HOST_SLOT", &marker)
     .output()
     .expect("nested");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -365,6 +381,58 @@ fn a_nested_wrapper_runs_at_once_and_flags_after_dashes_pass_through() {
     );
     let _ = holder.wait(); // best-effort: reap the holder
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}
+
+/// A marker that names no live lease (`=1`, set by hand) queues like none:
+/// one refusal line, one `marker_refused` row, then a grant, and the exit
+/// status stays the command's. With slots off, nothing is said or written.
+#[test]
+fn a_refused_marker_queues_and_says_so_once() {
+    let slots = slot_dir("refused");
+    let out = amont(&slots, &["slot", "run", "--", "sh", "-c", "exit 7"])
+        .env("GREENHARNESS_HOST_SLOT", "1")
+        .output()
+        .expect("refused");
+    assert_eq!(out.status.code(), Some(7), "{}", text(&out));
+    let said = text(&out);
+    assert_eq!(
+        said.matches("GREENHARNESS_HOST_SLOT=1 names no live lease (malformed); queueing")
+            .count(),
+        1,
+        "{said}"
+    );
+    assert!(
+        said.contains("unset it; only a slot holder sets it"),
+        "{said}"
+    );
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert_eq!(
+        waits.matches("\"outcome\":\"marker_refused\"").count(),
+        1,
+        "{waits}"
+    );
+    assert!(waits.contains("\"reason\":\"malformed\""), "{waits}");
+    assert_eq!(
+        waits.matches("\"outcome\":\"admitted\"").count(),
+        1,
+        "{waits}"
+    );
+
+    let off = slot_dir("refused-off");
+    let out = amont(&off, &["slot", "run", "--", "true"])
+        .env("GREENHARNESS_HOST_SLOT", "1")
+        .env("GREENGATE_HOST_SLOTS", "0")
+        .output()
+        .expect("slots off");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        !text(&out).contains("names no live lease"),
+        "{}",
+        text(&out)
+    );
+    assert!(!off.join("waits.jsonl").exists());
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+    let _ = std::fs::remove_dir_all(&off); // best-effort: scratch
 }
 
 /// The wrapper alone holds the slot: a daemon the command leaves behind
