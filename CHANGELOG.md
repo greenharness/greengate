@@ -8,6 +8,10 @@ missing here.
 
 ## Unreleased
 
+## v5.1.0
+
+`greengate-fleet` judges and installs the session hook with `greentopo`, not `aval`, and looks for `.claude/hooks/greentopo-heads.sh` (#524, programme topo-spotter-rename t16). A repository the fleet sweep has not reached reports its hook stale until `aval hook uninstall` and `greentopo hook install` have run there.
+
 ## v5.0.0
 
 `--on-timeout run` is removed, and `onBusy wait` and `slot run`'s exit 75
