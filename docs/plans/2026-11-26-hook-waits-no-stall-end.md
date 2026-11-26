@@ -133,7 +133,7 @@ as before 5.0; the deferral roll-up still offers `GREENGATE_ON_BUSY=now`.
   means 3600 s), is still waiting past the old stall window (elapsed at least
   3 s) and defers at the ceiling, journalled `"end":"ceiling"` and never
   `stalled`;
-  a land pre-stage gate under the same fixture defers at its ceiling,
+  a land pre-stage gate (fixture `set timeout 4`, stall seam 2 s) defers at its ceiling,
   journalled `"end":"ceiling"`, and still pushes with a `deferred`
   completion; `slot run` still exits 75 with `"end":"stalled"`
   (`slot_run.rs` unchanged).
