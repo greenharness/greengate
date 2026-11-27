@@ -235,7 +235,9 @@ now. `GREENHARNESS_SLOT_STALL_S` overrides the window. It is a test seam beside
 `GREENHARNESS_SLOT_DIR`, read by each binary at its edge. A wait also ends at
 its caller's hard **ceiling**, or when three polls in a row fail after the
 queue was joined. One loop in the crate, `wait_in_line`, applies the rule for
-every caller. Whatever ends a wait, nothing runs outside the queue because of
+every caller; `wait_in_line_paced` is the same loop with the pause between
+polls left to the caller, which relais uses to heartbeat its lease, charge its
+budgets and honour a cancel while it waits. Whatever ends a wait, nothing runs outside the queue because of
 it:
 
 | Caller | Stall window | Ceiling | At the end |
