@@ -568,29 +568,25 @@ pub fn current_check() -> Option<String> {
     })
 }
 
-/// This process's held marker, read once: every check and thread of one run
-/// gets the same answer, so a parent lease ending midway cannot admit some
-/// checks and queue others.
-static MARKER: std::sync::OnceLock<greenharness_slots::Marker> = std::sync::OnceLock::new();
-
-/// The once-per-process row of a refused marker.
-static MARKER_LOG: greenharness_slots::MarkerLog = greenharness_slots::MarkerLog::new();
-
-fn marker() -> &'static greenharness_slots::Marker {
-    MARKER.get_or_init(greenharness_slots::held_marker)
+/// The held marker of this run, read once on `settings` (t15): every check
+/// and thread of one run gets the same answer, so a parent lease ending
+/// midway cannot admit some checks and queue others.
+fn marker(settings: &crate::config::Settings) -> &greenharness_slots::Marker {
+    settings.marker.get_or_init(greenharness_slots::held_marker)
 }
 
-/// Whether an ancestor holds a slot for this process: its
-/// `GREENHARNESS_HOST_SLOT` names a live lease (`greenharness_slots::held_marker`).
-pub fn nested() -> bool {
-    marker().is_held()
+/// Whether an ancestor holds a slot for this run: its `GREENHARNESS_HOST_SLOT`
+/// names a live lease (`greenharness_slots::held_marker`).
+pub(crate) fn nested(settings: &crate::config::Settings) -> bool {
+    marker(settings).is_held()
 }
 
 /// For a command about to queue: when its marker was refused, the journal's
-/// `marker_refused` row and the two lines to print, the first time only.
-pub fn marker_refused_note() -> Option<String> {
-    let marker = marker();
-    MARKER_LOG
+/// `marker_refused` row and the lines to print, the first time only.
+pub(crate) fn marker_refused_note(settings: &crate::config::Settings) -> Option<String> {
+    let marker = marker(settings);
+    settings
+        .marker_log
         .record(
             &greenharness_slots::dir(),
             crate::names::SLOT_HOLDER,
@@ -598,6 +594,17 @@ pub fn marker_refused_note() -> Option<String> {
         )
         .then(|| greenharness_slots::refused_line(BIN, marker))
         .flatten()
+}
+
+/// Print a refusal's lines: into the check's output when a stage is
+/// watching it, else on stderr, never on stdout (which a caller may read as
+/// data).
+fn say_refusal(line: &str) {
+    if crate::live::current_sink().is_some() {
+        crate::hooks::common::say(line);
+    } else {
+        eprintln!("{line}");
+    }
 }
 
 /// Called before a tool is spawned. For the first tool of a heavy check,
@@ -626,7 +633,7 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
         // Nested first: a nested amont must not pay the host-key scan for a
         // slot count it is about to ignore. Neither answer queues, so neither
         // can defer.
-        let (sizing, machine) = if nested() {
+        let (sizing, machine) = if nested(settings) {
             (None, greenharness_slots::Machine::detect())
         } else {
             sizing_and_machine(settings)
@@ -688,8 +695,8 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
             }
         };
         // A marker that names no live lease queues like none, said once.
-        if let Some(line) = marker_refused_note() {
-            crate::hooks::common::say(&line);
+        if let Some(line) = marker_refused_note(settings) {
+            say_refusal(&line);
         }
         let sink = crate::live::current_sink();
         if let Some((stage, idx)) = &sink {

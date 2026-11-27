@@ -25,17 +25,30 @@ use crate::{append_journal, escape, now_ms, platform, raw, session_id, Holder};
 /// The prefix of the marker a holder exports: `held:<lease>`.
 pub const MARKER_PREFIX: &str = "held:";
 
-/// The marker a crate before 5.4, relais before its t15 release, and
-/// greengate before 5.5 export: no lease named.
+/// The marker a crate before [`LEASE_WRITER_SINCE`] exports: no lease named.
 const BARE: &str = "held";
+
+/// The first greengate and relais release whose writers export
+/// `held:<lease>`. Before it, a holder exports bare `held`, which the reader
+/// accepts until [`ACCEPT_BARE`] is switched off.
+pub(crate) const LEASE_WRITER_SINCE: &str = "5.5";
 
 /// Whether a bare `held` is still accepted. True for the rollout's first two
 /// steps (every reader accepts both forms, then every writer emits the new
 /// one); false once both tools are installed with the new writer (t15
 /// phase 3).
-const ACCEPT_BARE: bool = true;
+const ACCEPT_BARE: BarePolicy = BarePolicy::Accept;
 
-/// How much of a marker value a line or a row repeats.
+/// What the reader does with the bare `held`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarePolicy {
+    Accept,
+    /// Built by the phase-3 switch; until then only the tests build it.
+    #[allow(dead_code)]
+    Refuse,
+}
+
+/// How much of a marker given a line or a row repeats.
 const SHOWN_CHARS: usize = 64;
 
 /// What [`HELD_ENV`](crate::HELD_ENV) says about this process.
@@ -44,11 +57,11 @@ const SHOWN_CHARS: usize = 64;
 pub enum Marker {
     /// Unset or empty: this process holds nothing, and queues.
     Absent,
-    /// An ancestor holds a slot: no second queue. `bare` when the value was
+    /// An ancestor holds a slot: no second queue. `bare` when the given was
     /// the old bare `held`, accepted during the rollout.
     Held { bare: bool },
     /// Set, but naming no live lease: this process queues.
-    Refused { value: String, reason: Refusal },
+    Refused { given: String, reason: Refusal },
 }
 
 impl Marker {
@@ -105,24 +118,24 @@ pub fn held_marker() -> Marker {
     held_marker_in(&crate::dir(), std::env::var_os(crate::HELD_ENV).as_deref())
 }
 
-/// [`held_marker`] for a given directory and value: the seam tests use.
-pub fn held_marker_in(dir: &Path, value: Option<&OsStr>) -> Marker {
-    read_marker(dir, value, ACCEPT_BARE)
+/// [`held_marker`] for a given directory and given: the seam tests use.
+pub fn held_marker_in(dir: &Path, given: Option<&OsStr>) -> Marker {
+    read_marker(dir, given, ACCEPT_BARE)
 }
 
 /// The reader, with the bare-marker policy as a parameter so tests cover
 /// both steps of the rollout.
-fn read_marker(dir: &Path, value: Option<&OsStr>, accept_bare: bool) -> Marker {
-    let Some(value) = value.filter(|v| !v.is_empty()) else {
+fn read_marker(dir: &Path, given: Option<&OsStr>, bare: BarePolicy) -> Marker {
+    let Some(given) = given.filter(|v| !v.is_empty()) else {
         return Marker::Absent;
     };
-    let text = value.to_string_lossy();
+    let text = given.to_string_lossy();
     let refuse = |reason| Marker::Refused {
-        value: text.clone().into_owned(),
+        given: text.clone().into_owned(),
         reason,
     };
     if text == BARE {
-        return if accept_bare {
+        return if bare == BarePolicy::Accept {
             Marker::Held { bare: true }
         } else {
             refuse(Refusal::Bare)
@@ -137,6 +150,16 @@ fn read_marker(dir: &Path, value: Option<&OsStr>, accept_bare: bool) -> Marker {
     }
 }
 
+/// Characters a terminal must not receive raw: controls, and the zero-width
+/// and bidirectional marks that reorder a line.
+fn needs_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
 /// `<pid>-<seq>`: two runs of ASCII digits joined by one dash.
 fn lease_id(id: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
@@ -148,9 +171,11 @@ fn lease_id(id: &str) -> bool {
 /// names it and its writer is alive, and one of its slots is locked. The
 /// slots are probed under the admission lock, so a probe never races an
 /// admission; when that lock is busy, a live record suffices, as
-/// [`status_in_on`](crate::status_in_on) allows. Nothing is created: the
-/// directory is checked, never made, and an absent `admission` file means
-/// nothing can be admitting, so the slots are probed directly.
+/// [`status_in_on`](crate::status_in_on) allows. The directory is checked,
+/// never made. The `admission` file is never removed once created, so when
+/// it is absent nothing can be admitting and the slots are probed directly.
+/// The record match and the liveness test mirror `read_holders`, the rule
+/// `status` reads holders by.
 fn live(dir: &Path, id: &str) -> Result<(), Refusal> {
     platform::check_private(dir).map_err(|_| Refusal::Io)?;
     let entries = match fs::read_dir(dir.join("holders")) {
@@ -160,7 +185,8 @@ fn live(dir: &Path, id: &str) -> Result<(), Refusal> {
     };
     let mut slots = Vec::new();
     let mut dead = false;
-    for entry in entries.filter_map(Result::ok) {
+    for entry in entries {
+        let entry = entry.map_err(|_| Refusal::Io)?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(index) = name
             .strip_prefix("slot-")
@@ -177,9 +203,11 @@ fn live(dir: &Path, id: &str) -> Result<(), Refusal> {
         if raw(&text, "lease").as_deref() != Some(id) {
             continue;
         }
-        match Holder::from_json(&text) {
-            Some(holder) if platform::alive(holder.pid) => slots.push(index),
-            _ => dead = true,
+        let holder = Holder::from_json(&text).ok_or(Refusal::Io)?;
+        if platform::alive(holder.pid) {
+            slots.push(index);
+        } else {
+            dead = true;
         }
     }
     if slots.is_empty() {
@@ -219,6 +247,8 @@ pub struct MarkerLog {
 }
 
 impl MarkerLog {
+    /// An empty log, meant for a `static` or a field of the run's settings:
+    /// the first refusal it records says its line, later ones say nothing.
     pub const fn new() -> MarkerLog {
         MarkerLog {
             said: AtomicBool::new(false),
@@ -231,23 +261,23 @@ impl MarkerLog {
     /// any other marker writes nothing. Best-effort, as every journal row.
     ///
     /// The row has no `waited_ms` (wait readers select `has("waited_ms")`,
-    /// as with `released` rows), and carries `ppid`, beside the value, cut to
+    /// as with `released` rows), and carries `ppid`, beside the given, cut to
     /// 64 characters and JSON-escaped:
     /// `{"at_ms":…,"tool":…,"pid":…,"ppid":…,"session":…,"marker":…,"reason":…,"outcome":"marker_refused"}`.
     pub fn record(&self, dir: &Path, tool: &str, marker: &Marker) -> bool {
-        let Marker::Refused { value, reason } = marker else {
+        let Marker::Refused { given, reason } = marker else {
             return false;
         };
         if self.said.swap(true, Ordering::SeqCst) {
             return false;
         }
-        append_journal(dir, &row(tool, value, Some(*reason), "marker_refused"));
+        append_journal(dir, &row(tool, given, Some(*reason), "marker_refused"));
         true
     }
 }
 
 /// One marker row; see [`MarkerLog::record`].
-fn row(tool: &str, value: &str, reason: Option<Refusal>, outcome: &str) -> String {
+fn row(tool: &str, given: &str, reason: Option<Refusal>, outcome: &str) -> String {
     let session = session_id();
     let session = if session.is_empty() {
         String::new()
@@ -256,7 +286,7 @@ fn row(tool: &str, value: &str, reason: Option<Refusal>, outcome: &str) -> Strin
     };
     let ppid = parent_id().map_or(String::new(), |p| format!(",\"ppid\":{p}"));
     let reason = reason.map_or(String::new(), |r| format!(",\"reason\":\"{}\"", r.as_str()));
-    let shown: String = value.chars().take(SHOWN_CHARS).collect();
+    let shown: String = given.chars().take(SHOWN_CHARS).collect();
     format!(
         "{{\"at_ms\":{},\"tool\":\"{}\",\"pid\":{}{ppid}{session},\"marker\":\"{}\"{reason},\"outcome\":\"{outcome}\"}}\n",
         now_ms(),
@@ -284,30 +314,35 @@ fn parent_id() -> Option<u32> {
 ///   unset it; only a slot holder sets it
 /// ```
 ///
-/// The value's control characters are escaped first, then it is cut to 64
-/// characters, so a hand-set value can neither drive the terminal nor push
-/// the hint out of view.
+/// The control and invisible format characters of the value are escaped
+/// first, then it is cut to 64 characters, so a hand-set value can neither
+/// drive the terminal nor push the hint out of view.
 pub fn refused_line(bin: &str, marker: &Marker) -> Option<String> {
-    let Marker::Refused { value, reason } = marker else {
+    let Marker::Refused { given, reason } = marker else {
         return None;
     };
-    let shown: String = value
-        .chars()
-        .flat_map(|c| -> Box<dyn Iterator<Item = char>> {
-            if c.is_control() {
-                Box::new(c.escape_default())
-            } else {
-                Box::new(std::iter::once(c))
-            }
-        })
-        .take(SHOWN_CHARS)
-        .collect();
+    let mut shown = String::new();
+    for c in given.chars() {
+        if shown.chars().count() >= SHOWN_CHARS {
+            break;
+        }
+        if needs_escape(c) {
+            shown.extend(c.escape_default());
+        } else {
+            shown.push(c);
+        }
+    }
     let hint = match reason {
-        Refusal::Bare => "bare held is refused; its holder must be 5.5 or later".to_string(),
+        Refusal::Bare => {
+            format!("bare held is refused; its holder must be {LEASE_WRITER_SINCE} or later")
+        }
         Refusal::DeadPid | Refusal::SlotFree => {
             format!("its holder has ended; see: {bin} slots")
         }
-        _ => "unset it; only a slot holder sets it".to_string(),
+        Refusal::Io => format!("cannot read the slot directory; see: {bin} slots"),
+        Refusal::Malformed | Refusal::UnknownLease => {
+            "unset it; only a slot holder sets it".to_string()
+        }
     };
     Some(format!(
         "{bin}: {}={shown} names no live lease ({}); queueing\n  {hint}",
@@ -336,8 +371,8 @@ mod tests {
         dir
     }
 
-    fn read(dir: &Path, value: &str) -> Marker {
-        held_marker_in(dir, Some(OsStr::new(value)))
+    fn read(dir: &Path, given: &str) -> Marker {
+        held_marker_in(dir, Some(OsStr::new(given)))
     }
 
     /// A real lease taken in `dir`: its records name its id.
@@ -417,10 +452,10 @@ mod tests {
     fn forged_and_odd_values_are_refused() {
         let dir = scratch("forged");
         let _lease = take(&dir);
-        for value in [
+        for given in [
             "1", "/tmp/x", "held:", "held:x y", "held:1-", "held:-1", "HELD",
         ] {
-            assert!(refused(Refusal::Malformed)(&read(&dir, value)), "{value}");
+            assert!(refused(Refusal::Malformed)(&read(&dir, given)), "{given}");
         }
         assert!(refused(Refusal::UnknownLease)(&read(&dir, "held:1-999999")));
         let _ = fs::remove_dir_all(&dir); // best-effort: scratch
@@ -438,7 +473,7 @@ mod tests {
     fn bare_held_is_accepted_until_the_rollout_refuses_it() {
         let dir = scratch("bare");
         assert_eq!(read(&dir, "held"), Marker::Held { bare: true });
-        let bare = read_marker(&dir, Some(OsStr::new("held")), false);
+        let bare = read_marker(&dir, Some(OsStr::new("held")), BarePolicy::Refuse);
         assert!(refused(Refusal::Bare)(&bare));
         let _ = fs::remove_dir_all(&dir); // best-effort: scratch
     }
@@ -496,8 +531,8 @@ mod tests {
     #[test]
     fn a_hostile_value_is_escaped_and_cut() {
         let dir = scratch("hostile");
-        let value = format!("x\u{1b}[2J\r\n{}", "é".repeat(80));
-        let marker = read(&dir, &value);
+        let given = format!("x\u{1b}[2J\r\n{}", "é".repeat(80));
+        let marker = read(&dir, &given);
         let line = refused_line("greengate", &marker).unwrap();
         let first = line.lines().next().unwrap();
         assert!(
@@ -526,7 +561,7 @@ mod tests {
             Refusal::Io,
         ] {
             let marker = Marker::Refused {
-                value: "1".into(),
+                given: "1".into(),
                 reason,
             };
             let line = refused_line("greengate", &marker).unwrap();

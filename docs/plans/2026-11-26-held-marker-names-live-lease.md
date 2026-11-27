@@ -170,6 +170,19 @@ commit. greengate is released first in each phase; the relais PR waits for
 the crate on crates.io.
 
 ## Decision log
+- 2026-11-27 — the rollout's versions are 5.4.0 (both forms), 5.5.0 (writes
+  `held:<lease>`) and 5.6.0 (refuses bare), not 5.3/5.4/5.5: main released
+  5.3.0 for an unrelated rename (t21) before this branch merged. Each step's
+  text here reads one release later than the Behaviour and Phases wording;
+  `LEASE_WRITER_SINCE` in the crate is the one place the writer version lives.
+- 2026-11-27 — `Marker::Held` carries `bare: bool`, not the lease id, which
+  phase 2 reads from the environment it already has. The reader stays
+  `#[non_exhaustive]` so a field can be added without a major bump.
+- 2026-11-27 — implementation review (round 1): the once-per-process memo
+  moved from process statics onto the run's `Settings`; the hook path prints
+  its refusal to stderr unless a stage is watching the check, never stdout.
+  The test the review asked for on the hook path (two heavy checks) is carried,
+  not built here.
 - 2026-11-26 — minor releases (5.3.0, 5.4.0, 5.5.0), because an
   environment variable's accepted values are not in
   `cli.compat.interface-is-public` (flags, subcommands, exit codes, `--json`);
@@ -228,9 +241,11 @@ the crate on crates.io.
   under `od -c`), a 40-character multibyte value does not panic, and
   `=1 ... -- sh -c 'exit 7'` exits 7.
 - Phase 1, integration (`it/slot_run.rs`, scratch 0700 dir, slots on): `=1`
-  with two heavy checks gives exactly one stderr line, one `marker_refused`
-  row and one `admitted` row; the same with `GREENGATE_HOST_SLOTS=0` gives no
-  line and no row.
+  on one `slot run` gives exactly one stderr line, one `marker_refused` row
+  and one `admitted` row; the same with `GREENGATE_HOST_SLOTS=0` gives no line
+  and no row. The hook path's once-per-run guard is the `MarkerLog` unit test
+  (a second `record` writes nothing) plus the pilot in Phase 1's observations,
+  not a hook fixture with two heavy checks: that fixture is a carried item.
 - Phase 1, fixtures: the greengate-runtime, greengate and relais suites,
   run once, add zero rows of any kind to the real `waits.jsonl` (line count
   before equals after), and pass with slots forced off; a grep of the real journal after the
