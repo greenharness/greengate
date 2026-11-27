@@ -544,13 +544,13 @@ fn an_unmeasured_check_answers_to_the_extended_budget() {
     r.git(&["config", "greengate.timeout", "0"]);
     let zero = std::ffi::OsString::from("0");
     let four = std::ffi::OsString::from("4");
-    let held = std::ffi::OsString::from("held");
+    let off = std::ffi::OsString::from("0");
     let (run, took) = r.hook_watched_unpinned(
         "pre-commit",
         &[
             ("GREENGATE_CPU_MAX_PROCS", zero.as_os_str()),
             ("GREENGATE_IDLE_LOAD_SCALE", four.as_os_str()),
-            ("GREENHARNESS_HOST_SLOT", held.as_os_str()),
+            ("GREENGATE_HOST_SLOTS", off.as_os_str()),
         ],
         WATCHDOG,
     );

@@ -215,6 +215,11 @@ pub struct Settings {
     pub(crate) progress: OnceLock<bool>,
     pub(crate) declared_mode: OnceLock<bool>,
     pub(crate) fixing: OnceLock<bool>,
+    /// This process's held marker and its once-per-run journal row (t15): a
+    /// fact of the environment, memoised on the settings that every check of
+    /// the run reads, not in a module-level static.
+    pub(crate) marker: OnceLock<greenharness_slots::Marker>,
+    pub(crate) marker_log: greenharness_slots::MarkerLog,
 }
 
 /// `amont run --quiet` or `--raw`.
