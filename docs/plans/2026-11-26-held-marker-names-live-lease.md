@@ -285,5 +285,20 @@ the crate on crates.io.
   `which greengate` / `which relais` prints the released version.
 
 ## Outcome
+Phase 1, amont half (this PR; relais's half, the greengate 5.4.0 release and both installs follow, so Phase 1 stays unticked). Observed before the push, on `target/debug/greengate` with a scratch 0700 slot directory and `GREENGATE_HOST_SLOTS=1`:
+- `GREENHARNESS_HOST_SLOT=1 greengate slot run -- sh -c 'exit 7'` printed the refusal line and its hint once, journalled one `marker_refused` row (reason `malformed`, `ppid`, no `waited_ms`) then one `admitted` row, and exited 7.
+- `GREENHARNESS_HOST_SLOT=$'x\e[2J'` printed no raw ESC byte (`od -c | grep -c 033` gave 0). A 40-character multibyte value printed and exited 0.
+- Bare `GREENHARNESS_HOST_SLOT=held` printed nothing and wrote no row, as phase 1 accepts it.
+- A `slot run` nested under a real `slot run` wrote one `admitted` row, not two.
+- `held_marker_in` median 0.35 to 0.45 ms over 100 calls (cap 2, one lease), against the plan's under 1 ms.
+- fmt and `clippy --all-targets -D warnings` clean; the whole workspace suite exits 0 (about 2,040 tests passed, run through one host slot); the real `waits.jsonl` gained no `marker_refused` row from the suites.
+- The hook path's two-heavy-check fixture and the relais half are not built here.
 
-<!-- panel: repos=amont,relais adds=contract reviewers=architect,backend,lang:rust,po,tui,unix body-sha=2573b2bcc069 -->
+## Implementation review
+- implementation-review: approve-with-changes, round 1, then two Deltas; 4 blocking and 4 other findings fixed (Settings memo, `BarePolicy`, `given`, stderr, `bad_record`); 1 deliberate; 130k, 160 s.
+- backend: approve-with-changes, three rounds; hook two-check fixture carried; unreadable record of another lease deliberate: it fails closed, queues, and says why. 80k, 117 s.
+- lang:rust: approve-with-changes, three rounds; `Marker::Held` shape kept (`bare` flag); `Vec<char>` per escaped character deliberate, on a failure path only. 66k, 53 s.
+- unix: approve (delta); stdout/stderr routing and escaping fixed. 70k, 132 s.
+- architect: approve-with-changes (delta); two low items recorded in the Decision log. 71k, 107 s.
+
+<!-- panel: repos=amont,relais adds=contract reviewers=architect,backend,lang:rust,po,tui,unix body-sha=7f6768fb109f -->
