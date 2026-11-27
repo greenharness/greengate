@@ -1,0 +1,5 @@
+# Full reviews: an off switch for slot promote
+
+Round 1 (opus): backend approve-with-changes (blocking `adds=contract`, env-name typo, env could force on, privacy check before the journal, fail-open); lang:rust approve-with-changes (test pin, `Refused::Off{source: host::Source}`); tui approve-with-changes (80 columns, `set by:`, cause once); unix approve-with-changes (invalid-value warning, warnings printed).
+Round 2 (opus): architect (new seat), po (new seat), backend, lang:rust, tui, unix, all approve-with-changes. Applied: `read_key` cannot serve the key so `resolve_promote` is its own reader, `promote_from_host()` for relais, crates.io publish, release before 2026-12-03, `source` in the row, Measure, live check on the installed binary, pin `GREENGATE_HOST_PROMOTE=1` in `.cargo/config.toml` and `pin_host_env`, switch in its own commit.
+Backend on the final body: approve-with-changes, two carried into implementation: the live-check row is left out of the Measure (its timestamp goes in Outcome); `read_key`'s own invalid-git-value warning is dropped for this key (one warning, not two). Carried low: a `--system` `hostPromote 0` is not pinned out of the tests.
