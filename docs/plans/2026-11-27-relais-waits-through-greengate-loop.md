@@ -40,3 +40,4 @@ Part of [relais waits through greengate's wait loop](https://github.com/frederic
 - backend: approve-with-changes → approve; wildcard rule moot (enums exhaustive), wrapper evidence recorded; 60k+27k, 78 s.
 - lang:rust: approve-with-changes → approve; `#[non_exhaustive]` removed from `Pause`/`Ended`, variants documented, pause count asserted; 49k+23k, 57 s.
 - architect: approve → approve; crate doc names no caller (ADR-0075); 49k+23k, 48 s.
+- implementation-review delta 2 (CI fix, HEADS.md as greentopo 2.0.0 writes it): approve, no findings; 32k, 23 s.
