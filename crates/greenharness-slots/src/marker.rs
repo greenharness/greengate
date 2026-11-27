@@ -33,9 +33,9 @@ const BARE: &str = "held";
 /// accepts until [`ACCEPT_BARE`] is switched off.
 pub(crate) const LEASE_WRITER_SINCE: &str = "5.5";
 
-/// Whether a bare `held` is still accepted. True for the rollout's first two
-/// steps (every reader accepts both forms, then every writer emits the new
-/// one); false once both tools are installed with the new writer (t15
+/// Whether a bare `held` is still accepted: `Accept` for the rollout's first
+/// two steps (every reader accepts both forms, then every writer emits the
+/// new one); `Refuse` once both tools are installed with the new writer (t15
 /// phase 3).
 const ACCEPT_BARE: BarePolicy = BarePolicy::Accept;
 
@@ -43,12 +43,13 @@ const ACCEPT_BARE: BarePolicy = BarePolicy::Accept;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BarePolicy {
     Accept,
-    /// Built by the phase-3 switch; until then only the tests build it.
-    #[allow(dead_code)]
+    /// The phase-3 policy. Test-only until the switch, which removes the
+    /// `cfg`.
+    #[cfg(test)]
     Refuse,
 }
 
-/// How much of a marker given a line or a row repeats.
+/// How much of a marker value a line or a row repeats.
 const SHOWN_CHARS: usize = 64;
 
 /// What [`HELD_ENV`](crate::HELD_ENV) says about this process.
@@ -57,7 +58,7 @@ const SHOWN_CHARS: usize = 64;
 pub enum Marker {
     /// Unset or empty: this process holds nothing, and queues.
     Absent,
-    /// An ancestor holds a slot: no second queue. `bare` when the given was
+    /// An ancestor holds a slot: no second queue. `bare` when the value was
     /// the old bare `held`, accepted during the rollout.
     Held { bare: bool },
     /// Set, but naming no live lease: this process queues.
@@ -85,15 +86,19 @@ pub enum Refusal {
     DeadPid,
     /// A live record names it, but no slot of the lease is locked.
     SlotFree,
+    /// A record names it, but does not parse: a real holder's record,
+    /// damaged.
+    BadRecord,
     /// The slot directory could not be read, or is not this user's.
     Io,
 }
 
 impl Refusal {
     /// The journal word: `bare`, `malformed`, `unknown_lease`, `dead_pid`,
-    /// `slot_free`, `io`. A refusal naming a lease in the records (`dead_pid`,
-    /// `slot_free`) is a real child failing the check; the others are a forged
-    /// or stale marker.
+    /// `slot_free`, `bad_record`, `io`. A refusal naming a lease in the
+    /// records (`dead_pid`, `slot_free`, `bad_record`) is a real child failing
+    /// the check; the others are a forged or stale marker, or an unreadable
+    /// directory.
     pub fn as_str(self) -> &'static str {
         match self {
             Refusal::Bare => "bare",
@@ -101,6 +106,7 @@ impl Refusal {
             Refusal::UnknownLease => "unknown_lease",
             Refusal::DeadPid => "dead_pid",
             Refusal::SlotFree => "slot_free",
+            Refusal::BadRecord => "bad_record",
             Refusal::Io => "io",
         }
     }
@@ -118,7 +124,7 @@ pub fn held_marker() -> Marker {
     held_marker_in(&crate::dir(), std::env::var_os(crate::HELD_ENV).as_deref())
 }
 
-/// [`held_marker`] for a given directory and given: the seam tests use.
+/// [`held_marker`] for a given directory and value: the seam tests use.
 pub fn held_marker_in(dir: &Path, given: Option<&OsStr>) -> Marker {
     read_marker(dir, given, ACCEPT_BARE)
 }
@@ -156,7 +162,11 @@ fn needs_escape(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            '\u{061C}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
         )
 }
 
@@ -174,8 +184,8 @@ fn lease_id(id: &str) -> bool {
 /// [`status_in_on`](crate::status_in_on) allows. The directory is checked,
 /// never made. The `admission` file is never removed once created, so when
 /// it is absent nothing can be admitting and the slots are probed directly.
-/// The record match and the liveness test mirror `read_holders`, the rule
-/// `status` reads holders by.
+/// A record that does not parse is skipped, as `read_holders` (the rule
+/// `status` reads holders by) skips it.
 fn live(dir: &Path, id: &str) -> Result<(), Refusal> {
     platform::check_private(dir).map_err(|_| Refusal::Io)?;
     let entries = match fs::read_dir(dir.join("holders")) {
@@ -185,6 +195,7 @@ fn live(dir: &Path, id: &str) -> Result<(), Refusal> {
     };
     let mut slots = Vec::new();
     let mut dead = false;
+    let mut bad = false;
     for entry in entries {
         let entry = entry.map_err(|_| Refusal::Io)?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -195,15 +206,24 @@ fn live(dir: &Path, id: &str) -> Result<(), Refusal> {
         else {
             continue;
         };
-        // A record removed or rewritten meanwhile (a release, a rename) is
-        // skipped: a lease being renamed keeps its id in the new record.
-        let Ok(text) = fs::read_to_string(entry.path()) else {
-            continue;
+        // A record removed meanwhile (a release) is skipped; a rename writes
+        // a new record with the same id through a rename, so it never reads
+        // half-written. Any other read error is an unreadable directory.
+        let text = match fs::read_to_string(entry.path()) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(Refusal::Io),
         };
         if raw(&text, "lease").as_deref() != Some(id) {
             continue;
         }
-        let holder = Holder::from_json(&text).ok_or(Refusal::Io)?;
+        // A record naming the lease that does not parse is skipped, as
+        // `read_holders` skips it, so another live record of the same lease
+        // still answers; with none, the refusal names it.
+        let Some(holder) = Holder::from_json(&text) else {
+            bad = true;
+            continue;
+        };
         if platform::alive(holder.pid) {
             slots.push(index);
         } else {
@@ -211,7 +231,9 @@ fn live(dir: &Path, id: &str) -> Result<(), Refusal> {
         }
     }
     if slots.is_empty() {
-        return Err(if dead {
+        return Err(if bad {
+            Refusal::BadRecord
+        } else if dead {
             Refusal::DeadPid
         } else {
             Refusal::UnknownLease
@@ -238,9 +260,10 @@ fn live(dir: &Path, id: &str) -> Result<(), Refusal> {
     }
 }
 
-/// Once per log, the journal row a marker leaves. A process keeps one in a
-/// `static` and passes it to every call, so a refusal seen by many checks or
-/// call sites is said and counted once; a test builds its own.
+/// Once per log, the journal row a marker leaves. One run keeps one log, on
+/// its settings (greengate) or in a `static` (relais), and passes it to every
+/// call, so a refusal seen by many checks or call sites is said and counted
+/// once; a test builds its own.
 #[derive(Debug, Default)]
 pub struct MarkerLog {
     said: AtomicBool,
@@ -261,7 +284,7 @@ impl MarkerLog {
     /// any other marker writes nothing. Best-effort, as every journal row.
     ///
     /// The row has no `waited_ms` (wait readers select `has("waited_ms")`,
-    /// as with `released` rows), and carries `ppid`, beside the given, cut to
+    /// as with `released` rows), and carries `ppid`, beside the value, cut to
     /// 64 characters and JSON-escaped:
     /// `{"at_ms":…,"tool":…,"pid":…,"ppid":…,"session":…,"marker":…,"reason":…,"outcome":"marker_refused"}`.
     pub fn record(&self, dir: &Path, tool: &str, marker: &Marker) -> bool {
@@ -322,15 +345,18 @@ pub fn refused_line(bin: &str, marker: &Marker) -> Option<String> {
         return None;
     };
     let mut shown = String::new();
+    let mut width = 0;
     for c in given.chars() {
-        if shown.chars().count() >= SHOWN_CHARS {
+        let escaped: Vec<char> = if needs_escape(c) {
+            c.escape_default().collect()
+        } else {
+            vec![c]
+        };
+        if width + escaped.len() > SHOWN_CHARS {
             break;
         }
-        if needs_escape(c) {
-            shown.extend(c.escape_default());
-        } else {
-            shown.push(c);
-        }
+        width += escaped.len();
+        shown.extend(escaped);
     }
     let hint = match reason {
         Refusal::Bare => {
@@ -340,6 +366,7 @@ pub fn refused_line(bin: &str, marker: &Marker) -> Option<String> {
             format!("its holder has ended; see: {bin} slots")
         }
         Refusal::Io => format!("cannot read the slot directory; see: {bin} slots"),
+        Refusal::BadRecord => format!("its holder record is damaged; see: {bin} slots"),
         Refusal::Malformed | Refusal::UnknownLease => {
             "unset it; only a slot holder sets it".to_string()
         }
@@ -551,6 +578,56 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_record_of_the_lease_is_refused_by_name() {
+        let dir = scratch("damaged");
+        fs::write(dir.join("holders/slot-0.who"), "{\"lease\":\"5-0\",").unwrap();
+        assert!(refused(Refusal::BadRecord)(&read(&dir, "held:5-0")));
+        let _ = fs::remove_dir_all(&dir); // best-effort: scratch
+    }
+
+    #[test]
+    fn a_damaged_record_beside_a_live_one_still_answers() {
+        let dir = scratch("damaged-live");
+        let lease = take(&dir);
+        fs::write(
+            dir.join("holders/slot-1.who"),
+            format!("{{\"lease\":\"{}\",", lease.id()),
+        )
+        .unwrap();
+        assert_eq!(read(&dir, &lease.marker()), Marker::Held { bare: false });
+        drop(lease);
+        let _ = fs::remove_dir_all(&dir); // best-effort: scratch
+    }
+
+    #[test]
+    fn bidirectional_and_zero_width_marks_are_escaped() {
+        let dir = scratch("bidi");
+        let marker = read(&dir, "a\u{202E}b\u{200B}c\u{FEFF}");
+        let line = refused_line("greengate", &marker).unwrap();
+        let first = line.lines().next().unwrap();
+        for raw in ['\u{202E}', '\u{200B}', '\u{FEFF}'] {
+            assert!(!first.contains(raw), "{first:?}");
+        }
+        assert!(first.contains("\\u{202e}"), "{first}");
+        let _ = fs::remove_dir_all(&dir); // best-effort: scratch
+    }
+
+    #[test]
+    fn the_shown_value_never_passes_64_characters() {
+        let dir = scratch("width");
+        let marker = read(&dir, &"\u{1b}".repeat(40));
+        let line = refused_line("greengate", &marker).unwrap();
+        let shown = line
+            .split("GREENHARNESS_HOST_SLOT=")
+            .nth(1)
+            .and_then(|rest| rest.split(" names no live lease").next())
+            .unwrap();
+        assert!(shown.chars().count() <= 64, "{shown}");
+        assert!(shown.ends_with('}'), "an escape is never cut: {shown}");
+        let _ = fs::remove_dir_all(&dir); // best-effort: scratch
+    }
+
+    #[test]
     fn every_hint_fits_80_columns() {
         for reason in [
             Refusal::Bare,
@@ -558,6 +635,7 @@ mod tests {
             Refusal::UnknownLease,
             Refusal::DeadPid,
             Refusal::SlotFree,
+            Refusal::BadRecord,
             Refusal::Io,
         ] {
             let marker = Marker::Refused {

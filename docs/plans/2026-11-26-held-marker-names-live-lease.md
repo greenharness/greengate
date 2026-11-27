@@ -183,6 +183,13 @@ the crate on crates.io.
   its refusal to stderr unless a stage is watching the check, never stdout.
   The test the review asked for on the hook path (two heavy checks) is carried,
   not built here.
+- 2026-11-27 — implementation review (delta): a holder record that names the
+  lease but does not parse is skipped, as `read_holders` skips it, and refuses
+  as `bad_record` when no other record answers. `bad_record` is a real child
+  failing the check, so the rollback trigger and the phase-3 gate count it
+  beside `dead_pid` and `slot_free`. `Settings` now holds one run-scoped fact
+  (the marker) beside its configuration memos; later phases add no more run
+  state there.
 - 2026-11-26 — minor releases (5.3.0, 5.4.0, 5.5.0), because an
   environment variable's accepted values are not in
   `cli.compat.interface-is-public` (flags, subcommands, exit codes, `--json`);
