@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v5.4.0
+
 A hand-set `GREENHARNESS_HOST_SLOT` no longer skips the host slot queue
 (ADR-0022, amended; programme host-slot-admission t10 and t15). The marker a
 holder exports becomes `held:<lease>`, its lease id, and one reader in
