@@ -1042,7 +1042,8 @@ pub fn wait_in_line(
 }
 
 /// What the loop hands a caller's pause, between one poll and the next.
-#[non_exhaustive]
+/// Exhaustive on purpose: a new kind of pause changes what every caller
+/// must do, so it is a major change, never a wildcard arm.
 #[derive(Debug)]
 pub enum Pause<'a> {
     /// The poll answered: this waiter is in line.
@@ -1054,10 +1055,11 @@ pub enum Pause<'a> {
 
 /// Why a [`wait_in_line_paced`] ended without a slot: the line's own end
 /// (ADR-0022), or the caller's pause breaking with its own answer.
-#[non_exhaustive]
 #[derive(Debug)]
 pub enum Ended<B> {
+    /// The line's own end (ADR-0022): a stall, the ceiling, failed polls.
     Line(LineEnd),
+    /// The caller's pause broke with this value.
     Caller(B),
 }
 
@@ -1069,7 +1071,8 @@ pub enum Ended<B> {
 /// called, where [`wait_in_line`] sleeps: it does the pausing (sleep,
 /// heartbeat, charge a budget), and `Continue` polls again while
 /// `Break(b)` ends the wait with [`Ended::Caller`]. The waiter leaves the queue
-/// on every end. relais waits through this, pausing on its own clock.
+/// on every end. A caller that heartbeats a lease or charges its own
+/// budgets while it waits uses this.
 pub fn wait_in_line_paced<B>(
     mut waiter: Waiter,
     bounds: WaitBounds,
@@ -3199,6 +3202,12 @@ mod tests {
         assert_eq!(
             seen.iter().filter(|s| matches!(s, Seen::OnWait(_))).count(),
             6
+        );
+        assert_eq!(
+            seen.iter()
+                .filter(|s| matches!(s, Seen::PauseWaiting(_)))
+                .count(),
+            5
         );
         assert_eq!(seen.last(), Some(&Seen::OnWait(3)));
 

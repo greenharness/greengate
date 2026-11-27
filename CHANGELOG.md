@@ -11,9 +11,9 @@ missing here.
 `greenharness-slots` gains `wait_in_line_paced`, with `Pause` and `Ended`:
 the one wait loop of ADR-0022 with the pause between polls owned by the
 caller, which may also end the wait with its own answer. `wait_in_line` is
-now that loop with a 200 ms sleep, unchanged for its callers. relais waits
-for a host slot through it instead of a copy of the loop (programme
-relais-modularise t05).
+now that loop with a 200 ms sleep, unchanged for its callers. relais can
+then wait for a host slot through it instead of its own copy of the loop
+(programme relais-modularise t05).
 
 ## v5.4.0
 
