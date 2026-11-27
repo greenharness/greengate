@@ -8,6 +8,13 @@ missing here.
 
 ## Unreleased
 
+`greenharness-slots` gains `wait_in_line_paced`, with `Pause` and `Ended`:
+the one wait loop of ADR-0022 with the pause between polls owned by the
+caller, which may also end the wait with its own answer. `wait_in_line` is
+now that loop with a 200 ms sleep, unchanged for its callers. relais waits
+for a host slot through it instead of a copy of the loop (programme
+relais-modularise t05).
+
 ## v5.4.0
 
 A hand-set `GREENHARNESS_HOST_SLOT` no longer skips the host slot queue
@@ -24,13 +31,6 @@ writes the new form, and the one after refuses the bare one. New API in
 `MarkerLog`, `refused_line`, `held_value`, `Lease::id` and `Lease::marker`.
 greengate's own tests now run with slots off (`GREENGATE_HOST_SLOTS=0`)
 instead of a bare marker.
-
-`greenharness-slots` gains `wait_in_line_paced`, with `Pause` and `Ended`:
-the one wait loop of ADR-0022 with the pause between polls owned by the
-caller, which may also end the wait with its own answer. `wait_in_line` is
-now that loop with a 200 ms sleep, unchanged for its callers. relais waits
-for a host slot through it instead of a copy of the loop (programme
-relais-modularise t05).
 
 ## v5.3.0
 
