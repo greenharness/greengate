@@ -23,8 +23,10 @@
 //! opened close-on-exec (Rust's default), so a daemon a build leaves behind
 //! never keeps a slot.
 
+use std::convert::Infallible;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1021,40 +1023,87 @@ pub const POLL_FAILURES: u32 = 3;
 /// runs out (ADR-0022): the one loop every caller uses, so greengate's hooks,
 /// `slot run` and relais end a wait the same way. It takes the waiter: when
 /// it returns, granted or not, this caller has left the queue. `on_wait` sees
-/// each answer while waiting.
+/// each answer while waiting. Between polls it sleeps 200 ms; a caller that
+/// must pause on its own clock, or end the wait itself, uses
+/// [`wait_in_line_paced`].
 pub fn wait_in_line(
-    mut waiter: Waiter,
+    waiter: Waiter,
     bounds: WaitBounds,
     on_wait: impl FnMut(&Queue),
 ) -> Result<Lease, LineEnd> {
+    let ended = wait_in_line_paced(waiter, bounds, on_wait, |_| {
+        std::thread::sleep(Duration::from_millis(200));
+        ControlFlow::<Infallible>::Continue(())
+    });
+    ended.map_err(|ended| match ended {
+        Ended::Line(end) => end,
+        Ended::Caller(never) => match never {},
+    })
+}
+
+/// What the loop hands a caller's pause, between one poll and the next.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum Pause<'a> {
+    /// The poll answered: this waiter is in line.
+    Waiting(&'a Queue),
+    /// The poll failed, `failures` in a row so far (always below
+    /// [`POLL_FAILURES`]: the one that reaches it ends the wait instead).
+    Retrying { error: &'a io::Error, failures: u32 },
+}
+
+/// Why a [`wait_in_line_paced`] ended without a slot: the line's own end
+/// (ADR-0022), or the caller's pause breaking with its own answer.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum Ended<B> {
+    Line(LineEnd),
+    Caller(B),
+}
+
+/// [`wait_in_line`] with the pause between polls owned by the caller: the
+/// same loop, the same stall rule, failure count and ceiling (ADR-0022), in
+/// this order on every poll: a grant returns; an answer in line goes to
+/// `on_wait`, then the stall check; a failed poll is counted, and ends the
+/// wait at [`POLL_FAILURES`]; then the ceiling check. Only then is `pause`
+/// called, where [`wait_in_line`] sleeps: it does the pausing (sleep,
+/// heartbeat, charge a budget), and `Continue` polls again while
+/// `Break(b)` ends the wait with [`Ended::Caller`]. The waiter leaves the queue
+/// on every end. relais waits through this, pausing on its own clock.
+pub fn wait_in_line_paced<B>(
+    mut waiter: Waiter,
+    bounds: WaitBounds,
+    on_wait: impl FnMut(&Queue),
+    pause: impl FnMut(Pause<'_>) -> ControlFlow<B>,
+) -> Result<Lease, Ended<B>> {
     let joined = Instant::now();
     let dir = waiter.dir.clone();
     wait_in_line_with(
         bounds,
         || waiter.poll(),
         || (joined.elapsed(), now_ms(), admitted_at(&dir)),
-        std::thread::sleep,
+        pause,
         on_wait,
     )
 }
 
-/// [`wait_in_line`] against given polls and clocks: `clock` answers the time
-/// since the wait began (monotonic), then now and the last admission (wall
-/// milliseconds). The seam the tests drive.
-fn wait_in_line_with(
+/// [`wait_in_line_paced`] against given polls and clocks: `clock` answers the
+/// time since the wait began (monotonic), then now and the last admission
+/// (wall milliseconds). The seam the tests drive.
+fn wait_in_line_with<B>(
     bounds: WaitBounds,
     mut poll: impl FnMut() -> io::Result<Poll>,
     mut clock: impl FnMut() -> (Duration, u128, u128),
-    mut sleep: impl FnMut(Duration),
+    mut pause: impl FnMut(Pause<'_>) -> ControlFlow<B>,
     mut on_wait: impl FnMut(&Queue),
-) -> Result<Lease, LineEnd> {
+) -> Result<Lease, Ended<B>> {
     let mut stall = bounds
         .window
         .filter(|window| *window < bounds.ceiling)
         .map(Stall::new);
     let mut failures = 0;
     loop {
-        match poll() {
+        let answer = match poll() {
             Ok(Poll::Granted(lease)) => return Ok(lease),
             Ok(Poll::Waiting(queue)) => {
                 failures = 0;
@@ -1062,25 +1111,33 @@ fn wait_in_line_with(
                 let (elapsed, now, admitted) = clock();
                 if let Some(stall) = stall.as_mut() {
                     if stall.observe_at(&queue, elapsed, now, admitted) {
-                        return Err(LineEnd::Stalled {
+                        return Err(Ended::Line(LineEnd::Stalled {
                             window: stall.limit(),
                             position: queue.position,
-                        });
+                        }));
                     }
                 }
+                Ok(queue)
             }
             Err(error) => {
                 failures += 1;
                 if failures >= POLL_FAILURES {
-                    return Err(LineEnd::PollFailed { error });
+                    return Err(Ended::Line(LineEnd::PollFailed { error }));
                 }
+                Err(error)
             }
-        }
+        };
         let (elapsed, _, _) = clock();
         if elapsed >= bounds.ceiling {
-            return Err(LineEnd::Ceiling { waited: elapsed });
+            return Err(Ended::Line(LineEnd::Ceiling { waited: elapsed }));
         }
-        sleep(Duration::from_millis(200));
+        let step = match &answer {
+            Ok(queue) => Pause::Waiting(queue),
+            Err(error) => Pause::Retrying { error, failures },
+        };
+        if let ControlFlow::Break(stop) = pause(step) {
+            return Err(Ended::Caller(stop));
+        }
     }
 }
 
@@ -2977,9 +3034,13 @@ mod tests {
                     line.admitted_ms,
                 )
             },
-            |_| {},
+            |_| ControlFlow::<Infallible>::Continue(()),
             |_| {},
         )
+        .map_err(|ended| match ended {
+            Ended::Line(end) => end,
+            Ended::Caller(never) => match never {},
+        })
     }
 
     /// The shared loop, t02's red test: at position 10, an admission a
@@ -3027,6 +3088,131 @@ mod tests {
             run_line(bounds, polls, None),
             Err(LineEnd::Ceiling { .. })
         ));
+    }
+
+    /// What a paced wait saw, in order: `on_wait`'s positions and each pause.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Seen {
+        OnWait(usize),
+        PauseWaiting(usize),
+        PauseRetrying(u32),
+    }
+
+    /// [`wait_in_line_with`] with a pause that records every call and breaks
+    /// (with its call number) once `stop_at` says so.
+    fn run_paced(
+        bounds: WaitBounds,
+        polls: Vec<io::Result<Poll>>,
+        stop_at: impl Fn(&Pause<'_>, usize) -> bool,
+    ) -> (Result<Lease, Ended<usize>>, Vec<Seen>) {
+        let polls = std::cell::RefCell::new(std::collections::VecDeque::from(polls));
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mut calls = 0;
+        let ended = wait_in_line_with(
+            bounds,
+            || {
+                elapsed.set(elapsed.get() + Duration::from_secs(10));
+                polls
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or_else(|| Err(io::Error::other("the script ran out")))
+            },
+            || (elapsed.get(), WALL0 + elapsed.get().as_millis(), WALL0),
+            |step| {
+                calls += 1;
+                seen.borrow_mut().push(match &step {
+                    Pause::Waiting(queue) => Seen::PauseWaiting(queue.position),
+                    Pause::Retrying { failures, .. } => Seen::PauseRetrying(*failures),
+                });
+                if stop_at(&step, calls) {
+                    ControlFlow::Break(calls)
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+            |queue| seen.borrow_mut().push(Seen::OnWait(queue.position)),
+        );
+        (ended, seen.into_inner())
+    }
+
+    const PACED: WaitBounds = WaitBounds {
+        window: Some(Duration::from_secs(60)),
+        ceiling: Duration::from_secs(600),
+    };
+
+    /// A caller's pause ends the wait with its own answer, after `on_wait`
+    /// saw the same poll, and is not called again.
+    #[test]
+    fn a_paced_wait_ends_when_the_pause_breaks() {
+        let polls = (0..10).map(|step| waiting_at(5 - step.min(4))).collect();
+        let (ended, seen) = run_paced(PACED, polls, |_, call| call == 2);
+        assert!(matches!(ended, Err(Ended::Caller(2))), "{ended:?}");
+        assert_eq!(
+            seen,
+            vec![
+                Seen::OnWait(5),
+                Seen::PauseWaiting(5),
+                Seen::OnWait(4),
+                Seen::PauseWaiting(4),
+            ]
+        );
+    }
+
+    /// A failed poll reaches the pause with its count, so a caller can end
+    /// a wait whose line it never joined; the third failure ends the wait
+    /// itself, with no pause after it.
+    #[test]
+    fn a_failed_poll_reaches_the_pause_until_the_third_ends_the_wait() {
+        let fail = || Err(io::Error::other("busy disk"));
+        let (ended, seen) = run_paced(PACED, vec![fail(), waiting_at(1)], |step, _| {
+            matches!(step, Pause::Retrying { failures: 1, .. })
+        });
+        assert!(matches!(ended, Err(Ended::Caller(1))), "{ended:?}");
+        assert_eq!(seen, vec![Seen::PauseRetrying(1)]);
+
+        let (ended, seen) = run_paced(PACED, vec![fail(), fail(), fail()], |_, _| false);
+        match ended {
+            Err(Ended::Line(LineEnd::PollFailed { error })) => {
+                assert_eq!(error.to_string(), "busy disk");
+            }
+            other => panic!("expected the poll failure, got {other:?}"),
+        }
+        assert_eq!(seen, vec![Seen::PauseRetrying(1), Seen::PauseRetrying(2)]);
+    }
+
+    /// A stall and the ceiling end the wait before the pause: `on_wait`
+    /// sees the poll that stalled, the pause never does.
+    #[test]
+    fn a_stall_or_the_ceiling_ends_a_paced_wait_before_its_pause() {
+        let polls = (0..20).map(|_| waiting_at(3)).collect();
+        let (ended, seen) = run_paced(PACED, polls, |_, _| false);
+        assert!(
+            matches!(
+                ended,
+                Err(Ended::Line(LineEnd::Stalled { position: 3, .. }))
+            ),
+            "{ended:?}"
+        );
+        // Polls at 10..=60 s: the sixth stalls (60 s idle), so 6 `on_wait`
+        // and 5 pauses.
+        assert_eq!(
+            seen.iter().filter(|s| matches!(s, Seen::OnWait(_))).count(),
+            6
+        );
+        assert_eq!(seen.last(), Some(&Seen::OnWait(3)));
+
+        let bounds = WaitBounds {
+            window: None,
+            ceiling: Duration::from_secs(30),
+        };
+        let polls = (0..10).map(|_| waiting_at(1)).collect();
+        let (ended, seen) = run_paced(bounds, polls, |_, _| false);
+        assert!(
+            matches!(ended, Err(Ended::Line(LineEnd::Ceiling { .. }))),
+            "{ended:?}"
+        );
+        assert_eq!(seen.last(), Some(&Seen::OnWait(1)));
     }
 
     /// Two failed polls are a hiccup; the third in a row ends the wait.
