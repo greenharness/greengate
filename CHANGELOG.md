@@ -8,6 +8,8 @@ missing here.
 
 ## Unreleased
 
+## v5.5.0
+
 `greenharness-slots` gains `wait_in_line_paced`, with `Pause` and `Ended`:
 the one wait loop of ADR-0022 with the pause between polls owned by the
 caller, which may also end the wait with its own answer. `wait_in_line` is
