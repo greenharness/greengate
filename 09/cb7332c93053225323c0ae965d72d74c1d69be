@@ -1,0 +1,14 @@
+greensummit-v2
+tree ad9c497bc6c8cbb1dde7e58cbb7697e34ecfda8d
+gates ci-windows-test
+platform x86_64-windows
+input ci-windows-test 0c85b766d07ecf9f54360d45e773e32926b72bef
+canon ff0bf62148ff1b13275f3f2e32ba218e7be5b825
+greengate attest-sign-windows
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgUpKx1QTdCdwZEjcw/MK/JGWqft
+YBCaiDmnUdMyQ1dZAAAAALZ3JlZW5zdW1taXQAAAAAAAAABnNoYTUxMgAAAFMAAAALc3No
+LWVkMjU1MTkAAABAZYAHqZoenDqOFp11KGe1HRQf634mmunApse8U1AF5+6fWAgyo6h3qr
+aKUpv5PyzyuYN4UfWO4TjcJqI3R5peAA==
+-----END SSH SIGNATURE-----
