@@ -41,8 +41,8 @@ pub use marker::{
 };
 
 pub use reorder::{
-    promote_in, promote_in_waiting, queue_in, wait_text, JobState, Moved, Promote, PromoteError,
-    QueuedJob, Refused, AGE_FLOOR, PROMOTE_BUDGET, PROMOTE_LOCK_WAIT, PROMOTE_WINDOW,
+    promote_in, promote_in_waiting, promote_off, queue_in, wait_text, JobState, Moved, Promote,
+    PromoteError, QueuedJob, Refused, AGE_FLOOR, PROMOTE_BUDGET, PROMOTE_LOCK_WAIT, PROMOTE_WINDOW,
 };
 
 /// Exported to the command a slot holder runs, as `held:<lease>`
@@ -453,7 +453,8 @@ pub fn session_id() -> String {
     session_from(|k| std::env::var(k).ok())
 }
 
-const SESSION_ENVS: [&str; 3] = [
+/// The variables the session id is read from, in order.
+pub const SESSION_ENVS: [&str; 3] = [
     "CLAUDE_CODE_SESSION_ID",
     "RELAIS_SESSION_ID",
     "CLAUDE_SESSION_ID",

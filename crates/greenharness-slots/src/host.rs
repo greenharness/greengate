@@ -23,6 +23,11 @@ pub const CORES_ENV: &str = "GREENGATE_HOST_CORES";
 pub const SLOTS_KEY: &str = "greengate.hostSlots";
 pub const SLOTS_ENV: &str = "GREENGATE_HOST_SLOTS";
 
+/// The git key for slot promotion (`0` off, `1` or unset on), and its
+/// environment name. The environment can only turn promotion off.
+pub const PROMOTE_KEY: &str = "greengate.hostPromote";
+pub const PROMOTE_ENV: &str = "GREENGATE_HOST_PROMOTE";
+
 /// Accepted range of the core count.
 pub const CORES_RANGE: RangeInclusive<i64> = 1..=1024;
 /// Accepted range of the slot count.
@@ -261,6 +266,103 @@ pub fn parse_rows(text: &str) -> Vec<Row> {
 /// The arguments of the one git call that lists the host keys.
 pub const GIT_ARGS: [&str; 4] = ["config", "--show-scope", "--get-regexp", r"^greengate\."];
 
+/// Whether `slot promote` may move jobs: [`PROMOTE_ENV`] `0` turns it off for
+/// one process; else the last `global` or `system` row of [`PROMOTE_KEY`]
+/// (`0` off, `1` on); else on. A `1` in the environment never undoes a host
+/// `0` (it warns), so a session cannot turn a rollback off again. Unlike the
+/// sizing keys this reader words its own warnings: a bad value leaves promotion
+/// ON, and the warning names the `0` that turns it off. A key set only in a
+/// repository's own config is ignored with a warning. Pure, as [`resolve`].
+pub fn resolve_promote(
+    env: impl Fn(&str) -> Option<String>,
+    rows: &[Row],
+) -> (Resolved<bool>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let wanted = PROMOTE_KEY.to_ascii_lowercase();
+    let host = rows
+        .iter()
+        .rev()
+        .find(|(scope, k, _)| *k == wanted && (scope == "global" || scope == "system"));
+    if host.is_none() && rows.iter().any(|(_, k, _)| *k == wanted) {
+        warnings.push(format!(
+            "{PROMOTE_KEY} in this repository is ignored (host keys are global)\n  \
+             Fix: git config --global {PROMOTE_KEY} 0"
+        ));
+    }
+    let mut from_git = None;
+    if let Some((scope, _, raw)) = host {
+        let source = if scope == "system" {
+            Source::System
+        } else {
+            Source::Global
+        };
+        match raw.trim() {
+            "0" => {
+                from_git = Some(Resolved {
+                    value: false,
+                    source,
+                })
+            }
+            "1" => {
+                from_git = Some(Resolved {
+                    value: true,
+                    source,
+                })
+            }
+            other => warnings.push(format!(
+                "{PROMOTE_KEY} is {other:?} in git config --{scope}: promotion stays on\n  \
+                 To turn it off: git config --{scope} {PROMOTE_KEY} 0"
+            )),
+        }
+    }
+    if let Some(raw) = env(PROMOTE_ENV).filter(|v| !v.trim().is_empty()) {
+        match raw.trim() {
+            "0" => {
+                return (
+                    Resolved {
+                        value: false,
+                        source: Source::Env,
+                    },
+                    warnings,
+                )
+            }
+            "1" => {
+                if from_git.is_some_and(|g| !g.value) {
+                    warnings.push(format!(
+                        "{PROMOTE_ENV}=1 does not turn promotion back on\n  \
+                         Fix: git config --global --unset {PROMOTE_KEY}"
+                    ));
+                }
+            }
+            other => warnings.push(format!(
+                "{PROMOTE_ENV} is {other:?}; only 0 turns promotion off\n  \
+                 Fix: unset {PROMOTE_ENV}"
+            )),
+        }
+    }
+    let resolved = from_git.unwrap_or(Resolved {
+        value: true,
+        source: Source::Detected,
+    });
+    (resolved, warnings)
+}
+
+/// [`resolve_promote`] from this process's environment and the one cached git
+/// call: the reader for a client with no rows of its own (relais). The
+/// caller prints the warnings and checks the answer before `promote_in_waiting`.
+pub fn promote_from_host() -> (Resolved<bool>, Vec<String>) {
+    let rows = git_rows();
+    let (resolved, mut warnings) =
+        resolve_promote(|name| std::env::var(name).ok(), rows.unwrap_or(&[]));
+    if rows.is_none() {
+        warnings.push(format!(
+            "git cannot list config with scopes, so {PROMOTE_KEY} is not read; promotion stays on\n  \
+             Fix: check that git runs (git config --global --list)"
+        ));
+    }
+    (resolved, warnings)
+}
+
 /// The git rows, read once per process for a client with no rows of its own.
 fn git_rows() -> Option<&'static [Row]> {
     static ROWS: OnceLock<Option<Vec<Row>>> = OnceLock::new();
@@ -468,6 +570,76 @@ mod tests {
         let s = resolve(no_env, &rows, SIX);
         assert_eq!(s.cores, SIX);
         assert_eq!(s.warnings.len(), 1);
+    }
+
+    fn env_of(v: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |k| (k == PROMOTE_ENV).then(|| v.to_string())
+    }
+
+    #[test]
+    fn promotion_is_on_unless_something_turns_it_off() {
+        let (r, w) = resolve_promote(no_env, &[]);
+        assert_eq!((r.value, r.source), (true, Source::Detected));
+        assert!(w.is_empty());
+        let rows = [row("global", PROMOTE_KEY, "1")];
+        assert!(resolve_promote(no_env, &rows).0.value);
+    }
+
+    #[test]
+    fn a_host_zero_turns_it_off_and_names_its_source() {
+        let (r, _) = resolve_promote(no_env, &[row("global", PROMOTE_KEY, "0")]);
+        assert_eq!((r.value, r.source), (false, Source::Global));
+        let (r, _) = resolve_promote(no_env, &[row("system", PROMOTE_KEY, "0")]);
+        assert_eq!((r.value, r.source), (false, Source::System));
+        let rows = [
+            row("system", PROMOTE_KEY, "0"),
+            row("global", PROMOTE_KEY, "1"),
+        ];
+        assert!(resolve_promote(no_env, &rows).0.value, "the last row wins");
+    }
+
+    #[test]
+    fn the_environment_only_turns_it_off() {
+        let (r, w) = resolve_promote(env_of("0"), &[]);
+        assert_eq!((r.value, r.source), (false, Source::Env));
+        assert!(w.is_empty());
+        // A 1 is silent with nothing to undo.
+        let (r, w) = resolve_promote(env_of("1"), &[]);
+        assert!(r.value && w.is_empty(), "{w:?}");
+        // A 1 never undoes a host 0: still off, one warning.
+        let rows = [row("global", PROMOTE_KEY, "0")];
+        let (r, w) = resolve_promote(env_of("1"), &rows);
+        assert_eq!((r.value, r.source), (false, Source::Global));
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains(PROMOTE_ENV), "{w:?}");
+        // An env 0 beats a host 1.
+        let rows = [row("global", PROMOTE_KEY, "1")];
+        assert!(!resolve_promote(env_of("0"), &rows).0.value);
+    }
+
+    #[test]
+    fn an_invalid_value_leaves_promotion_on_and_names_the_zero() {
+        for bad in ["false", "off", "2", ""] {
+            let rows = [row("global", PROMOTE_KEY, bad)];
+            let (r, w) = resolve_promote(no_env, &rows);
+            assert!(r.value, "{bad:?} must leave promotion on");
+            assert_eq!(w.len(), 1, "{bad:?}: {w:?}");
+            assert!(w[0].contains("stays on") && w[0].contains("hostPromote 0"));
+            assert!(w[0].lines().all(|l| l.len() <= 80), "{w:?}");
+        }
+        let (r, w) = resolve_promote(env_of("off"), &[]);
+        assert!(r.value);
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn a_repository_value_is_ignored_with_a_warning() {
+        let rows = [row("local", PROMOTE_KEY, "0")];
+        let (r, w) = resolve_promote(no_env, &rows);
+        assert!(r.value);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("repository"));
+        assert!(w.iter().flat_map(|x| x.lines()).all(|l| l.len() <= 80));
     }
 
     /// greengate 4.0 reads only the new names: an old git key and an old

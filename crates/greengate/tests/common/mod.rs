@@ -147,6 +147,7 @@ impl Repo {
         sandbox_env(cmd);
         cmd.env("GREENGATE_IDLE_LOAD_SCALE", "1");
         cmd.env("GREENGATE_HOST_SLOTS", "0");
+        cmd.env("GREENGATE_HOST_PROMOTE", "1");
         cmd.env_remove("GREENHARNESS_HOST_SLOT");
         // amont's own gate sets FORCE_COLOR for the tools it runs on a
         // terminal, `cargo test` among them; a fixture must not inherit it,

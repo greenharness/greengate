@@ -840,7 +840,7 @@ too, the extended silence budget bounds it, so nothing waits forever.
 Settable from `greengate.conf` (`set lockWait 900`): how long a workspace's cold
 build holds its lock is the project's to know.
 
-## Host keys: `greengate.idleLoadScale`, `greengate.hostSlots` and `greengate.hostCores`
+## Host keys: `greengate.idleLoadScale`, `greengate.hostSlots`, `greengate.hostCores` and `greengate.hostPromote`
 
 These describe the machine, not the repository, so they are read from
 `--global` or `--system` git config only. A value set in a repository is
@@ -924,6 +924,25 @@ load is below 6. A number replaces it, for a machine where another count
 suits better; `12` there restores the sizing from before ADR-0021.
 `GREENGATE_HOST_CORES` overrides it for one process. relais reads the same
 key through the slots crate. See [docs/host-slots.md](host-slots.md#cores).
+
+### `greengate.hostPromote` — the off switch for `slot promote`
+
+```sh
+git config --global greengate.hostPromote 0   # default: on; 0 turns promotion off
+git config --global --unset greengate.hostPromote   # turn it back on
+```
+
+With `0`, `greengate slot promote` moves nothing: it prints `refused (off)`
+and a `set by:` line naming the source, exits 1, and journals one
+`promote_refused` line with `"limit":"off"` and `"source"` (`env`, `global` or
+`system`). The queue, `slot run` and `slots` are untouched, and a refused
+promote leaves the job where it is. `GREENGATE_HOST_PROMOTE=0` turns it off
+for one process; the environment can only turn promotion off, so a `1` there
+never undoes a host `0` (it warns). Any value but `0` or `1` in git is warned
+about and leaves promotion on. It is a rollback: set it when the measure in the
+promotion plan fires (p95 of `waited_ms` above 1.5 times the baseline), and
+unset it when the person revisits the rules. relais reads the same key
+through the slots crate (`host::promote_from_host`).
 
 ### `greengate.onBusy` — what a heavy check does on a busy host
 

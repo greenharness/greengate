@@ -53,6 +53,8 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 - [Build: an agent can move a job ahead](t13-build-reorder.md): `greengate slot promote <id> --reason …` (5.2.0) moves a session's own waiting job up to the head under t06's limits, journalled `promoted`; a waiter finds its ticket by inode, and `slots` lists the queue. relais's jobs become movable only once it links crate 5.2, and under its `run_id` session.
 - [Build: one host slot lease for a relais setup](t12-build-relais-setup-lease.md): relais v0.90.0 keeps one host slot across a setup's steps (relabelled per step, held marker exported); the test shows one `slots::take` for 3 steps and one admission-budget spend. The slot is given back before any coordinator wait, so a contended coordinator still re-queues per step.
 
+- [An off switch for `slot promote`](t23-promote-off-switch.md): `greengate.hostPromote 0` (or `GREENGATE_HOST_PROMOTE=0`, off-only) refuses every move with `refused (off)`, a `set by:` line and one `promote_refused` row carrying its `source`; the t13 rollback line points here once 5.6.0 ships.
+
 ## Handoff
 
 2026-11-23, t11 Phases 1–3 (branch `fix/hsa-t11`, plan

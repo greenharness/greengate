@@ -727,3 +727,112 @@ fn a_session_moves_its_own_waiting_job_to_the_head() {
     let _ = first.wait_with_output(); // best-effort: reap the holder
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
+
+/// The off switch on the built binary: the environment, then the host git
+/// key, each refuses by name with its source and journals one row; an
+/// environment `1` never undoes a host `0`.
+#[test]
+fn promote_off_refuses_by_name_from_each_source() {
+    let slots = slot_dir("promote-off");
+    let run = |env: &[(&str, &str)], gitconfig: Option<&str>| {
+        let mut cmd = as_session(
+            &slots,
+            "session-mine",
+            &["slot", "promote", "1-0", "--reason", "mine first"],
+        );
+        cmd.env_remove("GREENGATE_HOST_PROMOTE");
+        if let Some(body) = gitconfig {
+            let file = slots.join("gitconfig");
+            std::fs::write(&file, body).unwrap();
+            cmd.env("GIT_CONFIG_GLOBAL", &file);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("promote")
+    };
+
+    let by_env = run(&[("GREENGATE_HOST_PROMOTE", "0")], None);
+    let said = String::from_utf8_lossy(&by_env.stderr).into_owned();
+    assert_eq!(by_env.status.code(), Some(1), "{said}");
+    assert!(said.contains("refused (off): promotion is off"), "{said}");
+    assert!(said.contains("set by: GREENGATE_HOST_PROMOTE=0"), "{said}");
+    assert!(by_env.stdout.is_empty(), "{said}");
+
+    let by_git = run(&[], Some("[greengate]\n\thostPromote = 0\n"));
+    let said = String::from_utf8_lossy(&by_git.stderr).into_owned();
+    assert_eq!(by_git.status.code(), Some(1), "{said}");
+    assert!(
+        said.contains("set by: git config --global greengate.hostPromote 0"),
+        "{said}"
+    );
+
+    // An environment 1 does not undo it, and says so once.
+    let forced = run(
+        &[("GREENGATE_HOST_PROMOTE", "1")],
+        Some("[greengate]\n\thostPromote = 0\n"),
+    );
+    let said = String::from_utf8_lossy(&forced.stderr).into_owned();
+    assert_eq!(forced.status.code(), Some(1), "{said}");
+    assert!(said.contains("does not turn promotion back on"), "{said}");
+
+    // Unset, promotion follows the crate's rules (no such job here).
+    let on = run(&[], Some("[greengate]\n\thostPromote = 1\n"));
+    let said = String::from_utf8_lossy(&on.stderr).into_owned();
+    assert!(said.contains("refused (not-queued)"), "{said}");
+
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    assert_eq!(waits.matches("\"limit\":\"off\"").count(), 3, "{waits}");
+    assert!(
+        waits.contains("\"limit\":\"off\",\"source\":\"env\""),
+        "{waits}"
+    );
+    assert!(
+        waits.contains("\"limit\":\"off\",\"source\":\"global\""),
+        "{waits}"
+    );
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}
+
+/// A promote refused before the queue is touched creates no slot directory,
+/// and a word after `--` is the job.
+#[test]
+fn a_bad_promote_creates_no_slot_directory() {
+    let slots = slot_dir("promote-bad").join("never-made");
+    let bad = as_session(
+        &slots,
+        "session-mine",
+        &["slot", "promote", "1-0", "--reason", "  "],
+    )
+    .output()
+    .expect("promote");
+    assert_eq!(bad.status.code(), Some(2), "{}", text(&bad));
+    let off = as_session(&slots, "", &["slot", "promote", "1-0", "--reason", "r"])
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .output()
+        .expect("promote");
+    assert_eq!(off.status.code(), Some(1), "{}", text(&off));
+    assert!(
+        String::from_utf8_lossy(&off.stderr).contains("refused (no-session)"),
+        "{}",
+        text(&off)
+    );
+    assert!(!slots.exists(), "no slot directory may appear");
+
+    // After `--` the operand is the job, even when it looks like a flag.
+    let made = slot_dir("promote-dashes");
+    let after = as_session(
+        &made,
+        "session-mine",
+        &["slot", "promote", "--reason", "r", "--", "7-7"],
+    )
+    .output()
+    .expect("promote");
+    assert_eq!(after.status.code(), Some(1), "{}", text(&after));
+    assert!(
+        String::from_utf8_lossy(&after.stderr).contains("no waiting job 7-7"),
+        "{}",
+        text(&after)
+    );
+    let _ = std::fs::remove_dir_all(&made); // best-effort: scratch
+}
