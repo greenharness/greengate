@@ -170,6 +170,27 @@ commit. greengate is released first in each phase; the relais PR waits for
 the crate on crates.io.
 
 ## Decision log
+- 2026-11-28 — phase 2 ships as 5.7.0 and phase 3 as 5.8.0: main released
+  5.5.0 for the paced wait (#538, relais-modularise t05) before phase 2
+  branched, and t23 (the promote off switch) cuts 5.6.0 first.
+  `LEASE_WRITER_SINCE` moves to `5.7`.
+- 2026-11-27 — phase 2 also touches `greenharness-slots/src/marker.rs`
+  (`MarkerLog::record` writes the `marker_bare` row the Behaviour promises
+  from phase 2, with its unit test) and `docs/host-slots.md`; neither was in
+  the phase's file list. greengate records it from `nested()`, once per run.
+  relais keeps its crate 5.4 lock in phase 2, so only greengate writes
+  `marker_bare` until relais's phase 3; the phase-3 gate counts greengate's.
+- 2026-11-28 — implementation review (phase 2, round 1): `before_spawn`
+  returns the marker itself (`io::Result<Option<String>>`), read under the
+  same lock that found the slot, so a parked slot handed to another thread
+  between two calls cannot leave a tool without its marker; the `held_env()`
+  helper the Behaviour names is folded into it. `MarkerLog::record` matches
+  `Marker` exhaustively. The `marker_bare` row is written whatever this
+  run's sizing (its writer is the ancestor), and `it/slot_run.rs` and
+  `it/busy_defers.rs` carry the phase's integration tests (the latter was
+  not in the file list). Carried to phase 3: `Held { bare }` as two variants
+  once bare is refused (lang:rust), and a hook fixture for the parked-slot
+  branch (backend), beside phase 1's two-heavy-check fixture.
 - 2026-11-27 — the rollout's versions are 5.4.0 (both forms), 5.5.0 (writes
   `held:<lease>`) and 5.6.0 (refuses bare), not 5.3/5.4/5.5: main released
   5.3.0 for an unrelated rename (t21) before this branch merged. Each step's
@@ -294,7 +315,19 @@ Phase 1, amont half (this PR; relais's half, the greengate 5.4.0 release and bot
 - fmt and `clippy --all-targets -D warnings` clean; the whole workspace suite exits 0 (about 2,040 tests passed, run through one host slot); the real `waits.jsonl` gained no `marker_refused` row from the suites.
 - The hook path's two-heavy-check fixture and the relais half are not built here.
 
+Phase 2, amont half (this PR; the greengate release, relais's half and both installs follow, so Phase 2 stays unticked). Observed before the push, on `target/debug/greengate` (pinned 1.94.1 toolchain) with a scratch 0700 slot directory and `GREENGATE_HOST_SLOTS=1`:
+- `greengate slot run -- sh -c 'echo $GREENHARNESS_HOST_SLOT; cat holders/*.who'` printed `held:54644-0`, and the holder record carried `"lease":"54644-0"`.
+- A `slot run` nested in a `slot run` printed the outer's marker (`nested:held:54708-0`, `outer:held:54708-0`) and the journal had one `admitted` row for the pair, not two.
+- `GREENHARNESS_HOST_SLOT=held` (bare), two processes: no stderr line, exit 0, one `marker_bare` row each (no `waited_ms`, no `reason`, `ppid` present).
+- `cargo clippy --workspace --all-targets -D warnings` clean; `greenharness-slots` marker tests 18 passed, `greengate-runtime` `host_slots` tests 12 passed, `it` `slot_run::` plus the hook fixture 17 passed. The whole suite runs at the land.
+- Release order: greengate 5.4.0 and relais 0.94.0 (phase 1, release PR open) are installed before this release; the version this ships as is read from main at its release PR (5.6.0 is t23's; 6.0.0 may follow), and `LEASE_WRITER_SINCE`, `docs/host-slots.md` and this log follow it then.
+
 ## Implementation review
+- phase 2, implementation-review: approve (delta) after approve-with-changes; fixed: exhaustive `Marker` match, Decision log names the it tests. 102k.
+- phase 2, backend: approve (delta); fixed: marker read with the slot (`before_spawn` returns it), `marker_bare` it test, module doc; carried: parked-slot hook fixture. 103k.
+- phase 2, lang:rust: approve (delta); fixed: one read, exhaustive match; carried: `Held { bare }` split at phase 3. 83k.
+- phase 2, unix: approve (delta); fixed: CHANGELOG names the readers to install first; bare row whatever sizing, documented. 83k.
+- phase 2, architect: approve (delta); fixed: one path answers "held"; bare-row condition documented. 83k.
 - implementation-review: approve-with-changes, round 1, then two Deltas; 4 blocking and 4 other findings fixed (Settings memo, `BarePolicy`, `given`, stderr, `bad_record`); 1 deliberate; 130k, 160 s.
 - backend: approve-with-changes, three rounds; hook two-check fixture carried; unreadable record of another lease deliberate: it fails closed, queues, and says why. 80k, 117 s.
 - lang:rust: approve-with-changes, three rounds; `Marker::Held` shape kept (`bare` flag); `Vec<char>` per escaped character deliberate, on a failure path only. 66k, 53 s.
