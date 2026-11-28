@@ -266,71 +266,96 @@ pub fn parse_rows(text: &str) -> Vec<Row> {
 /// The arguments of the one git call that lists the host keys.
 pub const GIT_ARGS: [&str; 4] = ["config", "--show-scope", "--get-regexp", r"^greengate\."];
 
-/// Whether `slot promote` may move jobs: [`PROMOTE_ENV`] `0` turns it off for
-/// one process; else the last `global` or `system` row of [`PROMOTE_KEY`]
-/// (`0` off, `1` on); else on. A `1` in the environment never undoes a host
-/// `0` (it warns), so a session cannot turn a rollback off again. Unlike the
-/// sizing keys this reader words its own warnings: a bad value leaves promotion
-/// ON, and the warning names the `0` that turns it off. A key set only in a
+/// Which setting turned slot promotion off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffBy {
+    /// `GREENGATE_HOST_PROMOTE=0`, for one process.
+    Env,
+    /// `git config --global greengate.hostPromote 0`.
+    Global,
+    /// `git config --system greengate.hostPromote 0`.
+    System,
+}
+
+impl OffBy {
+    /// The journal token: `env`, `global` or `system`.
+    pub fn token(self) -> &'static str {
+        match self {
+            OffBy::Env => "env",
+            OffBy::Global => "global",
+            OffBy::System => "system",
+        }
+    }
+
+    /// The git scope flag that set it, for a command that undoes it.
+    fn git_flag(self) -> &'static str {
+        match self {
+            OffBy::System => "--system",
+            OffBy::Global | OffBy::Env => "--global",
+        }
+    }
+}
+
+/// Whether `slot promote` may move jobs: `None` when promotion is on, else
+/// what turned it off. `GREENGATE_HOST_PROMOTE=0` turns it off for one
+/// process; else the last `global` or `system` row of [`PROMOTE_KEY`] turns it
+/// off with `0`. Anything else leaves it on, with a warning. The environment
+/// can only turn promotion off: a `1` never undoes a host `0`, so a session
+/// cannot turn a rollback back on (a deliberate exception to the usual
+/// environment-first order). `rows` is `None` when git cannot list scopes:
+/// the key is then not read, and that is said. A key set only in a
 /// repository's own config is ignored with a warning. Pure, as [`resolve`].
 pub fn resolve_promote(
     env: impl Fn(&str) -> Option<String>,
-    rows: &[Row],
-) -> (Resolved<bool>, Vec<String>) {
+    rows: Option<&[Row]>,
+) -> (Option<OffBy>, Vec<String>) {
     let mut warnings = Vec::new();
-    let wanted = PROMOTE_KEY.to_ascii_lowercase();
-    let host = rows
-        .iter()
-        .rev()
-        .find(|(scope, k, _)| *k == wanted && (scope == "global" || scope == "system"));
-    if host.is_none() && rows.iter().any(|(_, k, _)| *k == wanted) {
-        warnings.push(format!(
-            "{PROMOTE_KEY} in this repository is ignored (host keys are global)\n  \
-             Fix: git config --global {PROMOTE_KEY} 0"
-        ));
-    }
-    let mut from_git = None;
-    if let Some((scope, _, raw)) = host {
-        let source = if scope == "system" {
-            Source::System
-        } else {
-            Source::Global
-        };
-        match raw.trim() {
-            "0" => {
-                from_git = Some(Resolved {
-                    value: false,
-                    source,
-                })
+    let mut git_off = None;
+    match rows {
+        None => warnings.push(
+            "git cannot list config scopes: hostPromote is not read\n  \
+             Fix: check that git runs (git config --global --list)"
+                .to_string(),
+        ),
+        Some(rows) => {
+            let wanted = PROMOTE_KEY.to_ascii_lowercase();
+            let host = rows
+                .iter()
+                .rev()
+                .find(|(scope, k, _)| *k == wanted && (scope == "global" || scope == "system"));
+            if host.is_none() && rows.iter().any(|(_, k, _)| *k == wanted) {
+                warnings.push(format!(
+                    "{PROMOTE_KEY} in a repository is ignored\n  \
+                     Fix: git config --global {PROMOTE_KEY} 0"
+                ));
             }
-            "1" => {
-                from_git = Some(Resolved {
-                    value: true,
-                    source,
-                })
+            if let Some((scope, _, raw)) = host {
+                let by = if scope == "system" {
+                    OffBy::System
+                } else {
+                    OffBy::Global
+                };
+                match raw.trim() {
+                    "0" => git_off = Some(by),
+                    "1" => {}
+                    other => warnings.push(format!(
+                        "{PROMOTE_KEY} is {other:?}: promotion stays on\n  \
+                         Fix: git config {} {PROMOTE_KEY} 0",
+                        by.git_flag()
+                    )),
+                }
             }
-            other => warnings.push(format!(
-                "{PROMOTE_KEY} is {other:?} in git config --{scope}: promotion stays on\n  \
-                 To turn it off: git config --{scope} {PROMOTE_KEY} 0"
-            )),
         }
     }
     if let Some(raw) = env(PROMOTE_ENV).filter(|v| !v.trim().is_empty()) {
         match raw.trim() {
-            "0" => {
-                return (
-                    Resolved {
-                        value: false,
-                        source: Source::Env,
-                    },
-                    warnings,
-                )
-            }
+            "0" => return (Some(OffBy::Env), warnings),
             "1" => {
-                if from_git.is_some_and(|g| !g.value) {
+                if let Some(by) = git_off {
                     warnings.push(format!(
                         "{PROMOTE_ENV}=1 does not turn promotion back on\n  \
-                         Fix: git config --global --unset {PROMOTE_KEY}"
+                         Fix: git config {} --unset {PROMOTE_KEY}",
+                        by.git_flag()
                     ));
                 }
             }
@@ -340,27 +365,14 @@ pub fn resolve_promote(
             )),
         }
     }
-    let resolved = from_git.unwrap_or(Resolved {
-        value: true,
-        source: Source::Detected,
-    });
-    (resolved, warnings)
+    (git_off, warnings)
 }
 
 /// [`resolve_promote`] from this process's environment and the one cached git
-/// call: the reader for a client with no rows of its own (relais). The
-/// caller prints the warnings and checks the answer before `promote_in_waiting`.
-pub fn promote_from_host() -> (Resolved<bool>, Vec<String>) {
-    let rows = git_rows();
-    let (resolved, mut warnings) =
-        resolve_promote(|name| std::env::var(name).ok(), rows.unwrap_or(&[]));
-    if rows.is_none() {
-        warnings.push(format!(
-            "git cannot list config with scopes, so {PROMOTE_KEY} is not read; promotion stays on\n  \
-             Fix: check that git runs (git config --global --list)"
-        ));
-    }
-    (resolved, warnings)
+/// call: the reader for a client with no rows of its own (relais). The caller
+/// prints the warnings, and checks the answer before `promote_in_waiting`.
+pub fn promote_from_host() -> (Option<OffBy>, Vec<String>) {
+    resolve_promote(|name| std::env::var(name).ok(), git_rows())
 }
 
 /// The git rows, read once per process for a client with no rows of its own.
@@ -576,74 +588,104 @@ mod tests {
         move |k| (k == PROMOTE_ENV).then(|| v.to_string())
     }
 
-    #[test]
-    fn promotion_is_on_unless_something_turns_it_off() {
-        let (r, w) = resolve_promote(no_env, &[]);
-        assert_eq!((r.value, r.source), (true, Source::Detected));
-        assert!(w.is_empty());
-        let rows = [row("global", PROMOTE_KEY, "1")];
-        assert!(resolve_promote(no_env, &rows).0.value);
+    /// Every warning as the person sees it: `greengate: warning: ` in front.
+    fn printed(w: &[String]) -> Vec<String> {
+        w.iter()
+            .flat_map(|x| x.lines().map(|l| format!("greengate: warning: {l}")))
+            .collect()
     }
 
     #[test]
-    fn a_host_zero_turns_it_off_and_names_its_source() {
-        let (r, _) = resolve_promote(no_env, &[row("global", PROMOTE_KEY, "0")]);
-        assert_eq!((r.value, r.source), (false, Source::Global));
-        let (r, _) = resolve_promote(no_env, &[row("system", PROMOTE_KEY, "0")]);
-        assert_eq!((r.value, r.source), (false, Source::System));
-        let rows = [
+    fn promotion_is_on_unless_something_turns_it_off() {
+        assert_eq!(resolve_promote(no_env, Some(&[])), (None, vec![]));
+        let rows = [row("global", PROMOTE_KEY, "1")];
+        assert_eq!(resolve_promote(no_env, Some(&rows)), (None, vec![]));
+    }
+
+    #[test]
+    fn a_host_zero_turns_it_off_and_names_its_scope() {
+        let g = [row("global", PROMOTE_KEY, "0")];
+        assert_eq!(resolve_promote(no_env, Some(&g)).0, Some(OffBy::Global));
+        let s = [row("system", PROMOTE_KEY, "0")];
+        assert_eq!(resolve_promote(no_env, Some(&s)).0, Some(OffBy::System));
+        let last = [
             row("system", PROMOTE_KEY, "0"),
             row("global", PROMOTE_KEY, "1"),
         ];
-        assert!(resolve_promote(no_env, &rows).0.value, "the last row wins");
+        assert_eq!(
+            resolve_promote(no_env, Some(&last)).0,
+            None,
+            "the last row wins"
+        );
     }
 
     #[test]
     fn the_environment_only_turns_it_off() {
-        let (r, w) = resolve_promote(env_of("0"), &[]);
-        assert_eq!((r.value, r.source), (false, Source::Env));
-        assert!(w.is_empty());
-        // A 1 is silent with nothing to undo.
-        let (r, w) = resolve_promote(env_of("1"), &[]);
-        assert!(r.value && w.is_empty(), "{w:?}");
-        // A 1 never undoes a host 0: still off, one warning.
-        let rows = [row("global", PROMOTE_KEY, "0")];
-        let (r, w) = resolve_promote(env_of("1"), &rows);
-        assert_eq!((r.value, r.source), (false, Source::Global));
+        assert_eq!(
+            resolve_promote(env_of("0"), Some(&[])),
+            (Some(OffBy::Env), vec![])
+        );
+        assert_eq!(resolve_promote(env_of("1"), Some(&[])), (None, vec![]));
+        let g = [row("global", PROMOTE_KEY, "0")];
+        let (by, w) = resolve_promote(env_of("1"), Some(&g));
+        assert_eq!(by, Some(OffBy::Global), "a 1 never undoes a host 0");
         assert_eq!(w.len(), 1);
-        assert!(w[0].contains(PROMOTE_ENV), "{w:?}");
-        // An env 0 beats a host 1.
-        let rows = [row("global", PROMOTE_KEY, "1")];
-        assert!(!resolve_promote(env_of("0"), &rows).0.value);
+        assert!(w[0].contains("--global --unset"), "{w:?}");
+        let s = [row("system", PROMOTE_KEY, "0")];
+        let (_, w) = resolve_promote(env_of("1"), Some(&s));
+        assert!(w[0].contains("--system --unset"), "{w:?}");
+        let on = [row("global", PROMOTE_KEY, "1")];
+        assert_eq!(resolve_promote(env_of("0"), Some(&on)).0, Some(OffBy::Env));
     }
 
     #[test]
     fn an_invalid_value_leaves_promotion_on_and_names_the_zero() {
         for bad in ["false", "off", "2", ""] {
             let rows = [row("global", PROMOTE_KEY, bad)];
-            let (r, w) = resolve_promote(no_env, &rows);
-            assert!(r.value, "{bad:?} must leave promotion on");
+            let (by, w) = resolve_promote(no_env, Some(&rows));
+            assert_eq!(by, None, "{bad:?} must leave promotion on");
             assert_eq!(w.len(), 1, "{bad:?}: {w:?}");
-            assert!(w[0].contains("stays on") && w[0].contains("hostPromote 0"));
-            assert!(w[0].lines().all(|l| l.len() <= 80), "{w:?}");
+            assert!(w[0].contains("stays on") && w[0].contains("--global greengate.hostPromote 0"));
         }
-        let (r, w) = resolve_promote(env_of("off"), &[]);
-        assert!(r.value);
-        assert_eq!(w.len(), 1);
+        let (by, w) = resolve_promote(env_of("off"), Some(&[]));
+        assert_eq!((by, w.len()), (None, 1));
     }
 
     #[test]
     fn a_repository_value_is_ignored_with_a_warning() {
         let rows = [row("local", PROMOTE_KEY, "0")];
-        let (r, w) = resolve_promote(no_env, &rows);
-        assert!(r.value);
+        let (by, w) = resolve_promote(no_env, Some(&rows));
+        assert_eq!(by, None);
         assert_eq!(w.len(), 1);
-        assert!(w[0].contains("repository"));
-        assert!(w.iter().flat_map(|x| x.lines()).all(|l| l.len() <= 80));
+        assert!(w[0].contains("in a repository"));
     }
 
-    /// greengate 4.0 reads only the new names: an old git key and an old
-    /// environment variable are both ignored.
+    #[test]
+    fn no_scopes_says_so_and_an_environment_zero_still_refuses() {
+        let (by, w) = resolve_promote(no_env, None);
+        assert_eq!(by, None);
+        assert!(w[0].contains("cannot list config scopes"), "{w:?}");
+        assert_eq!(resolve_promote(env_of("0"), None).0, Some(OffBy::Env));
+    }
+
+    /// Every line, with the `greengate: warning: ` the person sees, fits 80
+    /// columns: the cases a person can reach.
+    #[test]
+    fn every_promote_warning_fits_eighty_columns_as_printed() {
+        let cases: Vec<(Option<OffBy>, Vec<String>)> = vec![
+            resolve_promote(no_env, None),
+            resolve_promote(no_env, Some(&[row("local", PROMOTE_KEY, "0")])),
+            resolve_promote(no_env, Some(&[row("global", PROMOTE_KEY, "false")])),
+            resolve_promote(env_of("off"), Some(&[])),
+            resolve_promote(env_of("1"), Some(&[row("system", PROMOTE_KEY, "0")])),
+        ];
+        for (_, w) in cases {
+            for line in printed(&w) {
+                assert!(line.chars().count() <= 80, "{line:?}");
+            }
+        }
+    }
+
     #[test]
     fn the_old_names_are_ignored() {
         let env = |n: &str| (n == "AMONT_HOST_CORES").then(|| "2".to_string());

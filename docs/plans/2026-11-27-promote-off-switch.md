@@ -67,7 +67,7 @@ The off check sits after usage and slots-off, before the crate's own rules.
   (on), as `hostSlots` does; an environment `0` still refuses, and that
   warning names promotion, not sizing.
 - It lives in the crate's `host` module (`PROMOTE_KEY`, `PROMOTE_ENV`,
-  `PROMOTE_RANGE`, `resolve_promote`, and `promote_from_host()` beside `from_host`
+  `OffBy` (`env`, `global`, `system`), `resolve_promote` (rows `None` when git cannot list scopes), and `promote_from_host()` beside `from_host`
   for a client with no rows of its own, as relais is), so relais and greengate
   read it once, the same way. `promote_in_waiting`'s doc says a caller checks
   the switch first; the t24 ticket gets the same note.
@@ -151,11 +151,12 @@ the reason and session checks (an off switch refuses first).
   repository key was rejected: any clone could turn off or force on a
   machine-wide queue rule (as `hostSlots` already refuses).
 - 2026-11-27 — Value form: `0` or `1`, as `hostSlots 0` is off. `resolve_promote`
-  reads the git rows through `read_key` with no environment (`|_| None`), then
-  reads `GREENGATE_HOST_PROMOTE` itself: `0` turns promotion off, `1` warns only
-  when a host `0` exists and changes nothing. It words its own invalid-value
-  warning, because `read_key` returns on any valid environment value
-  (host.rs:190) and its git warning text is fixed (host.rs:229).
+  reads the git rows itself, not through `read_key`: `read_key` returns on any
+  valid environment value (host.rs:190) and words its git warnings for sizing
+  (host.rs:229). Then it reads `GREENGATE_HOST_PROMOTE`: `0` turns promotion off,
+  `1` warns only when a host `0` exists and changes nothing. The off answer is an
+  `OffBy` (`env`, `global`, `system`), a closed enum: no wildcard arm, and no
+  `host::Source`, which admits values that cannot turn promotion off.
 - 2026-11-27 — Off refuses before the reason and session checks, and does
   not need the slot directory; its row is written only when the directory
   exists, so turning it off never creates state.
@@ -183,8 +184,9 @@ the reason and session checks (an off switch refuses first).
   gives exit 75 and a `retry:` line; an I/O failure prints its cause once, exit
   74; a no-reason promote with the slot dir missing exits 1 and creates none;
   a `hostPromote false` value warns and leaves promotion on; `GREENGATE_HOST_PROMOTE=1`
-  does not override a host `0`; every refusal and `resolve_promote` warning
-  line is at most 80 columns.
+  does not override a host `0`; the off refusal and every `resolve_promote` warning (as printed, with
+  its `greengate: warning: ` prefix) fit 80 columns; the older refusals keep
+  their wording.
 - After install (the installed binary, the real journal): `GREENGATE_HOST_PROMOTE=0
   greengate slot promote <a queued id> --reason r` exits 1 and appends one
   `"limit":"off"` row to `/tmp/greenharness-slots-501/waits.jsonl`; without the

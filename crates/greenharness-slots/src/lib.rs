@@ -42,7 +42,8 @@ pub use marker::{
 
 pub use reorder::{
     promote_in, promote_in_waiting, promote_off, queue_in, wait_text, JobState, Moved, Promote,
-    PromoteError, QueuedJob, Refused, AGE_FLOOR, PROMOTE_BUDGET, PROMOTE_LOCK_WAIT, PROMOTE_WINDOW,
+    PromoteAnswer, PromoteError, QueuedJob, Refused, AGE_FLOOR, PROMOTE_BUDGET, PROMOTE_LOCK_WAIT,
+    PROMOTE_WINDOW,
 };
 
 /// Exported to the command a slot holder runs, as `held:<lease>`

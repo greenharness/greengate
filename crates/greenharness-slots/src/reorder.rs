@@ -221,9 +221,9 @@ pub enum Refused {
     },
     /// No name sorts between the neighbours of the place asked for.
     NoRoom { id: String, to: usize },
-    /// Promotion is turned off here ([`super::host::PROMOTE_KEY`]); `source`
-    /// is what turned it off.
-    Off { source: super::host::Source },
+    /// Promotion is turned off here ([`super::host::PROMOTE_KEY`] or
+    /// `GREENGATE_HOST_PROMOTE`); `by` is what turned it off.
+    Off { by: super::host::OffBy },
 }
 
 impl Refused {
@@ -290,7 +290,10 @@ impl Refused {
                 AGE_FLOOR.as_secs() / 60
             ),
             Refused::NoRoom { id, to } => format!("no name sorts {id} at {to}"),
-            Refused::Off { .. } => "promotion is off on this machine".to_string(),
+            Refused::Off { by } => match by {
+                super::host::OffBy::Env => "promotion is off for this process".to_string(),
+                _ => "promotion is off on this machine".to_string(),
+            },
         }
     }
 }
@@ -364,6 +367,9 @@ pub fn promote_in(
 ) -> Result<Result<Moved, Refused>, PromoteError> {
     promote_with(dir, request, super::now_ms, || {})
 }
+
+/// What a promotion answers: a move or a refusal, or a failure.
+pub type PromoteAnswer = Result<Result<Moved, Refused>, PromoteError>;
 
 /// Move one job ahead, under t06's rules. `Ok(Ok(_))` is a move made;
 /// `Ok(Err(_))` a refusal naming its limit, journalled best-effort as
@@ -449,9 +455,9 @@ fn promote_with(
 pub fn promote_off(
     dir: &Path,
     request: &Promote<'_>,
-    source: super::host::Source,
+    by: super::host::OffBy,
 ) -> Result<Result<Moved, Refused>, PromoteError> {
-    refused_now(dir, request, super::now_ms(), Refused::Off { source })
+    refused_now(dir, request, super::now_ms(), Refused::Off { by })
 }
 
 /// A refusal decided before the lock is taken: journalled with the clock as
@@ -651,9 +657,11 @@ fn promoted_row(request: &Promote<'_>, now: u128, mv: &Move) -> String {
 /// A refusal's row, best-effort: it never counts toward the budget, and a
 /// lost one costs one sample.
 fn record_refusal(dir: &Path, request: &Promote<'_>, now: u128, refused: &Refused) {
-    let source = match refused {
-        Refused::Off { source } => format!(",\"source\":\"{}\"", source.token()),
-        _ => String::new(),
+    // Only an off refusal names its source; every other line has no field.
+    let source = if let Refused::Off { by } = refused {
+        format!(",\"source\":\"{}\"", by.token())
+    } else {
+        String::new()
     };
     let line = format!(
         "{{\"at_ms\":{now},\"tool\":\"{}\",\"pid\":{},\"session\":\"{}\",\"outcome\":\"promote_refused\",\"id\":\"{}\",\"limit\":\"{}\"{source}}}\n",
@@ -1150,38 +1158,36 @@ mod tests {
     /// journals one `promote_refused` row carrying the source.
     #[test]
     fn off_refuses_by_name_and_journals_its_source() {
-        use super::super::host::Source;
-        let d = scratch("off");
-        let _lease = held(&d);
-        let _a = waiter(&d, OTHER, "a");
-        let mine = waiter(&d, ME, "mine");
-        let before = ids(&d);
-        for source in [Source::Env, Source::Global, Source::System] {
-            let answer = promote_off(&d, &ask(mine.id(), ME, 0), source).unwrap();
-            assert_eq!(answer, Err(Refused::Off { source }));
+        use super::super::host::OffBy;
+        let slots_dir = scratch("off");
+        let _lease = held(&slots_dir);
+        let _a = waiter(&slots_dir, OTHER, "a");
+        let mine = waiter(&slots_dir, ME, "mine");
+        let before = ids(&slots_dir);
+        for by in [OffBy::Env, OffBy::Global, OffBy::System] {
+            let answer = promote_off(&slots_dir, &ask(mine.id(), ME, 0), by).unwrap();
+            assert_eq!(answer, Err(Refused::Off { by }));
         }
-        let off = Refused::Off {
-            source: Source::Global,
-        };
+        let off = Refused::Off { by: OffBy::Global };
         assert_eq!(off.limit(), "off");
         assert_eq!(off.describe(), "promotion is off on this machine");
-        assert_eq!(ids(&d), before);
-        assert_eq!(rows(&d, "promote_refused"), 3);
-        let journal = fs::read_to_string(d.join("waits.jsonl")).unwrap();
+        assert_eq!(ids(&slots_dir), before);
+        assert_eq!(rows(&slots_dir, "promote_refused"), 3);
+        let journal = fs::read_to_string(slots_dir.join("waits.jsonl")).unwrap();
         for token in ["env", "global", "system"] {
             assert!(
                 journal.contains(&format!("\"limit\":\"off\",\"source\":\"{token}\"")),
                 "{journal}"
             );
         }
-        assert_eq!(rows(&d, "promoted"), 0);
+        assert_eq!(rows(&slots_dir, "promoted"), 0);
     }
 
     /// A refusal before the queue is touched creates no slot directory, and
     /// a directory that is not private takes no row.
     #[test]
     fn a_refusal_before_the_queue_creates_nothing() {
-        use super::super::host::Source;
+        use super::super::host::OffBy;
         let missing =
             std::env::temp_dir().join(format!("greengate-reorder-{}-missing", std::process::id()));
         let _ = fs::remove_dir_all(&missing); // best-effort: start absent
@@ -1191,14 +1197,14 @@ mod tests {
         };
         assert_eq!(refused(&missing, &no_reason).limit(), "no-reason");
         assert_eq!(refused(&missing, &ask("1-0", "", 0)).limit(), "no-session");
-        let off = promote_off(&missing, &ask("1-0", ME, 0), Source::Env).unwrap();
+        let off = promote_off(&missing, &ask("1-0", ME, 0), OffBy::Env).unwrap();
         assert_eq!(off.unwrap_err().limit(), "off");
         assert!(!missing.exists(), "no slot directory may appear");
 
         use std::os::unix::fs::PermissionsExt;
         let open = scratch("open-dir");
         fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
-        promote_off(&open, &ask("1-0", ME, 0), Source::Env)
+        promote_off(&open, &ask("1-0", ME, 0), OffBy::Env)
             .unwrap()
             .unwrap_err();
         assert!(
@@ -1207,23 +1213,28 @@ mod tests {
         );
     }
 
-    /// The lock held past the first second: the caller is told once, and the
+    /// The lock held past the first wait: the caller is told once, and the
     /// move goes through when the holder lets go.
     #[test]
-    fn a_lock_held_past_a_second_is_said_once_and_then_taken() {
-        let d = scratch("lockwait");
-        let lock = d.join("admission");
+    fn a_lock_held_past_the_first_wait_is_said_once_and_then_taken() {
+        let slots_dir = scratch("lockwait");
+        let lock = slots_dir.join("admission");
         let held = super::super::lock_within(&lock, Duration::from_millis(50))
             .unwrap()
             .unwrap();
         let said = AtomicUsize::new(0);
         let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(Duration::from_millis(300));
             drop(held);
         });
-        let got = take_admission(&lock, || {
-            said.fetch_add(1, Ordering::SeqCst);
-        });
+        let got = take_admission_for(
+            &lock,
+            Duration::from_millis(100),
+            Duration::from_secs(2),
+            || {
+                said.fetch_add(1, Ordering::SeqCst);
+            },
+        );
         release.join().unwrap();
         assert!(got.is_ok(), "{got:?}");
         assert_eq!(said.load(Ordering::SeqCst), 1);
@@ -1232,8 +1243,8 @@ mod tests {
     /// A lock that is never let go ends in `LockBusy` naming the wait.
     #[test]
     fn a_lock_that_stays_held_is_busy() {
-        let d = scratch("lockbusy");
-        let lock = d.join("admission");
+        let slots_dir = scratch("lockbusy");
+        let lock = slots_dir.join("admission");
         let _held = super::super::lock_within(&lock, Duration::from_millis(50))
             .unwrap()
             .unwrap();

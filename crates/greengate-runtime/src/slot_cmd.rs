@@ -77,13 +77,11 @@ fn promote(own: &[OsString], operands: &[OsString]) -> i32 {
         tool: BIN,
     };
     let dir = greenharness_slots::dir();
-    let switch = crate::host_slots::promote_switch(&settings);
-    let answer = if switch.value {
-        greenharness_slots::promote_in_waiting(&dir, &request, || {
+    let answer = match crate::host_slots::promote_switch(&settings) {
+        Some(by) => greenharness_slots::promote_off(&dir, &request, by),
+        None => greenharness_slots::promote_in_waiting(&dir, &request, || {
             eprintln!("{BIN}: waiting for the admission lock…");
-        })
-    } else {
-        greenharness_slots::promote_off(&dir, &request, switch.source)
+        }),
     };
     let (lines, code) = promote_report(answer, &id, to);
     for line in lines {
@@ -96,10 +94,7 @@ fn promote(own: &[OsString], operands: &[OsString]) -> i32 {
 /// and the status (0 moved, 1 refused, 74 an I/O failure, 75 the lock stayed
 /// held). Pure, so every branch is tested.
 fn promote_report(
-    answer: Result<
-        Result<greenharness_slots::Moved, greenharness_slots::Refused>,
-        greenharness_slots::PromoteError,
-    >,
+    answer: greenharness_slots::PromoteAnswer,
     id: &str,
     to: usize,
 ) -> (Vec<String>, i32) {
@@ -158,7 +153,7 @@ fn promote_report(
 
 /// What to do next after a refusal, beside its one line.
 fn refusal_hints(refused: &greenharness_slots::Refused, id: &str) -> Vec<String> {
-    use greenharness_slots::host::Source;
+    use greenharness_slots::host::OffBy;
     use greenharness_slots::Refused;
     match refused {
         Refused::NoSession => vec![format!(
@@ -185,17 +180,17 @@ fn refusal_hints(refused: &greenharness_slots::Refused, id: &str) -> Vec<String>
         ],
         // The way back on is in docs/host-slots.md, not here: the switch is
         // a rollback set on a measurement.
-        Refused::Off { source } => vec![
-            match source {
-                Source::Env => format!(
+        Refused::Off { by } => vec![
+            match by {
+                OffBy::Env => format!(
                     "set by: {}=0 in the environment",
                     greenharness_slots::host::PROMOTE_ENV
                 ),
-                Source::System => format!(
+                OffBy::System => format!(
                     "set by: git config --system {} 0",
                     greenharness_slots::host::PROMOTE_KEY
                 ),
-                _ => format!(
+                OffBy::Global => format!(
                     "set by: git config --global {} 0",
                     greenharness_slots::host::PROMOTE_KEY
                 ),
@@ -901,9 +896,10 @@ mod tests {
             .contains("one job"));
     }
 
-    fn said(answer: PromoteAnswer, to: usize) -> (String, i32) {
+    fn said(answer: greenharness_slots::PromoteAnswer, to: usize) -> (String, i32) {
         let (lines, code) = promote_report(answer, "42-1", to);
         // The off refusal is the one this switch adds: it fits 80 columns.
+        // The older refusals keep their wording.
         if lines.iter().any(|l| l.contains("refused (off)")) {
             assert!(
                 lines.iter().all(|l| l.chars().count() <= 80),
@@ -912,11 +908,6 @@ mod tests {
         }
         (lines.join("\n"), code)
     }
-
-    type PromoteAnswer = Result<
-        Result<greenharness_slots::Moved, greenharness_slots::Refused>,
-        greenharness_slots::PromoteError,
-    >;
 
     #[test]
     fn a_lock_that_stayed_held_exits_75_with_the_retry_command() {
@@ -949,7 +940,7 @@ mod tests {
 
     #[test]
     fn each_refusal_says_its_limit_and_what_to_do_next() {
-        use greenharness_slots::host::Source;
+        use greenharness_slots::host::OffBy;
         use greenharness_slots::Refused;
         let cases = [
             (
@@ -979,21 +970,15 @@ mod tests {
                 "see: greengate slots",
             ),
             (
-                Refused::Off {
-                    source: Source::Global,
-                },
+                Refused::Off { by: OffBy::Global },
                 "set by: git config --global greengate.hostPromote 0",
             ),
             (
-                Refused::Off {
-                    source: Source::System,
-                },
+                Refused::Off { by: OffBy::System },
                 "set by: git config --system greengate.hostPromote 0",
             ),
             (
-                Refused::Off {
-                    source: Source::Env,
-                },
+                Refused::Off { by: OffBy::Env },
                 "set by: GREENGATE_HOST_PROMOTE=0 in the environment",
             ),
         ];

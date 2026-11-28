@@ -938,7 +938,9 @@ and a `set by:` line naming the source, exits 1, and journals one
 `system`). The queue, `slot run` and `slots` are untouched, and a refused
 promote leaves the job where it is. `GREENGATE_HOST_PROMOTE=0` turns it off
 for one process; the environment can only turn promotion off, so a `1` there
-never undoes a host `0` (it warns). Any value but `0` or `1` in git is warned
+never undoes a host `0` (it warns). That is a deliberate exception to the
+usual environment-first order: an off-only rollback latch that a session must
+not undo. Any value but `0` or `1` in git is warned
 about and leaves promotion on. It is a rollback: set it when the measure in the
 promotion plan fires (p95 of `waited_ms` above 1.5 times the baseline), and
 unset it when the person revisits the rules. relais reads the same key
