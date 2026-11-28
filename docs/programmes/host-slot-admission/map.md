@@ -55,6 +55,8 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 
 - [An off switch for `slot promote`](t23-promote-off-switch.md): `greengate.hostPromote 0` (or `GREENGATE_HOST_PROMOTE=0`, off-only) refuses every move with `refused (off)`, a `set by:` line and one `promote_refused` row carrying its `source`; the t13 rollback line points here once 5.6.0 ships.
 
+- [Build: the held marker names a live lease](t15-build-held-marker-lease.md) (in progress): readers accept `held:<lease>` and bare `held` (greengate 5.4.0, relais v0.94.0); writers emit `held:<lease>` (relais v0.96.0 installed 2026-11-28, greengate 5.6.0 with t23). Phase 3, bare `held` refused, runs 24 h after the later of those two installs and 20 accepted markers; not before 2026-11-29.
+
 ## Handoff
 
 2026-11-23, t11 Phases 1–3 (branch `fix/hsa-t11`, plan
