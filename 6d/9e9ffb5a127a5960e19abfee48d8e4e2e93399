@@ -1,0 +1,14 @@
+greensummit-v2
+tree 170d1c196801de2e7aaef0659c863d5073ea0749
+gates ci-load-ubuntu
+platform x86_64-linux
+input ci-load-ubuntu 7ca7ad6644c8d663e15be5871e10cee16e61765e
+canon 6033a6cc9b163e89b2a277fff4d4481a4b894f5a
+greengate attest-sign-linux
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgUpKx1QTdCdwZEjcw/MK/JGWqft
+YBCaiDmnUdMyQ1dZAAAAALZ3JlZW5zdW1taXQAAAAAAAAABnNoYTUxMgAAAFMAAAALc3No
+LWVkMjU1MTkAAABAK8xhNylU8kQuBXhMaHNJkmb4OLMc8WK9mMtoI8NxBCj0siHJ/hdaS5
+6wwyPeRBoDhQRzFJJbWw0v0TWS2vBKCA==
+-----END SSH SIGNATURE-----
