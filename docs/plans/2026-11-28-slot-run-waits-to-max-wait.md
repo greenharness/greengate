@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: fix/hsa-t21
 repos: [amont]
 adrs: [ADR-0022]
@@ -130,7 +130,21 @@ After the change:
   is deleted: with no window, its `elapsed > 4 s` check proves nothing, and the
   regression test shows the env seam is ignored. Check: `grep moving_line slot_run.rs` → no match; `target/debug/greengate --help | grep -i stall` → only `install` lines → observed.
 - Phase 1: `greentopo heads --check` on the amended ADR → exit 0, and `git diff adr/HEADS.md` changes only the `hooks.host-concurrency` choice → observed: `greentopo heads --check` exit 0, one line changed in HEADS.md.
+- Phase 1, the whole suite: `greengate slot run --max-wait 3000 -- cargo test -p greengate --test it` → no regression elsewhere (busy_defers and land still set the seam for the hook path) → observed: 821 passed, 0 failed (1855 s).
 
 ## Outcome
+
+Shipped on `fix/hsa-t21`: `slot run` waits to its `--max-wait` with no stall
+window; ADR-0022 amended; help, docs and CHANGELOG say so. Not shipped: the
+release (it rides the greengate release after 6.0.0) and the 24 h check after
+that install. Surprise: the stall window could never fire on a default `slot
+run`, only against a caller who asked to wait longer.
+
+## Implementation review
+
+- implementation-review: approve-with-changes, then approve on the Delta; fixed the map's Next list (closed t21) and the pilot row's wording. 55k + 28k, 62 s + 17 s.
+- backend: approve; one low (5 s real wait in the test) accepted as is. 50k, 40 s.
+- lang:rust: approve; one low fixed (comment on the unreachable `Stalled` arm of `end_message`). 46k, 21 s.
+- unix: approve; one low kept, deliberate: `end` keeps `stalled` for relais rows, and the CHANGELOG already names the change. 49k, 33 s.
 
 <!-- panel: repos=amont reviewers=backend,lang:rust,tui,unix body-sha=b760ff8249ed -->
