@@ -463,7 +463,7 @@ enum WaitPlan {
 pub fn wait_ceiling_secs(timeout: u64) -> u64 {
     match timeout {
         0 => 3600,
-        s => s,
+        secs => secs,
     }
 }
 

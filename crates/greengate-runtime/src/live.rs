@@ -885,12 +885,12 @@ fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String 
         human_secs(row.quiet as u64)
     );
     if let Some((secs, n)) = row.queued {
-        line.push_str(&queued_note(
-            secs,
-            n,
-            budgets.ceiling,
-            crate::rehearsal::in_snapshot(),
-        ));
+        let way_out = if crate::rehearsal::in_snapshot() {
+            WayOut::Withheld
+        } else {
+            WayOut::Offered
+        };
+        line.push_str(&queued_note(secs, n, budgets.ceiling, way_out));
     } else if let Some((kind, waited)) = row.wait {
         line.push_str(&format!(
             ", waiting for {} {}",
@@ -987,7 +987,15 @@ fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String 
 /// `on_push` cannot name the command that was run. A land rehearsal sets
 /// `GREENGATE_ON_BUSY=wait` for its snapshot, so there the variable is no way
 /// out and the clause is left out. Plain text: this is a log line.
-fn queued_note(secs: f64, slots: u64, timeout: u64, in_snapshot: bool) -> String {
+/// Whether the heartbeat offers the way out: a land rehearsal forces
+/// `onBusy wait` on its snapshot, so there the variable would not skip.
+#[derive(Clone, Copy)]
+enum WayOut {
+    Offered,
+    Withheld,
+}
+
+fn queued_note(secs: f64, slots: u64, timeout: u64, way_out: WayOut) -> String {
     use crate::hooks::common::human_secs;
     let left = crate::host_slots::wait_ceiling_secs(timeout).saturating_sub(secs as u64);
     let mut note = format!(
@@ -996,7 +1004,7 @@ fn queued_note(secs: f64, slots: u64, timeout: u64, in_snapshot: bool) -> String
         human_secs(secs as u64),
         human_secs(left)
     );
-    if !in_snapshot {
+    if let WayOut::Offered = way_out {
         note.push_str(&format!("; skip the queue: rerun with {SKIP_QUEUE}"));
     }
     note
@@ -1340,14 +1348,14 @@ mod tests {
     /// there the way out is left out. The text is plain: no escape bytes.
     #[test]
     fn a_queued_note_counts_down_to_the_ceiling() {
-        let at = |secs, timeout, snapshot| queued_note(secs, 2, timeout, snapshot);
-        assert!(at(3590.0, 3600, false).contains("in at most 10s (greengate.timeout)"));
-        assert!(at(7200.0, 3600, false).contains("in at most 0s (greengate.timeout)"));
-        assert!(at(60.0, 0, false).contains("in at most 59m00s (greengate.timeout)"));
-        let snap = at(60.0, 3600, true);
+        let at = |secs, timeout, way_out| queued_note(secs, 2, timeout, way_out);
+        assert!(at(3590.0, 3600, WayOut::Offered).contains("in at most 10s (greengate.timeout)"));
+        assert!(at(7200.0, 3600, WayOut::Offered).contains("in at most 0s (greengate.timeout)"));
+        assert!(at(60.0, 0, WayOut::Offered).contains("in at most 59m00s (greengate.timeout)"));
+        let snap = at(60.0, 3600, WayOut::Withheld);
         assert!(snap.contains("defers to CI in at most 59m00s"), "{snap}");
         assert!(!snap.contains("GREENGATE_ON_BUSY"), "{snap}");
-        for note in [at(60.0, 3600, false), snap] {
+        for note in [at(60.0, 3600, WayOut::Offered), snap] {
             assert!(!note.contains('\x1b'), "{note:?}");
         }
         // The same words whatever `on_push` says: it cannot name the command.
