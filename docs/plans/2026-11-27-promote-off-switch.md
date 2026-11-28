@@ -133,8 +133,8 @@ the reason and session checks (an off switch refuses first).
   `--global` `hostPromote 0` is already kept out by the sandboxed
   `GIT_CONFIG_GLOBAL`; an env `1` with no host `0` is silent, so the pin adds no
   stderr line; a `--system` `0` is carried, not pinned)
-- [x] Phase 2 — release 5.6.0, shipped as 6.0.0 (a minor: a new key and enum variant),
-  publish `greenharness-slots`' matching minor to crates.io (relais takes `"5"`
+- [x] Phase 2 — release 5.6.0 (planned as a minor; cut as the major 6.0.0 with #543),
+  publish `greenharness-slots`' matching version to crates.io (relais pins `"5.5"`
   from the registry), install, and point the t13 plan's rollback at the switch:
   `CHANGELOG.md`, `docs/plans/2026-11-26-agent-moves-own-job-ahead.md`
   (version numbers move with whatever is on main when it is cut)
@@ -203,8 +203,11 @@ in `/tmp/t23-all8.log`).
   `refused (off): promotion is off for this process` and `set by:
   GREENGATE_HOST_PROMOTE=0 in the environment`, exit 1, and one row
   `"outcome":"promote_refused","limit":"off","source":"env"`. Without the
-  variable, the same call gave `refused (not-queued)`. The config-key path
-  was not checked live. The workspace-wide suite ran in the pre-push gate,
+  variable, the same call gave `refused (not-queued)`. The config key, with
+  `GIT_CONFIG_GLOBAL` pointing at a scratch file holding `hostPromote = 0`,
+  printed `refused (off): promotion is off on this machine` and `set by: git
+  config --global greengate.hostPromote 0`, exited 1, and wrote a row with
+  `"source":"global"`. The 6.0.0 CHANGELOG carries the switch (#541). The workspace-wide suite ran in the pre-push gate,
   not here.
 
 ## Measure

@@ -65,6 +65,11 @@ Closed on `fix/hsa-t23` (plan `docs/plans/2026-11-27-promote-off-switch.md`).
   The same call without the variable was refused `not-queued`. The t13 plan's
   Outcome now names the switch as the rollback
   (`docs/plans/2026-11-26-agent-moves-own-job-ahead.md`).
-- When the environment set it, the refusal reads "for this process". The first
-  bullet's "on this machine" wording is the config-key case, which was not live
-  checked.
+- When the environment set it, the refusal reads "for this process". The key
+  was checked too, with a scratch `GIT_CONFIG_GLOBAL` holding `hostPromote = 0`:
+  it printed `refused (off): promotion is off on this machine`, then `set by: git
+  config --global greengate.hostPromote 0`, and wrote a row with
+  `"source":"global"`.
+- Gap: relais pins crate 5.5, so the switch does not stop moves made through
+  relais until relais bumps to `greenharness-slots` 6. A follow-up ticket
+  covers it.
