@@ -1043,13 +1043,6 @@ fn skip_clause(row: &Row, way_out: WayOut) -> String {
 /// The variable that skips the queue for one run (ADR-0022).
 const SKIP_QUEUE: &str = "GREENGATE_ON_BUSY=now";
 
-/// The heartbeat as a normal run prints it, for the tests that are not about
-/// the way out.
-#[cfg(test)]
-fn beat_line_default(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String {
-    beat_line(row, first, budgets, on_push, WayOut::Offered)
-}
-
 /// Whether a stage of these checks runs while git holds a connection to the
 /// remote open: a push stage, unless it runs inside a rehearsal snapshot
 /// (land's pre-stage included), where nothing is connected, so the beat's
@@ -1369,7 +1362,7 @@ mod tests {
         r.elapsed = 60.0;
         r.quiet = 60.0;
         r.queued = Some((60.0, 2));
-        let beat = beat_line_default(&r, false, B, false);
+        let beat = beat_line(&r, false, B, false, WayOut::Offered);
         assert_eq!(
             beat,
             "  … pre-push-run-tests-js still running: 1m00s, last output 1m00s ago, \
@@ -1438,14 +1431,14 @@ mod tests {
         let text = region(&[r.clone()], 80, B);
         assert!(text.contains("· quiet 2m10s/7m48s (load ×3.9)"), "{text:?}");
         assert!(text.lines().all(|l| l.chars().count() <= 80), "{text:?}");
-        let beat = beat_line_default(&r, false, B, false);
+        let beat = beat_line(&r, false, B, false, WayOut::Offered);
         assert!(
             beat.ends_with(
                 ", CPU idle 2m10s, budget 7m48s (load avg 31.2 on 8 cores, ×3.9 — greengate.idleLoadScale)\n"
             ),
             "{beat:?}"
         );
-        let first = flat(&beat_line_default(&r, true, B, false));
+        let first = flat(&beat_line(&r, true, B, false, WayOut::Offered));
         assert!(
             first.contains("killed after 7m48s with no output and under 0.1 core of CPU"),
             "{first:?}"
@@ -1474,12 +1467,12 @@ mod tests {
             "{text:?}"
         );
         assert!(text.lines().all(|l| l.chars().count() <= 80), "{text:?}");
-        let beat = beat_line_default(&r, false, B, false);
+        let beat = beat_line(&r, false, B, false, WayOut::Offered);
         assert!(
             beat.ends_with(", CPU unmeasured — extended budget 8m00s\n"),
             "{beat:?}"
         );
-        let first = flat(&beat_line_default(&r, true, B, false));
+        let first = flat(&beat_line(&r, true, B, false, WayOut::Offered));
         assert!(
             first.contains(
                 "killed after 8m00s with no output while its CPU is unmeasured, or 1h00m in total"
@@ -1511,20 +1504,20 @@ mod tests {
             "{text:?}"
         );
 
-        let beat = beat_line_default(&r, false, B, false);
+        let beat = beat_line(&r, false, B, false, WayOut::Offered);
         assert_eq!(
             beat,
             "  … pre-push-run-tests-js still running: 4m00s, last output 2m10s ago, \
              waiting for the cargo lock on the build directory 1m30s (greengate.lockWait 10m00s)\n"
         );
-        let beat = beat_line_default(&r, false, until, false);
+        let beat = beat_line(&r, false, until, false, WayOut::Offered);
         assert!(
             beat.contains("(greengate.lockWait 0: until the ceiling)"),
             "{beat:?}"
         );
         // The first beat states the wait's rule, not the CPU one: the
         // silence clock is not running.
-        let first = flat(&beat_line_default(&r, true, B, false));
+        let first = flat(&beat_line(&r, true, B, false, WayOut::Offered));
         assert!(
             first.contains(
                 "(killed after 10m00s in the wait, or 1h00m in total — greengate.lockWait"
@@ -1655,7 +1648,7 @@ mod tests {
         ] {
             r.cpu = cpu;
             assert_eq!(
-                beat_line_default(&r, false, B, false),
+                beat_line(&r, false, B, false, WayOut::Offered),
                 format!("{prefix}{suffix}")
             );
         }
@@ -1666,7 +1659,7 @@ mod tests {
     fn the_first_beat_states_the_rule_in_force() {
         let mut r = row("vitest", 60.0);
         r.cpu = RowCpu::Idle;
-        let sampled = beat_line_default(&r, true, B, false);
+        let sampled = beat_line(&r, true, B, false, WayOut::Offered);
         assert!(
             flat(&sampled).contains(
                 "killed after 2m00s with no output and under 0.1 core of CPU, or 1h00m in total"
@@ -1674,7 +1667,7 @@ mod tests {
             "{sampled:?}"
         );
         r.cpu = RowCpu::NotSampled;
-        let not = beat_line_default(&r, true, B, false);
+        let not = beat_line(&r, true, B, false, WayOut::Offered);
         assert!(
             not.contains("2m00s of silence or 1h00m in total"),
             "{not:?}"
@@ -1703,7 +1696,7 @@ mod tests {
     fn a_heartbeat_names_the_budgets_once() {
         let mut r = row("cargo-test", 60.0);
         r.quiet = 2.0;
-        let first = beat_line_default(&r, true, B, false);
+        let first = beat_line(&r, true, B, false, WayOut::Offered);
         assert!(
             first.contains("cargo-test still running: 1m00s"),
             "{first:?}"
@@ -1714,9 +1707,9 @@ mod tests {
             "{first:?}"
         );
         assert!(first.contains("greengate.idleTimeout"), "{first:?}");
-        let later = beat_line_default(&r, false, B, false);
+        let later = beat_line(&r, false, B, false, WayOut::Offered);
         assert!(!later.contains("greengate.idleTimeout"), "{later:?}");
-        let off = beat_line_default(
+        let off = beat_line(
             &r,
             true,
             Budgets {
@@ -1726,6 +1719,7 @@ mod tests {
                 extended: 0,
             },
             false,
+            WayOut::Offered,
         );
         assert!(off.contains("off of silence or off in total"), "{off:?}");
     }
@@ -1750,7 +1744,7 @@ mod tests {
     fn a_long_push_gate_is_told_what_it_is_sitting_on() {
         let r = row("cargo-test", 60.0);
 
-        let pushing = flat(&beat_line_default(&r, true, B, true));
+        let pushing = flat(&beat_line(&r, true, B, true, WayOut::Offered));
         assert!(
             pushing.contains("A remote may close it first"),
             "{pushing:?}"
@@ -1762,11 +1756,11 @@ mod tests {
         );
 
         // Once, not every minute.
-        let later = flat(&beat_line_default(&r, false, B, true));
+        let later = flat(&beat_line(&r, false, B, true, WayOut::Offered));
         assert!(!later.contains("close it first"), "{later:?}");
 
         // Never at commit time: nothing is waiting on a socket there.
-        let committing = flat(&beat_line_default(&r, true, B, false));
+        let committing = flat(&beat_line(&r, true, B, false, WayOut::Offered));
         assert!(!committing.contains("close it first"), "{committing:?}");
     }
 
@@ -1793,7 +1787,7 @@ mod tests {
     #[test]
     fn the_push_note_does_not_recommend_ssh_keepalive() {
         let r = row("cargo-test", 60.0);
-        let pushing = flat(&beat_line_default(&r, true, B, true));
+        let pushing = flat(&beat_line(&r, true, B, true, WayOut::Offered));
         assert!(
             !pushing.contains("ServerAlive"),
             "keepalive was already on when this failed; recommending it \
