@@ -70,7 +70,9 @@ Closed on `fix/hsa-t23` (plan `docs/plans/2026-11-27-promote-off-switch.md`).
   it printed `refused (off): promotion is off on this machine`, then `set by: git
   config --global greengate.hostPromote 0`, and wrote a row with
   `"source":"global"`.
-- Gap: relais pins crate 5.5, so the switch does not stop moves made through
-  relais until relais bumps to `greenharness-slots` 6:
-  [t25](t25-relais-honours-promote-switch.md), due with t22's count on
-  2026-12-03.
+- relais has no promote path of its own, and t24 does not add one: it makes a
+  relais job movable through `greengate slot promote`, which checks the switch.
+  So the switch covers every move today, relais's crate 5.5 pin
+  notwithstanding, and t22 does not wait on relais. A relais change that calls
+  the crate's promote directly would have to check the switch first
+  (`promote_from_host`).

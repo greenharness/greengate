@@ -223,9 +223,10 @@ the topo-spotter-rename t28 session together with its breaking #543, not as
 5.6.0. `greenharness-slots` 6.0.0 is on crates.io (published
 2026-11-28 15:20 UTC). It is installed on this machine and live-checked (see
 Verification). The t13 plan's Outcome names the switch as the rollback.
-relais pins `greenharness-slots = "5.5"` (5.5.0 in its lock on 2026-11-28),
-so the 6.0 crate reaches relais only with a bump on its side. Until then
-relais's own promote path (t24) is on crate 5.5, which has no switch.
+relais pins `greenharness-slots = "5.5"` (5.5.0 in its lock on 2026-11-28)
+but has no promote path of its own. t24 makes relais jobs movable through
+`greengate slot promote`, which checks the switch, so the switch covers every
+move.
 
 ## Implementation review
 
@@ -233,6 +234,6 @@ relais's own promote path (t24) is on crate 5.5, which has no switch.
 - backend: approve-with-changes, then approve; fixed no-scopes warning on both readers; precedence documented.
 - lang:rust: approve-with-changes, approve-with-changes, then approve; `OffBy` closed enum, `PromoteAnswer`, lock test on the seam.
 - unix: approve-with-changes, then approve. tui: approve-with-changes, then approve; warnings fit 80 columns as printed.
-- deliberate: `promote_in`, `promote_in_waiting`, `promote_with` and `refused_now` still spell out the nested result type (low, rust); the `promote_in_waiting` doc and the t24 ticket do not yet say a caller checks the switch first (follow-up).
+- deliberate: `promote_in`, `promote_in_waiting`, `promote_with` and `refused_now` still spell out the nested result type (low, rust); the `promote_in_waiting` doc does not yet say a caller checks the switch first (follow-up). For t24 this is moot: it moves relais jobs through `greengate slot promote`, which checks it (2026-11-28).
 
 <!-- panel: repos=amont adds=contract reviewers=architect,backend,lang:rust,po,tui,unix body-sha=d2ed1e84e5f5 -->
