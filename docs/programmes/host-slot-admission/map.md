@@ -81,10 +81,9 @@ Held: t23 is held for the 6.0.0 release (not ours). After it: install, live chec
 Next, in order:
 
 1. t19 (overdue since 2026-11-27; its count window should now account for the 6.0.0 install).
-2. t21.
-3. t24.
-4. t23's close-out after 6.0.0.
-5. t15 phase 3, when due.
+2. t24.
+3. t23's close-out after 6.0.0.
+4. t15 phase 3, when due.
 
 Accepted gaps:
 

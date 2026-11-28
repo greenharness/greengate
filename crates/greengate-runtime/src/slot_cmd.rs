@@ -493,6 +493,7 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
 /// Why a `slot run` wait ended, in one line under 80 columns.
 fn end_message(end: &greenharness_slots::LineEnd, max_wait: Duration) -> String {
     match end {
+        // Cannot happen with no window (ADR-0022); kept so the match stays exhaustive.
         greenharness_slots::LineEnd::Stalled { window, .. } => {
             format!(
                 "no progress in the host slot line for {}s",

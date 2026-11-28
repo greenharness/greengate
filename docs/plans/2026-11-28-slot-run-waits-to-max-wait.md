@@ -125,7 +125,7 @@ After the change:
 - Phase 1, piloted run: the branch binary, a scratch `GREENHARNESS_SLOT_DIR`,
   one holder `slot run -- sleep 20`, then a waiter `slot run --max-wait 15
   -- true` with `GREENHARNESS_SLOT_STALL_S=3` → exits 75 at about 15 s, not 3
-  s → covered by the regression test above (STALL_S=2 against a 5 s ceiling); no separate pilot.
+  s → not run as a separate pilot; the regression test above covers it (STALL_S=2 against a 5 s ceiling).
 - Phase 1, the moving-line test (`a_moving_line_outlasts_the_stall_window`)
   is deleted: with no window, its `elapsed > 4 s` check proves nothing, and the
   regression test shows the env seam is ignored. Check: `grep moving_line slot_run.rs` → no match; `target/debug/greengate --help | grep -i stall` → only `install` lines → observed.
