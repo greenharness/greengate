@@ -1,7 +1,7 @@
 +++
 type = "task"
 mode = "afk"
-status = "open"
+status = "closed"
 due = "2026-11-27"
 blocked_by = []
 repos = ["amont"]
@@ -50,3 +50,45 @@ is found inside the day.
   steady hook runs reads as waits aborted with Ctrl-C, which leave no row.
   If so, open a ticket for a `joined` journal row.
 - A verdict: held, or what it reopens. A held verdict is carried into t08.
+
+## Resolution
+
+Held: no rollback, carried into [t08](t08-workday-measure.md).
+
+**Window.** greengate 5.1.1 ran alone for only 5 hours (16:24 to 21:21 CET on
+2026-11-26, when 5.2.0 was installed, see [t22](t22-count-after-5-2-0-install.md)).
+The journal rotated before the count: its first row is 2026-11-27 11:22 CET.
+So the count covers every row on 2026-11-28 13:41 CET, 26.3 h from 11:22 CET
+on 11-27 to 13:38 CET on 11-28, under 5.2.0 and then 5.4.0. Both keep 5.1.1's
+hook path (t18): a hook check has no stall window. Its rows carry no version
+field.
+
+Wait rows (`has("waited_ms")`): 390.
+
+- **Pass conditions, all met.** Hook rows (`tool` greengate) with
+  `"end":"stalled"`: 0 of 249. Rows without `holders`: 0. Rows with
+  `queued` false outside `now`: 0.
+- **Hook deferrals.** 82, or 37.5 per 12 h beside 31.8 (1.18×, under the 2×
+  trigger of 63.6). By cause: about 60 s (`slotWait`): 76, or 34.7 per 12 h,
+  half the expected rate of about 60. About 600 s (`warnSlotWait`): 6. About
+  3600 s (`greengate.timeout`): 0.
+- **Hook waits.** p95 1101 s, max 3537 s. 0 ended at `greengate.timeout`. All
+  20 waits over 900 s were admitted. The two near the hour (3504 s, 3537 s, at
+  00:11 CET on 11-28) fell in the load-410 episode, caused by another
+  session's unqueued test loop (see the map's Handoff lessons). That was load
+  outside the queue, not a regression of 5.1.1.
+- **Hook wait rows per 12 h.** 113.8 beside 227 after 5.0. That is a clear
+  drop. The journal alone cannot tell whether hook runs held steady, since a
+  wait aborted with Ctrl-C leaves no row. So whether that drop means aborted
+  waits is t08's question, and a `joined` journal row is filed as a
+  follow-up.
+- **`slot run`.** 132 rows: 77 admitted, 9 `now`, 9 timeout at the ceiling,
+  37 timeout on a stall. The stall exits are the cost t18 predicted, and
+  [t21](t21-slot-run-waits-past-a-stall.md)'s subject.
+- **relais.** 9 rows: 4 admitted, 5 deferred on a stall.
+- **Pre-stage rows.** None are named `prestage` in this window.
+
+Commands (jq over `/tmp/greenharness-slots-501/waits.jsonl`, in the driver
+session of 2026-11-28): wait rows grouped by `tool`, `outcome` and `end`;
+deferrals bucketed by `waited_ms` (< 120 s, < 900 s, else); hook waits over
+900 s listed with `load1`.
