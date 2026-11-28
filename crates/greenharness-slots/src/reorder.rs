@@ -292,7 +292,9 @@ impl Refused {
             Refused::NoRoom { id, to } => format!("no name sorts {id} at {to}"),
             Refused::Off { by } => match by {
                 super::host::OffBy::Env => "promotion is off for this process".to_string(),
-                _ => "promotion is off on this machine".to_string(),
+                super::host::OffBy::Global | super::host::OffBy::System => {
+                    "promotion is off on this machine".to_string()
+                }
             },
         }
     }
@@ -1171,6 +1173,14 @@ mod tests {
         let off = Refused::Off { by: OffBy::Global };
         assert_eq!(off.limit(), "off");
         assert_eq!(off.describe(), "promotion is off on this machine");
+        assert_eq!(
+            Refused::Off { by: OffBy::System }.describe(),
+            "promotion is off on this machine"
+        );
+        assert_eq!(
+            Refused::Off { by: OffBy::Env }.describe(),
+            "promotion is off for this process"
+        );
         assert_eq!(ids(&slots_dir), before);
         assert_eq!(rows(&slots_dir, "promote_refused"), 3);
         let journal = fs::read_to_string(slots_dir.join("waits.jsonl")).unwrap();

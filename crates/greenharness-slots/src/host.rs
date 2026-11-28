@@ -588,9 +588,11 @@ mod tests {
         move |k| (k == PROMOTE_ENV).then(|| v.to_string())
     }
 
-    /// Every warning as the person sees it: `greengate: warning: ` in front.
-    fn printed(w: &[String]) -> Vec<String> {
-        w.iter()
+    /// Every warning line measured as if each carried the `greengate: warning: `
+    /// prefix (the real one is on the first line only: this is the stricter bound).
+    fn printed(warnings: &[String]) -> Vec<String> {
+        warnings
+            .iter()
             .flat_map(|x| x.lines().map(|l| format!("greengate: warning: {l}")))
             .collect()
     }
@@ -604,10 +606,16 @@ mod tests {
 
     #[test]
     fn a_host_zero_turns_it_off_and_names_its_scope() {
-        let g = [row("global", PROMOTE_KEY, "0")];
-        assert_eq!(resolve_promote(no_env, Some(&g)).0, Some(OffBy::Global));
-        let s = [row("system", PROMOTE_KEY, "0")];
-        assert_eq!(resolve_promote(no_env, Some(&s)).0, Some(OffBy::System));
+        let global_zero = [row("global", PROMOTE_KEY, "0")];
+        assert_eq!(
+            resolve_promote(no_env, Some(&global_zero)).0,
+            Some(OffBy::Global)
+        );
+        let system_zero = [row("system", PROMOTE_KEY, "0")];
+        assert_eq!(
+            resolve_promote(no_env, Some(&system_zero)).0,
+            Some(OffBy::System)
+        );
         let last = [
             row("system", PROMOTE_KEY, "0"),
             row("global", PROMOTE_KEY, "1"),
@@ -626,14 +634,14 @@ mod tests {
             (Some(OffBy::Env), vec![])
         );
         assert_eq!(resolve_promote(env_of("1"), Some(&[])), (None, vec![]));
-        let g = [row("global", PROMOTE_KEY, "0")];
-        let (by, w) = resolve_promote(env_of("1"), Some(&g));
+        let global_zero = [row("global", PROMOTE_KEY, "0")];
+        let (by, warnings) = resolve_promote(env_of("1"), Some(&global_zero));
         assert_eq!(by, Some(OffBy::Global), "a 1 never undoes a host 0");
-        assert_eq!(w.len(), 1);
-        assert!(w[0].contains("--global --unset"), "{w:?}");
-        let s = [row("system", PROMOTE_KEY, "0")];
-        let (_, w) = resolve_promote(env_of("1"), Some(&s));
-        assert!(w[0].contains("--system --unset"), "{w:?}");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("--global --unset"), "{warnings:?}");
+        let system_zero = [row("system", PROMOTE_KEY, "0")];
+        let (_, warnings) = resolve_promote(env_of("1"), Some(&system_zero));
+        assert!(warnings[0].contains("--system --unset"), "{warnings:?}");
         let on = [row("global", PROMOTE_KEY, "1")];
         assert_eq!(resolve_promote(env_of("0"), Some(&on)).0, Some(OffBy::Env));
     }
@@ -642,29 +650,35 @@ mod tests {
     fn an_invalid_value_leaves_promotion_on_and_names_the_zero() {
         for bad in ["false", "off", "2", ""] {
             let rows = [row("global", PROMOTE_KEY, bad)];
-            let (by, w) = resolve_promote(no_env, Some(&rows));
+            let (by, warnings) = resolve_promote(no_env, Some(&rows));
             assert_eq!(by, None, "{bad:?} must leave promotion on");
-            assert_eq!(w.len(), 1, "{bad:?}: {w:?}");
-            assert!(w[0].contains("stays on") && w[0].contains("--global greengate.hostPromote 0"));
+            assert_eq!(warnings.len(), 1, "{bad:?}: {warnings:?}");
+            assert!(
+                warnings[0].contains("stays on")
+                    && warnings[0].contains("--global greengate.hostPromote 0")
+            );
         }
-        let (by, w) = resolve_promote(env_of("off"), Some(&[]));
-        assert_eq!((by, w.len()), (None, 1));
+        let (by, warnings) = resolve_promote(env_of("off"), Some(&[]));
+        assert_eq!((by, warnings.len()), (None, 1));
     }
 
     #[test]
     fn a_repository_value_is_ignored_with_a_warning() {
         let rows = [row("local", PROMOTE_KEY, "0")];
-        let (by, w) = resolve_promote(no_env, Some(&rows));
+        let (by, warnings) = resolve_promote(no_env, Some(&rows));
         assert_eq!(by, None);
-        assert_eq!(w.len(), 1);
-        assert!(w[0].contains("in a repository"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("in a repository"));
     }
 
     #[test]
     fn no_scopes_says_so_and_an_environment_zero_still_refuses() {
-        let (by, w) = resolve_promote(no_env, None);
+        let (by, warnings) = resolve_promote(no_env, None);
         assert_eq!(by, None);
-        assert!(w[0].contains("cannot list config scopes"), "{w:?}");
+        assert!(
+            warnings[0].contains("cannot list config scopes"),
+            "{warnings:?}"
+        );
         assert_eq!(resolve_promote(env_of("0"), None).0, Some(OffBy::Env));
     }
 
@@ -679,8 +693,8 @@ mod tests {
             resolve_promote(env_of("off"), Some(&[])),
             resolve_promote(env_of("1"), Some(&[row("system", PROMOTE_KEY, "0")])),
         ];
-        for (_, w) in cases {
-            for line in printed(&w) {
+        for (_, warnings) in cases {
+            for line in printed(&warnings) {
                 assert!(line.chars().count() <= 80, "{line:?}");
             }
         }
