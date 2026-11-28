@@ -60,96 +60,43 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 
 ## Handoff
 
-2026-11-23, t11 Phases 1–3 (branch `fix/hsa-t11`, plan
-`docs/plans/2026-11-23-admission-counts-holders-stalled-waits.md`). The crate,
-greengate and ADR-0022 are built and tested, in one amont PR. Nothing is
-released yet, and t11 stays open.
+2026-11-28, boundary: the t15 phases 1–2 and t23 PRs are merged, and t20 is closed.
 
-What the PR holds:
+Merged this wave:
 
-- Admission takes a further slot while `load1 < cores + 4 × Σjobs`.
-- A wait ends on a 300 s stall or at its ceiling, and it defers or exits 75.
-  It never runs unqueued.
-- A pre-stage deferral writes an hour-long `deferred` completion, so land
-  still pushes.
-- `GREENGATE_ON_BUSY=now` and `slot run --now` skip the queue up front.
-- `--on-timeout run` is refused.
-- The journal gains `end` and the outcome `now`.
-- ADR-0022 replaces the heads of `hooks.host-concurrency`,
-  `hooks.busy-policy` and `hooks.gates-before-connection`.
+- t15 phases 1–2: greengate #536, #537 (release 5.4.0, installed), #542, #544, #545; relais #642, #647 (v0.94.0), #649, #651 (v0.96.0, installed 2026-11-28 10:54 CET).
+- t23 (off switch): #541.
+- t20 (heartbeat ceiling): #547, closed.
+- The gate race fix: #546, test-only, for f15.
 
-Measured: t01's admission test fails on `origin/main` (the old rule refuses
-at 12.3) and passes here. A real-window pilot exits 75 after 300 s with
-`"end":"stalled"`.
+Live state:
+
+- greengate on this machine is still 5.4.0. #541, #542, #544, #546 and #547 are unreleased; they ship in greengate 6.0.0, which the topo-spotter-rename t28 session (perso-1e) is cutting with its breaking #543. The drive's own 5.6.0 release branch (worktree amont-wt-rel-560) is to be dropped once v6.0.0 is tagged.
+- t15's phase-3 gate opens 24 h after the later of the relais 0.96.0 install and the greengate 6.0.0 install, with 20 accepted `held:<lease>` markers. The floor is 2026-11-29 10:54 CET.
+
+Held: t23 is held for the 6.0.0 release (not ours). After it: install, live check, point the t13 plan's rollback line (`docs/plans/2026-11-26-agent-moves-own-job-ahead.md`) at the switch, and correct t23's ticket. Its ticket says `status = "closed"`, but its Resolution says the release is still to do. If the person or the next session finds it closed too early, set `status` back to `"open"`.
 
 Next, in order:
 
-1. ~~t14~~ closed 2026-11-24: the 4.13 journal held (p95 1.23×, 291 rows per
-   12 h, no `Drop` panic; one stale 4.11.0 writer in greenrack worktrees).
-   Phase 4 may go ahead.
-2. ~~t11 Phase 4~~ done 2026-11-24: greengate 5.0.0 released (Release run
-   https://github.com/greenharness/greengate/actions/runs/45386975691:
-   conclusion success, with `publish to crates.io`, `publish to npm`, `publish
-   to homebrew tap` and `brew can install what was published` each success)
-   and installed on this machine (brew; `greengate --version` printed
-   `greengate 5.0.0`). cargo-semver-checks is not
-   installed; the major bump and the changelog carry the breaks. Observed:
-   `cargo search` lists `greengate-runtime` and `greenharness-slots` 5.0.0;
-   `npm view @greenharness/greengate` reads `latest` 5.0.0 (a few minutes
-   after the green job); the brew binary is Cellar/greengate/5.0.0. Pins left
-   at the old major on purpose until each repo's own bump (read from the
-   `package.json` files; the plan's Decision log says `^4`): `^4.11.0` in
-   duro-app and greenrack, and relais's `greenharness-slots = "4.13"`, which
-   Phase 5 moves to `"5"`. The
-   24 h and 7 d journal counts against the baseline run from this install
-   (about 2026-11-24 12:49): they are t17's count, carried into t08 when it holds. Hook shims and the
-   AGENTS.md block are not refreshed fleet-wide yet.
-3. ~~t11 Phase 5~~ done 2026-11-25: relais v0.83.0 (`greenharness-slots = "5"`,
-   `Stall` in the host-slot wait, in-memory `admission_overrun`, ADR-0015;
-   relais #573, release #580) installed 2026-11-25 02:26 CET; coordinator
-   stopped then. t17's `admission_wait_exhausted`-after-grant count starts there.
-4. ~~t11 Phase 6~~ done 2026-11-25: greenbelay 6.15.0 (`heavy-build-unqueued`
-   fires on `slot run --now` and advises it; #331, release #333) installed
-   2026-11-25 about 06:00 CET. t11's code is all shipped, but its plan stays
-   active: the post-install count is t17's. Its interim count has already
-   fired the plan's 2× trigger: 158 hook deferrals in the 13.4 h after the
-   2026-11-24 12:49 install (141.8 per 12 h) against a baseline of 31.8 per
-   12 h (103 deferrals from 2026-11-21 18:00 over 38.9 h), 4.5× (commit
-   c5acb1f0 on the unmerged branch `docs/hsa-t17-count`, owned by another
-   session). t17's verdict and the rollback are pending there; do not count
-   again here. t08 waits on t17. (Superseded by items 5 and 6.)
-
-   greengate 4.13 has no `--now`, and relais 0.83 admits by crate 5's rule, so
-   a rollback has three parts: greengate back to 4.13 (t17's recipe),
-   greenbelay back to 6.14.0 or forward without the `--now` advice, and
-   relais back to 0.82.0 or a stated decision to keep it on crate 5. Which
-   parts, and in what order, is t17's decision.
-5. ~~t17~~ closed 2026-11-25: the 2× trigger fired, and the person chose a narrow fix, with no revert of greengate, relais or greenbelay. Next was [t18](t18-plan-hook-stall-narrow-fix.md), with no stalled-line deferral on the hook path. t08 counts from the 5.1.1 install (t19).
-6. ~~t18~~ closed 2026-11-26: greengate 5.1.1 (hook waits have no stall end; #526, release #527, Release run 45847436802 success) installed 2026-11-26 16:24 CET; t19 is due from 2026-11-27 16:24. t11 closed with it: all its code is shipped and its measure is t19. Next: [t19](t19-count-after-5-1-1-install.md), the first half of t08; [t20](t20-queued-heartbeat-names-ceiling.md) (low).
-7. ~~t13~~ closed 2026-11-26: greengate 5.2.0 (`slot promote`; #530, release #531, Release run 45889748609 success) installed 2026-11-26 21:21 CET. No relais change. Follow-ups filed: [t22](t22-count-after-5-2-0-install.md) (7-day count, due 2026-12-03), [t23](t23-promote-off-switch.md) (off switch, plus the plan's low review findings), [t24](t24-relais-jobs-can-be-moved.md) (relais jobs movable, after t12), and `follow-ups/f12-slot-flag-allowlist.md` (outside the Destination).
-8. ~~t12~~ closed 2026-11-26: relais v0.90.0 (#624, release #628) installed 2026-11-26 21:28 CET. t15 may start (it changes the held marker t12 now writes from one constant, `HELD_MARKER`), and so may t24. [t16](t16-coordinator-queue-moving-line.md), unblocked by t11, counts 7 days after the relais v0.83.0 install (2026-11-25 02:26), so it is dated 2026-12-02.
-
-The plan's "Full reviews" sidecar lists the findings carried into Phases 4–6.
+1. t19 (overdue since 2026-11-27; its count window should now account for the 6.0.0 install).
+2. t21.
+3. t24.
+4. t23's close-out after 6.0.0.
+5. t15 phase 3, when due.
 
 Accepted gaps:
 
-- `slot run`'s `--max-wait` and `onBusy defer`'s `slotWait` stay hard (the
-  Decision log), so 6 of 50 `slot run` timeouts and 14 of 103 deferrals,
-  which were in a moving line, are not saved.
-- An I/O error before the queue is joined still runs unqueued ("slots off").
+- t15's missing round-1 plan-review ledger rows.
+- #546 fixes the race by fault injection, but does not explain why only the real gate failed 4 of 4.
 
 Lessons:
 
-- The host was jammed all session, at load 30 to 70 with 1 to 2 holders.
-  Run tests through `greengate slot run --max-wait 3000` in the background. From 5.0 a
-  `slot run` also exits 75 after a 300 s stall: start it with
-  `GREENHARNESS_SLOT_STALL_S=3000` ([t21](t21-slot-run-waits-past-a-stall.md)).
-- A `sh -c '… | tail'` hides the failure text: write the whole log to a file
-  and grep it.
-- amont's pre-commit runs `onBusy defer`, so clippy and the tests defer at
-  commit. Run them by hand first.
+- Prefix cargo and commit commands with `PATH=$HOME/.cargo/bin:$PATH`: Homebrew rust 1.100 shadows the pinned 1.94.1 and breaks clippy in the gate.
+- A subagent cannot `gh pr merge` (the publish-without-skill hook), so the driver merges.
+- Another session's unqueued test loop pushed the host to load 370; ask that session to queue it.
+- A full disk (ENOSPC) stops every agent; sweep worktrees between waves.
 
-No steps are left to the person.
+Steps left to the person: none.
 
 ## Not yet specified
 
@@ -162,6 +109,9 @@ No steps are left to the person.
   since 2026-11-21 18:00 were in a moving line.
 - Whether greenbelay should flag an inline `GREENGATE_ON_BUSY=now` prefix, as
   it flags `slot run --now` (t11 Phase 6).
+
+- Why the real pre-commit gate alone reproduced the `slot_run` race 4 of 4 (f15), where the test alone did not.
+- Release coordination when several sessions release greengate at once. A version claim might avoid the 5.6.0/6.0.0 collisions seen this wave.
 
 ## Out of scope
 
