@@ -105,6 +105,9 @@ pub struct Stage {
     /// time — see [`beat_line`]. Derived from the names, which already
     /// carry the trigger.
     on_push: bool,
+    /// Whether the queued heartbeat offers the way out, decided once beside
+    /// `on_push`: a land rehearsal forces `onBusy wait` on its snapshot.
+    way_out: WayOut,
     /// [`quiet`], decided once at begin: tool output is captured to a log and
     /// a passing check prints one line.
     quiet: bool,
@@ -159,6 +162,7 @@ impl Stage {
             // already had to strip the trigger to display them, so the
             // stage can answer this without dispatch passing anything in.
             on_push: holds_a_push_connection(names, crate::rehearsal::in_snapshot()),
+            way_out: WayOut::for_snapshot(crate::rehearsal::in_snapshot()),
             quiet: quiet(settings),
             named: AtomicBool::new(false),
             log_dir: if quiet(settings) {
@@ -843,7 +847,15 @@ fn heartbeat(settings: crate::config::Settings, weak: Weak<Stage>) {
         let text: String = announce.concat()
             + &due
                 .iter()
-                .map(|(row, first)| beat_line(row, *first, budgets(&settings), stage.on_push))
+                .map(|(row, first)| {
+                    beat_line(
+                        row,
+                        *first,
+                        budgets(&settings),
+                        stage.on_push,
+                        stage.way_out,
+                    )
+                })
                 .collect::<String>();
         let _guard = stage.out.lock().unwrap_or_else(|p| p.into_inner());
         let mut err = std::io::stderr().lock();
@@ -874,7 +886,9 @@ fn heartbeat(settings: crate::config::Settings, weak: Weak<Stage>) {
 /// Only on a first beat, so it is said once; only on a push, so a commit
 /// gate never hears it. A first beat is a check that has already run a full
 /// minute, which is the population at risk — no threshold to invent.
-fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String {
+///
+/// `way_out` is decided once per stage (see [`Stage`]), not read here.
+fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool, way_out: WayOut) -> String {
     use crate::hooks::common::human_secs;
     // The prefix is byte-for-byte what it always was: log readers grep it.
     // What CPU sampling adds goes after it.
@@ -885,12 +899,7 @@ fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String 
         human_secs(row.quiet as u64)
     );
     if let Some((secs, n)) = row.queued {
-        let way_out = if crate::rehearsal::in_snapshot() {
-            WayOut::Withheld
-        } else {
-            WayOut::Offered
-        };
-        line.push_str(&queued_note(secs, n, budgets.ceiling, way_out));
+        line.push_str(&queued_note(secs, n, budgets.ceiling));
     } else if let Some((kind, waited)) = row.wait {
         line.push_str(&format!(
             ", waiting for {} {}",
@@ -960,6 +969,10 @@ fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String 
         if row.cpu == RowCpu::NotSampled && budgets.idle > 0 {
             line.push_str("; CPU not sampled here, silence alone counts");
         }
+        // The way out is the last words of the line, after the kill rule, so
+        // that nothing reads as part of what to type; the push note below
+        // starts a new line.
+        line.push_str(&skip_clause(row, way_out));
         if on_push {
             // `concat!`, not a `\`-continued literal: a continuation keeps
             // the next line's indentation, which turns the message into runs
@@ -976,17 +989,13 @@ fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String 
             ));
         }
     }
+    if !first {
+        line.push_str(&skip_clause(row, way_out));
+    }
     line.push('\n');
     line
 }
 
-/// What the heartbeat says of a check waiting in line for a host slot: how
-/// long, what the wait ends at, and the way out. The end is at most what is
-/// left of `greengate.timeout` (an `onBusy defer` or `warn` check ends
-/// sooner); a hook check defers to CI there. The way out is the variable only:
-/// `on_push` cannot name the command that was run. A land rehearsal sets
-/// `GREENGATE_ON_BUSY=wait` for its snapshot, so there the variable is no way
-/// out and the clause is left out. Plain text: this is a log line.
 /// Whether the heartbeat offers the way out: a land rehearsal forces
 /// `onBusy wait` on its snapshot, so there the variable would not skip.
 #[derive(Clone, Copy)]
@@ -995,23 +1004,51 @@ enum WayOut {
     Withheld,
 }
 
-fn queued_note(secs: f64, slots: u64, timeout: u64, way_out: WayOut) -> String {
+impl WayOut {
+    fn for_snapshot(in_snapshot: bool) -> Self {
+        if in_snapshot {
+            WayOut::Withheld
+        } else {
+            WayOut::Offered
+        }
+    }
+}
+
+/// What the heartbeat says of a check waiting in line for a host slot: how
+/// long, and what the wait ends at. The end is at most what is left of
+/// `greengate.timeout` (an `onBusy defer` or `warn` check ends sooner); a hook
+/// check defers to CI there. Plain text: this is a log line.
+fn queued_note(secs: f64, slots: u64, timeout: u64) -> String {
     use crate::hooks::common::human_secs;
     let left = crate::host_slots::wait_ceiling_secs(timeout).saturating_sub(secs as u64);
-    let mut note = format!(
+    format!(
         ", queued {} for a host slot (greengate.hostSlots {slots}), defers to CI \
          in at most {} (greengate.timeout)",
         human_secs(secs as u64),
         human_secs(left)
-    );
-    if let WayOut::Offered = way_out {
-        note.push_str(&format!("; skip the queue: rerun with {SKIP_QUEUE}"));
+    )
+}
+
+/// The way out of a queued check's wait: the variable only, because `on_push`
+/// cannot name the command that was run. A land rehearsal sets
+/// `GREENGATE_ON_BUSY=wait` for its snapshot, so there the variable is no way
+/// out and the clause is left out. Empty for a row that is not queued.
+fn skip_clause(row: &Row, way_out: WayOut) -> String {
+    match (row.queued, way_out) {
+        (Some(_), WayOut::Offered) => format!("; skip the queue: rerun with {SKIP_QUEUE}"),
+        (Some(_), WayOut::Withheld) | (None, _) => String::new(),
     }
-    note
 }
 
 /// The variable that skips the queue for one run (ADR-0022).
 const SKIP_QUEUE: &str = "GREENGATE_ON_BUSY=now";
+
+/// The heartbeat as a normal run prints it, for the tests that are not about
+/// the way out.
+#[cfg(test)]
+fn beat_line_default(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String {
+    beat_line(row, first, budgets, on_push, WayOut::Offered)
+}
 
 /// Whether a stage of these checks runs while git holds a connection to the
 /// remote open: a push stage, unless it runs inside a rehearsal snapshot
@@ -1332,7 +1369,7 @@ mod tests {
         r.elapsed = 60.0;
         r.quiet = 60.0;
         r.queued = Some((60.0, 2));
-        let beat = beat_line(&r, false, B, false);
+        let beat = beat_line_default(&r, false, B, false);
         assert_eq!(
             beat,
             "  … pre-push-run-tests-js still running: 1m00s, last output 1m00s ago, \
@@ -1344,28 +1381,41 @@ mod tests {
 
     /// What is left of the ceiling is counted down from the time in line, is
     /// never negative, and a disabled `greengate.timeout` (0) still ends at
-    /// the queue's own 3600 s. A land rehearsal sets `onBusy wait` itself, so
-    /// there the way out is left out. The text is plain: no escape bytes.
+    /// the queue's own 3600 s. The text is plain: no escape bytes.
     #[test]
     fn a_queued_note_counts_down_to_the_ceiling() {
-        let at = |secs, timeout, way_out| queued_note(secs, 2, timeout, way_out);
-        assert!(at(3590.0, 3600, WayOut::Offered).contains("in at most 10s (greengate.timeout)"));
-        assert!(at(7200.0, 3600, WayOut::Offered).contains("in at most 0s (greengate.timeout)"));
-        assert!(at(60.0, 0, WayOut::Offered).contains("in at most 59m00s (greengate.timeout)"));
-        let snap = at(60.0, 3600, WayOut::Withheld);
-        assert!(snap.contains("defers to CI in at most 59m00s"), "{snap}");
-        assert!(!snap.contains("GREENGATE_ON_BUSY"), "{snap}");
-        for note in [at(60.0, 3600, WayOut::Offered), snap] {
-            assert!(!note.contains('\x1b'), "{note:?}");
+        assert!(queued_note(3590.0, 2, 3600).contains("in at most 10s (greengate.timeout)"));
+        assert!(queued_note(7200.0, 2, 3600).contains("in at most 0s (greengate.timeout)"));
+        assert!(queued_note(60.0, 2, 0).contains("in at most 59m00s (greengate.timeout)"));
+        assert!(!queued_note(60.0, 2, 3600).contains('\x1b'));
+    }
+
+    /// The way out ends the line, after a first beat's kill rule, so nothing
+    /// reads as part of what to type. A land rehearsal sets `onBusy wait`
+    /// itself, so there the heartbeat leaves the way out out. The same words
+    /// whatever `on_push` says: it cannot name the command that was run.
+    #[test]
+    fn the_way_out_of_a_queue_ends_the_line_and_is_withheld_in_a_land() {
+        let mut queued_row = row("pre-push-run-tests-js", 60.0);
+        queued_row.queued = Some((60.0, 2));
+        let skip = "skip the queue: rerun with GREENGATE_ON_BUSY=now";
+        let offered = |first, on_push| beat_line(&queued_row, first, B, on_push, WayOut::Offered);
+        let first = offered(true, false);
+        assert!(first.contains("(killed after"), "{first:?}");
+        assert!(first.ends_with(&format!("; {skip}\n")), "{first:?}");
+        assert!(!first.contains("\x1b"), "{first:?}");
+        assert_eq!(offered(false, true), offered(false, false));
+        let pushing = offered(true, true);
+        let way_out_at = pushing.find(skip).expect("the way out");
+        assert!(pushing.find("git opened its connection").unwrap() > way_out_at);
+        for first_beat in [true, false] {
+            let withheld = beat_line(&queued_row, first_beat, B, false, WayOut::Withheld);
+            assert!(!withheld.contains("GREENGATE_ON_BUSY"), "{withheld:?}");
+            assert!(
+                withheld.contains("defers to CI in at most 59m00s"),
+                "{withheld:?}"
+            );
         }
-        // The same words whatever `on_push` says: it cannot name the command.
-        let mut r = row("pre-push-run-tests-js", 60.0);
-        r.queued = Some((60.0, 2));
-        let (push, commit) = (
-            beat_line(&r, false, B, true),
-            beat_line(&r, false, B, false),
-        );
-        assert_eq!(push, commit);
     }
 
     /// Under load the region counts toward the stretched budget and says
@@ -1388,14 +1438,14 @@ mod tests {
         let text = region(&[r.clone()], 80, B);
         assert!(text.contains("· quiet 2m10s/7m48s (load ×3.9)"), "{text:?}");
         assert!(text.lines().all(|l| l.chars().count() <= 80), "{text:?}");
-        let beat = beat_line(&r, false, B, false);
+        let beat = beat_line_default(&r, false, B, false);
         assert!(
             beat.ends_with(
                 ", CPU idle 2m10s, budget 7m48s (load avg 31.2 on 8 cores, ×3.9 — greengate.idleLoadScale)\n"
             ),
             "{beat:?}"
         );
-        let first = flat(&beat_line(&r, true, B, false));
+        let first = flat(&beat_line_default(&r, true, B, false));
         assert!(
             first.contains("killed after 7m48s with no output and under 0.1 core of CPU"),
             "{first:?}"
@@ -1424,12 +1474,12 @@ mod tests {
             "{text:?}"
         );
         assert!(text.lines().all(|l| l.chars().count() <= 80), "{text:?}");
-        let beat = beat_line(&r, false, B, false);
+        let beat = beat_line_default(&r, false, B, false);
         assert!(
             beat.ends_with(", CPU unmeasured — extended budget 8m00s\n"),
             "{beat:?}"
         );
-        let first = flat(&beat_line(&r, true, B, false));
+        let first = flat(&beat_line_default(&r, true, B, false));
         assert!(
             first.contains(
                 "killed after 8m00s with no output while its CPU is unmeasured, or 1h00m in total"
@@ -1461,20 +1511,20 @@ mod tests {
             "{text:?}"
         );
 
-        let beat = beat_line(&r, false, B, false);
+        let beat = beat_line_default(&r, false, B, false);
         assert_eq!(
             beat,
             "  … pre-push-run-tests-js still running: 4m00s, last output 2m10s ago, \
              waiting for the cargo lock on the build directory 1m30s (greengate.lockWait 10m00s)\n"
         );
-        let beat = beat_line(&r, false, until, false);
+        let beat = beat_line_default(&r, false, until, false);
         assert!(
             beat.contains("(greengate.lockWait 0: until the ceiling)"),
             "{beat:?}"
         );
         // The first beat states the wait's rule, not the CPU one: the
         // silence clock is not running.
-        let first = flat(&beat_line(&r, true, B, false));
+        let first = flat(&beat_line_default(&r, true, B, false));
         assert!(
             first.contains(
                 "(killed after 10m00s in the wait, or 1h00m in total — greengate.lockWait"
@@ -1604,7 +1654,10 @@ mod tests {
             (RowCpu::NotSampled, "\n"),
         ] {
             r.cpu = cpu;
-            assert_eq!(beat_line(&r, false, B, false), format!("{prefix}{suffix}"));
+            assert_eq!(
+                beat_line_default(&r, false, B, false),
+                format!("{prefix}{suffix}")
+            );
         }
     }
 
@@ -1613,7 +1666,7 @@ mod tests {
     fn the_first_beat_states_the_rule_in_force() {
         let mut r = row("vitest", 60.0);
         r.cpu = RowCpu::Idle;
-        let sampled = beat_line(&r, true, B, false);
+        let sampled = beat_line_default(&r, true, B, false);
         assert!(
             flat(&sampled).contains(
                 "killed after 2m00s with no output and under 0.1 core of CPU, or 1h00m in total"
@@ -1621,7 +1674,7 @@ mod tests {
             "{sampled:?}"
         );
         r.cpu = RowCpu::NotSampled;
-        let not = beat_line(&r, true, B, false);
+        let not = beat_line_default(&r, true, B, false);
         assert!(
             not.contains("2m00s of silence or 1h00m in total"),
             "{not:?}"
@@ -1650,7 +1703,7 @@ mod tests {
     fn a_heartbeat_names_the_budgets_once() {
         let mut r = row("cargo-test", 60.0);
         r.quiet = 2.0;
-        let first = beat_line(&r, true, B, false);
+        let first = beat_line_default(&r, true, B, false);
         assert!(
             first.contains("cargo-test still running: 1m00s"),
             "{first:?}"
@@ -1661,9 +1714,9 @@ mod tests {
             "{first:?}"
         );
         assert!(first.contains("greengate.idleTimeout"), "{first:?}");
-        let later = beat_line(&r, false, B, false);
+        let later = beat_line_default(&r, false, B, false);
         assert!(!later.contains("greengate.idleTimeout"), "{later:?}");
-        let off = beat_line(
+        let off = beat_line_default(
             &r,
             true,
             Budgets {
@@ -1697,7 +1750,7 @@ mod tests {
     fn a_long_push_gate_is_told_what_it_is_sitting_on() {
         let r = row("cargo-test", 60.0);
 
-        let pushing = flat(&beat_line(&r, true, B, true));
+        let pushing = flat(&beat_line_default(&r, true, B, true));
         assert!(
             pushing.contains("A remote may close it first"),
             "{pushing:?}"
@@ -1709,11 +1762,11 @@ mod tests {
         );
 
         // Once, not every minute.
-        let later = flat(&beat_line(&r, false, B, true));
+        let later = flat(&beat_line_default(&r, false, B, true));
         assert!(!later.contains("close it first"), "{later:?}");
 
         // Never at commit time: nothing is waiting on a socket there.
-        let committing = flat(&beat_line(&r, true, B, false));
+        let committing = flat(&beat_line_default(&r, true, B, false));
         assert!(!committing.contains("close it first"), "{committing:?}");
     }
 
@@ -1740,7 +1793,7 @@ mod tests {
     #[test]
     fn the_push_note_does_not_recommend_ssh_keepalive() {
         let r = row("cargo-test", 60.0);
-        let pushing = flat(&beat_line(&r, true, B, true));
+        let pushing = flat(&beat_line_default(&r, true, B, true));
         assert!(
             !pushing.contains("ServerAlive"),
             "keepalive was already on when this failed; recommending it \

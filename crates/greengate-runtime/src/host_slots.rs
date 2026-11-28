@@ -456,17 +456,17 @@ enum WaitPlan {
     Queue(greenharness_slots::WaitBounds),
 }
 
-/// The [`WaitPlan`] for a check: one row of the plan's table per arm.
 /// The longest a wait in line lasts: `greengate.timeout`, or 3600 s when that
 /// is 0 (off). The queue, the heartbeat and the deferral advice read it here,
 /// so none of them can disagree about it.
-pub fn wait_ceiling_secs(timeout: u64) -> u64 {
+pub(crate) fn wait_ceiling_secs(timeout: u64) -> u64 {
     match timeout {
         0 => 3600,
         secs => secs,
     }
 }
 
+/// The [`WaitPlan`] for a check: one row of the plan's table per arm.
 /// `ceiling` is `greengate.timeout` (3600 s when 0), `seen` whether this run
 /// already deferred on a busy host. A hook check has no stall window: it waits
 /// until its ceiling, as a commit or a push can, and defers there (ADR-0022,
