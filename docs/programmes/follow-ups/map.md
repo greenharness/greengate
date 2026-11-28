@@ -37,6 +37,8 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 
 2026-11-28: filed f15 (`slot_run::a_session_moves_its_own_waiting_job_to_the_head` failed once on macOS CI on host-slot-admission t15's phase-1 PR #536, then passed on rerun), from host-slot-admission t15. Also from t15: f16 (`rehearsal::stop_cancels_the_worker_and_removes_its_snapshot` failed once in the phase-2 commit gate's suite at load, a 2 s worker likely finished before `--stop`), and f14 seen again on #542. Next, in order: f02 (due 2026-12-05), f13, f07, then f09, f08, f10, f14, f15, f16.
 
+2026-11-28: filed f17 (Homebrew rust 1.100 shadows the 1.94.1 pin, so clippy fails on `posix_signal.rs`), f18 (`tree_gates` load flakes, names unknown), f19 (the promote off switch's docs, unset and error text), f20 (the heartbeat live row's wait bounds) and f21 (the heartbeat's pilot and tests), from host-slot-admission t15, t20 and t23.
+
 ## Not yet specified
 
 ## Out of scope
