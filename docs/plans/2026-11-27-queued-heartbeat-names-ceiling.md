@@ -9,7 +9,7 @@ plan-id: p-01M8FH118P0RWR9B68M6X6SM0Z
 
 ## Review panel
 👉 **Decide:** none — approve if the heartbeat naming its ceiling and the skip variable, and the roll-up label carrying the resolved length, is the whole change.
-📍 amont · 1 phase · next: Phase 1. Panel: backend, lang:rust, tui, unix (opus); codex: not installed.
+📍 amont · 1 phase · next: none, done. Panel: backend, lang:rust, tui, unix (opus); codex: not installed.
 **Changed by review:** wording `defers to CI`; skip names the variable only (`on_push` cannot name the command run); one shared `wait_ceiling_secs`.
 **Verdicts:** 2 approve, 2 approve-with-changes after round 2; 5 carried into implementation (listed in the reviews); words 629 → 894 (×1.42, fixes to wrong statements exempt); remove 0, merge 0.
 📄 Full reviews: [2026-11-27-queued-heartbeat-names-ceiling.reviews.md](2026-11-27-queued-heartbeat-names-ceiling.reviews.md)
@@ -108,12 +108,16 @@ No release is part of this plan: a message change only, shipped with the next gr
   rerun with GREENGATE_ON_BUSY=now`); 3590 s queued → `10s`, 7200 s → `0s`,
   ceiling 0 → `59m00s`; on a first beat the clause ends the line after the kill
   rule and before the push note; inside a rehearsal snapshot it is absent and
-  "defers to CI" stays; no `\x1b` → observed: 889 lib tests pass.
+  "defers to CI" stays; no `\x1b` → observed: `a_queued_check_says_it_waits_for_a_host_slot` matched the exact line,
+  `a_queued_note_counts_down_to_the_ceiling` the `10s`/`0s`/`59m00s` cases, and
+  `the_way_out_of_a_queue_ends_the_line_and_is_withheld_in_a_land` the order and
+  the withheld text (889 lib tests pass).
 - Roll-up: `deferral_advice` tests assert the exact label
   `  wait for a slot, up to 1h00m (greengate.timeout):`, timeout 0 gives the
   same, all lines at most 80 columns; `busy_defers` (its repo sets timeout 600)
-  sees `up to 10m00s (greengate.timeout):` on its own line → observed: 26
-  `busy_defers` tests pass.
+  sees `up to 10m00s (greengate.timeout):` on its own line → observed:
+  `the_run_now_advice_for_a_deferred_warn_gate_waits` found the label
+  `up to 10m00s (greengate.timeout):` on its own line (26 `busy_defers` tests pass).
 - Live pilot: not run. The host was jammed all session (load 300+, a three-
   slot line of other sessions' suites), and the heartbeat needs a hook check
   that runs 60 s behind a held slot. The exact-line tests stand in; the first
