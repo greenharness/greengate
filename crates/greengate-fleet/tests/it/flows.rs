@@ -778,10 +778,10 @@ fn the_install_journey() {
 /// stderr, and the repository's hooks left exactly as they were.
 #[test]
 fn the_removed_hook_flag_is_refused_before_any_write() {
-    let t = Root::new("removed-hook-flag");
-    let hooks = t.hooks("repo");
-    t.write("repo/.git/hooks/pre-commit", "#!/bin/sh\n# marker\n");
-    t.write("repo/.adr.yaml", "x: 1\n");
+    let root = Root::new("removed-hook-flag");
+    let hooks = root.hooks("repo");
+    root.write("repo/.git/hooks/pre-commit", "#!/bin/sh\n# marker\n");
+    root.write("repo/.adr.yaml", "x: 1\n");
     let before: Vec<_> = std::fs::read_dir(&hooks)
         .expect("hooks")
         .map(|e| e.expect("entry").file_name())
@@ -792,7 +792,7 @@ fn the_removed_hook_flag_is_refused_before_any_write() {
         (vec!["install", "--aval-hook"], "--aval-hook"),
         (vec!["fix", "--bogus"], "--bogus"),
     ] {
-        let (code, out, err) = t.fleet(&args);
+        let (code, out, err) = root.fleet(&args);
         step_eq!("exit 2", code, 2, "{args:?}: {err}");
         step!("no stdout", out.is_empty(), "{args:?}: {out}");
         step!(
@@ -813,7 +813,7 @@ fn the_removed_hook_flag_is_refused_before_any_write() {
     }
     step_eq!(
         "hooks untouched",
-        t.read("repo/.git/hooks/pre-commit"),
+        root.read("repo/.git/hooks/pre-commit"),
         "#!/bin/sh\n# marker\n"
     );
     let after: Vec<_> = std::fs::read_dir(&hooks)

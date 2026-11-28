@@ -1275,8 +1275,9 @@ mod tests {
     fn the_removed_hook_flag_is_an_unknown_argument() {
         let home = std::env::temp_dir().join(format!("fleet-old-flag-{}", std::process::id()));
         let _ = std::fs::create_dir_all(home.join("Developer"));
-        let a = parse(&["fix".into(), "--greentopo-hook".into()], Some(&home)).expect("new flag");
-        assert!(a.greentopo_hook);
+        let args =
+            parse(&["fix".into(), "--greentopo-hook".into()], Some(&home)).expect("new flag");
+        assert!(args.greentopo_hook);
         let removed = "--aval-hook";
         for argv in [
             vec!["fix", removed],

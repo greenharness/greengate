@@ -985,28 +985,30 @@ mod tests {
     /// No object key, and no `state` or `warning` tag, in `value` says
     /// `aval`. Paths are left out: a scratch directory may contain anything.
     fn assert_no_old_name(value: &serde_json::Value) {
-        fn names(value: &serde_json::Value, out: &mut Vec<String>) {
-            match value {
-                serde_json::Value::Object(map) => {
-                    for (key, inner) in map {
-                        out.push(key.clone());
-                        if key == "state" || key == "warning" {
-                            if let Some(tag) = inner.as_str() {
-                                out.push(tag.to_string());
-                            }
-                        }
-                        names(inner, out);
-                    }
-                }
-                serde_json::Value::Array(items) => items.iter().for_each(|i| names(i, out)),
-                _ => {}
-            }
-        }
-        let mut found = Vec::new();
-        names(value, &mut found);
+        let found = json_names(value);
         let old: Vec<_> = found.iter().filter(|n| n.contains("aval")).collect();
         assert!(old.is_empty(), "{old:?} in {value}");
         assert!(found.iter().any(|n| n.contains("greentopo")), "{value}");
+    }
+
+    /// Every object key in `value`, with the string tag under each `state`
+    /// or `warning` key, depth first.
+    fn json_names(value: &serde_json::Value) -> Vec<String> {
+        match value {
+            serde_json::Value::Object(map) => map
+                .iter()
+                .flat_map(|(key, inner)| {
+                    let tag = (key == "state" || key == "warning")
+                        .then(|| inner.as_str().map(str::to_string))
+                        .flatten();
+                    std::iter::once(key.clone())
+                        .chain(tag)
+                        .chain(json_names(inner))
+                })
+                .collect(),
+            serde_json::Value::Array(items) => items.iter().flat_map(json_names).collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// The `--json` keys follow greentopo's name (greengate 6.0.0): no key,
