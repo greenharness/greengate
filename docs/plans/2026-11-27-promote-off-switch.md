@@ -214,7 +214,9 @@ in `/tmp/t23-all8.log`).
 
 At t22's count (2026-12-03): `promote_refused` rows with `limit` `off` while
 no host `hostPromote` is set. A row with `source` `env` or `global` that
-nobody set is a false off: revert to the previous release.
+nobody set is a false off: revert to the previous release. Rows for id
+`"999999"` (a string) on 2026-11-28 are t23's live checks (`off`/`env`,
+`not-queued`, `off`/`global`): count with `select(.id != "999999")`.
 
 ## Outcome
 
