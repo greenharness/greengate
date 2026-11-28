@@ -209,7 +209,9 @@ greengate: GREENHARNESS_HOST_SLOT=1 names no live lease (malformed); queueing
 ```
 
 The bare `held` older binaries export is accepted until both tools write
-the new form (greengate 5.5, relais's t15 release), then refused (`bare`).
+the new form (greengate 5.6, relais's t15 phase-2 release), then refused
+(`bare`). Meanwhile an accepted bare `held` leaves one `marker_bare` row
+(no `reason`) per process, so the holders still writing it can be counted.
 Tests escape the real queue with slots off (`GREENGATE_HOST_SLOTS=0`), never
 with a marker.
 

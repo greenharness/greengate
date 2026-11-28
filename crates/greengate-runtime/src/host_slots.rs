@@ -576,9 +576,19 @@ fn marker(settings: &crate::config::Settings) -> &greenharness_slots::Marker {
 }
 
 /// Whether an ancestor holds a slot for this run: its `GREENHARNESS_HOST_SLOT`
-/// names a live lease (`greenharness_slots::held_marker`).
+/// names a live lease (`greenharness_slots::held_marker`). An accepted bare
+/// `held` leaves one `marker_bare` row, once per run: the phase-3 gate of t15
+/// counts the holders still writing it.
 pub(crate) fn nested(settings: &crate::config::Settings) -> bool {
-    marker(settings).is_held()
+    let marker = marker(settings);
+    if matches!(marker, greenharness_slots::Marker::Held { bare: true }) {
+        settings.marker_log.record(
+            &greenharness_slots::dir(),
+            crate::names::SLOT_HOLDER,
+            marker,
+        );
+    }
+    marker.is_held()
 }
 
 /// For a command about to queue: when its marker was refused, the journal's
@@ -792,6 +802,25 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
     // tools run under that slot (a child `amont slot run` must not queue for
     // its parent's slot).
     Ok(CURRENT.with(|c| c.borrow().held.is_some()) || (parking() && parked().is_some()))
+}
+
+/// The [`HELD_ENV`] value a tool spawned on this thread exports after
+/// [`before_spawn`] said a slot is held: the marker of the lease this check
+/// holds, else of the slot parked between two heavy gates (t15 phase 2).
+/// `None` when neither is held.
+pub fn held_env() -> Option<String> {
+    CURRENT
+        .with(|c| {
+            c.borrow()
+                .held
+                .as_ref()
+                .map(greenharness_slots::Lease::marker)
+        })
+        .or_else(|| {
+            parking()
+                .then(|| parked().as_ref().map(|p| p.lease.marker()))
+                .flatten()
+        })
 }
 
 /// The next heavy check takes the slot the previous one parked: renamed to

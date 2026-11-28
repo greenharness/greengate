@@ -31,7 +31,7 @@ const BARE: &str = "held";
 /// The first greengate and relais release whose writers export
 /// `held:<lease>`. Before it, a holder exports bare `held`, which the reader
 /// accepts until [`ACCEPT_BARE`] is switched off.
-pub(crate) const LEASE_WRITER_SINCE: &str = "5.5";
+pub(crate) const LEASE_WRITER_SINCE: &str = "5.6";
 
 /// Whether a bare `held` is still accepted: `Accept` for the rollout's first
 /// two steps (every reader accepts both forms, then every writer emits the
@@ -281,20 +281,26 @@ impl MarkerLog {
     /// Append the row `marker` leaves in `dir`'s `waits.jsonl`, the first
     /// time only; `true` when this call wrote it, so the caller prints its
     /// line then. A refused marker writes `marker_refused` with its `reason`;
-    /// any other marker writes nothing. Best-effort, as every journal row.
+    /// an accepted bare `held` writes `marker_bare` with none (from 5.6: the
+    /// phase-3 gate of t15 counts the writers still bare, and
+    /// [`refused_line`] has no line for it); any other marker writes
+    /// nothing. Best-effort, as every journal row.
     ///
     /// The row has no `waited_ms` (wait readers select `has("waited_ms")`,
     /// as with `released` rows), and carries `ppid`, beside the value, cut to
     /// 64 characters and JSON-escaped:
     /// `{"at_ms":…,"tool":…,"pid":…,"ppid":…,"session":…,"marker":…,"reason":…,"outcome":"marker_refused"}`.
     pub fn record(&self, dir: &Path, tool: &str, marker: &Marker) -> bool {
-        let Marker::Refused { given, reason } = marker else {
-            return false;
+        let line = match marker {
+            Marker::Refused { given, reason } => (given.as_str(), Some(*reason), "marker_refused"),
+            Marker::Held { bare: true } => (BARE, None, "marker_bare"),
+            _ => return false,
         };
         if self.said.swap(true, Ordering::SeqCst) {
             return false;
         }
-        append_journal(dir, &row(tool, given, Some(*reason), "marker_refused"));
+        let (given, reason, outcome) = line;
+        append_journal(dir, &row(tool, given, reason, outcome));
         true
     }
 }
@@ -552,6 +558,29 @@ mod tests {
         assert!(row.contains("\"marker\":\"1\""), "{row}");
         assert!(row.contains("\"reason\":\"malformed\""), "{row}");
         assert!(row.ends_with("\"outcome\":\"marker_refused\"}"), "{row}");
+        let _ = fs::remove_dir_all(&dir); // best-effort: scratch
+    }
+
+    #[test]
+    fn an_accepted_bare_marker_is_journalled_once_per_log() {
+        let dir = scratch("bare-row");
+        let bare = read(&dir, "held");
+        assert_eq!(bare, Marker::Held { bare: true });
+        let log = MarkerLog::new();
+        assert!(log.record(&dir, "greengate", &bare));
+        assert!(!log.record(&dir, "greengate", &bare));
+        assert_eq!(refused_line("greengate", &bare), None, "no line for it");
+        let live = Marker::Held { bare: false };
+        assert!(!MarkerLog::new().record(&dir, "greengate", &live));
+        let journal = fs::read_to_string(dir.join("waits.jsonl")).unwrap();
+        let rows: Vec<&str> = journal.lines().collect();
+        assert_eq!(rows.len(), 1, "{journal}");
+        let row = rows[0];
+        assert!(row.starts_with("{\"at_ms\":"), "{row}");
+        assert!(!row.contains("waited_ms"), "{row}");
+        assert!(!row.contains("\"reason\""), "{row}");
+        assert!(row.contains("\"marker\":\"held\""), "{row}");
+        assert!(row.ends_with("\"outcome\":\"marker_bare\"}"), "{row}");
         let _ = fs::remove_dir_all(&dir); // best-effort: scratch
     }
 

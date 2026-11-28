@@ -256,10 +256,13 @@ fn value<'a>(flags: &'a [(&'static str, String)], flag: &str) -> Option<&'a str>
 }
 
 /// How the command runs: inside a held slot, or with none.
-#[derive(Clone, Copy)]
 enum Launch {
-    /// A slot is held for it (here or by an ancestor): `GREENHARNESS_HOST_SLOT=held`.
-    Held,
+    /// This run holds a slot for it: `GREENHARNESS_HOST_SLOT` is the lease's
+    /// marker, `held:<lease>` (t15 phase 2).
+    Held(String),
+    /// An ancestor holds the slot and its marker was accepted: the inherited
+    /// value passes through untouched.
+    Inherit,
     /// No slot: off, unsupported, unavailable, or `--now`.
     Unqueued,
 }
@@ -331,7 +334,7 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
             program,
             rest,
             if nested {
-                Launch::Held
+                Launch::Inherit
             } else {
                 Launch::Unqueued
             },
@@ -431,7 +434,7 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
         }
     };
     record(waited, "admitted", None);
-    let code = spawn(program, rest, Launch::Held, Some(jobs));
+    let code = spawn(program, rest, Launch::Held(lease.marker()), Some(jobs));
     drop(lease);
     code
 }
@@ -465,10 +468,10 @@ fn spawn(program: &OsString, rest: &[OsString], launch: Launch, jobs: Option<u32
         greenharness_slots::bound_width(&mut cmd, jobs);
     }
     match launch {
-        Launch::Held => {
-            cmd.env(greenharness_slots::HELD_ENV, "held");
+        Launch::Held(marker) => {
+            cmd.env(greenharness_slots::HELD_ENV, marker);
         }
-        Launch::Unqueued => {}
+        Launch::Inherit | Launch::Unqueued => {}
     }
     match cmd.status() {
         Ok(status) => exit_code(status),
