@@ -656,6 +656,53 @@ fn as_session(slots: &Path, session: &str, args: &[&str]) -> Command {
 }
 
 /// The `slots --json` queue, parsed.
+/// A child's stderr, read on a thread as it is written, so a test can wait
+/// for a line before it ends what the child waits on.
+struct Said {
+    text: std::sync::Arc<std::sync::Mutex<String>>,
+    reader: std::thread::JoinHandle<()>,
+}
+
+fn said_by(child: &mut Child) -> Said {
+    use std::io::Read as _;
+    let mut err = child.stderr.take().expect("stderr is piped");
+    let text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = std::sync::Arc::clone(&text);
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = err.read(&mut buf) {
+            sink.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    });
+    Said { text, reader }
+}
+
+impl Said {
+    /// Wait until the child has said `want`, at most 30 s.
+    fn until(&self, want: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let text = self.text.lock().unwrap().clone();
+            if text.contains(want) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "never said {want:?}: {text}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Everything the child said, once its stderr has closed.
+    fn all(self) -> String {
+        self.reader.join().expect("stderr reader");
+        std::sync::Arc::try_unwrap(self.text)
+            .expect("the reader has ended")
+            .into_inner()
+            .unwrap()
+    }
+}
+
 fn queue_of(slots: &Path) -> Vec<serde_json::Value> {
     let out = amont(slots, &["slots", "--json"]).output().expect("slots");
     let json: serde_json::Value =
@@ -692,11 +739,12 @@ fn a_session_moves_its_own_waiting_job_to_the_head() {
         .spawn()
         .expect("theirs");
     until_waiting(&slots, 1);
-    let mine = as_session(&slots, "session-mine", &["slot", "run", "--", "true"])
+    let mut mine = as_session(&slots, "session-mine", &["slot", "run", "--", "true"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("mine");
+    let mine_said = said_by(&mut mine);
     until_waiting(&slots, 2);
     let queue = queue_of(&slots);
     assert_eq!(queue.len(), 2, "{queue:?}");
@@ -750,17 +798,20 @@ fn a_session_moves_its_own_waiting_job_to_the_head() {
     );
     assert!(waits.contains("\"limit\":\"own-session\""), "{waits}");
 
+    // The waiter says its id on a poll that finds the holder, and polls
+    // every 200 ms. Its first poll can answer an empty queue (it missed the
+    // admission lock that this test's `slots --json` calls hold), and the
+    // steps above can end before the second. A holder released on sight then
+    // grants the waiter silently, so release it only once the line is said.
+    mine_said.until(&format!("id {id}; move ahead: greengate slot promote {id}"));
     std::fs::write(&release, "").expect("release the holder");
-    let mine = mine.wait_with_output().expect("mine");
+    let mine = mine.wait().expect("mine");
+    let said = mine_said.all();
     let theirs = theirs.wait_with_output().expect("theirs");
-    let said = String::from_utf8_lossy(&mine.stderr).into_owned();
-    assert!(
-        said.contains(&format!("id {id}; move ahead: greengate slot promote {id}")),
-        "{said}"
-    );
     assert_eq!(
-        (mine.status.code(), theirs.status.code()),
-        (Some(0), Some(0))
+        (mine.code(), theirs.status.code()),
+        (Some(0), Some(0)),
+        "{said}"
     );
     let _ = first.wait_with_output(); // best-effort: reap the holder
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
