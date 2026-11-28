@@ -70,8 +70,7 @@ const USAGE: &str = concat!(
                  with fix/install: also re-run `greentopo hook install` where a
                  repository keeps an .adr.yaml and its session hook is behind
                  the greentopo on PATH. Reports, never edits, a .gitignore that
-                 would drop the hook's files. `--aval-hook` is its old name,
-                 still accepted, with a warning, until the next major.
+                 would drop the hook's files.
   --migrate      with fix: rename the committed greengate 3.x names
                  (amont.conf, amont.pack, the AGENTS.md markers) in each
                  repository that has them, one commit each through its own
@@ -170,8 +169,6 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
     let mut binary: Option<String> = None;
     let mut agents_md = false;
     let mut greentopo_hook = false;
-    // The spelling the user typed, so a usage error names the flag they gave.
-    let mut hook_flag = "--greentopo-hook";
     let mut remove_unrecognized = false;
     let mut migrate = false;
     let mut thresholds = greengate_runtime::gate_evidence::Thresholds::default();
@@ -236,14 +233,6 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
             "--stale-days" => thresholds.stale_days = number(&mut it, "--stale-days")?,
             "--agents-md" => agents_md = true,
             "--greentopo-hook" => greentopo_hook = true,
-            // The old name (aval became greentopo, ADR-0072). Flag names are
-            // public interface (cli.compat.interface-is-public): accepted with
-            // a warning naming the replacement until the next major removes it.
-            "--aval-hook" => {
-                eprintln!("{FLEET_BIN}: --aval-hook is deprecated, use --greentopo-hook");
-                greentopo_hook = true;
-                hook_flag = "--aval-hook";
-            }
             "--remove-unrecognized" => remove_unrecognized = true,
             "--migrate" => migrate = true,
             "--binary" => {
@@ -255,7 +244,7 @@ fn parse(argv: &[String], home: Option<&Path>) -> Result<Args, String> {
     }
     let ignored = [
         (agents_md, "--agents-md"),
-        (greentopo_hook, hook_flag),
+        (greentopo_hook, "--greentopo-hook"),
         (remove_unrecognized, "--remove-unrecognized"),
         (binary.is_some(), "--binary"),
     ];
@@ -1278,16 +1267,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// `--aval-hook`, the flag's name before aval became greentopo, still
-    /// means `--greentopo-hook` until a major release removes it.
+    /// greengate 6.0.0 removed the hook flag's old spelling: it is an unknown
+    /// argument like any other, in every mode, and `main` exits 2 on a `parse`
+    /// error before any repair or install starts. The usage names only
+    /// `--greentopo-hook`.
     #[test]
-    fn the_old_hook_flag_still_parses() {
+    fn the_removed_hook_flag_is_an_unknown_argument() {
         let home = std::env::temp_dir().join(format!("fleet-old-flag-{}", std::process::id()));
         let _ = std::fs::create_dir_all(home.join("Developer"));
-        for flag in ["--greentopo-hook", "--aval-hook"] {
-            let a = parse(&["fix".into(), flag.into()], Some(&home)).expect(flag);
-            assert!(a.greentopo_hook, "{flag}");
+        let a = parse(&["fix".into(), "--greentopo-hook".into()], Some(&home)).expect("new flag");
+        assert!(a.greentopo_hook);
+        let removed = "--aval-hook";
+        for argv in [
+            vec!["fix", removed],
+            vec!["fix", "--apply", removed],
+            vec!["install", removed],
+        ] {
+            let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+            let Err(e) = parse(&argv, Some(&home)) else {
+                panic!("{argv:?} must be refused");
+            };
+            assert_eq!(e, format!("unknown argument {removed:?}"), "{argv:?}");
         }
+        assert!(USAGE.contains("--greentopo-hook"));
+        assert!(!USAGE.contains("aval"), "{USAGE}");
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -8,6 +8,18 @@ missing here.
 
 ## Unreleased
 
+**Breaking, `greengate-fleet` only** (programme topo-spotter-rename t28): the
+names greengate 5.3.0 kept for the session hook of aval, which became
+greentopo, are gone, with no alias.
+
+- `fix --aval-hook` is removed: it is an unknown argument (exit 2). Use
+  `--greentopo-hook`.
+- `scan --json` and `fix --json` rename five keys: `aval_hook` →
+  `greentopo_hook`, its state `no_aval` → `no_greentopo`, the warnings
+  `aval_hook_ignored` → `greentopo_hook_ignored` and `aval_hook_unjudged` →
+  `greentopo_hook_unjudged`, and `install_aval_hook` → `install_greentopo_hook`.
+  A census on 2026-11-28 found no reader of the old keys.
+
 Holders now export `GREENHARNESS_HOST_SLOT=held:<lease>`, their own lease
 id, instead of the bare `held` (ADR-0022, amended; programme
 host-slot-admission t15, phase 2): `greengate slot run` for the command it

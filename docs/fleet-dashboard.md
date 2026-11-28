@@ -149,8 +149,7 @@ Repo {
   declared          : Vec<DeclaredCheck>     // this repo's own greengate.conf checks
   trusted           : Option<bool>   // None when there is no manifest at all
   agents_md         : AgentsMdState  // UpToDate | Missing | Drifted | Malformed
-  aval_hook         : GreentopoHook  // { state, ignored: Vec<String> } — see below;
-                                     // the JSON keys keep aval's name until the next major
+  greentopo_hook    : GreentopoHook  // { state, ignored: Vec<String> } — see below
   hooks_dir         : HooksDir       // where the hooks are, and whether we may touch them
   shares_hooks_with : Option<PathBuf> // a repo already seen that owns this hooks dir
   attest            : AttestState    // what it says to attest, from HEAD — see below
@@ -168,7 +167,7 @@ ShimState = Ok            // installed bytes match the expected baked template
           | Symlink{target}    // a link — writing here would rewrite something else
           | Unreadable{why}    // a binary, a directory, a permissions error, a hard link
 GreentopoHookState = NoCorpus     // no .adr.yaml — not applicable, and nothing was spawned
-                   | NoGreentopo  // JSON `no_aval`: a corpus, and no `greentopo` on PATH to judge it with
+                   | NoGreentopo  // a corpus, and no `greentopo` on PATH to judge it with
                    | Current      // `greentopo hook install --check` exited 0
                    | Stale        // …exited 1: the hook is behind the installed greentopo
                    | Unknown{why} // greentopo answered something it did not promise
@@ -190,7 +189,7 @@ FixPlan {
   remove    : Vec<Removal>
   write     : Vec<WriteShim>
   write_agents_md   : Option<WriteAgentsMd>    // --agents-md only
-  install_aval_hook : Option<InstallGreentopoHook>  // --greentopo-hook only; runs greentopo, renders nothing
+  install_greentopo_hook : Option<InstallGreentopoHook>  // --greentopo-hook only; runs greentopo, renders nothing
 }
 
 Refusal = unmanaged | unreadable_hooks | tracked{path}
@@ -199,8 +198,8 @@ Refusal = unmanaged | unreadable_hooks | tracked{path}
         | hooks_dir_outside_repo{path} | hooks_dir_unknown{why}
 Warning = unrecognized_sub_hook{path}     // a hook we did not write. NOT deleted.
         | hooks_dir_outside_repo{path}
-        | aval_hook_ignored{paths}        // .gitignore drops the session hook. NOT edited.
-        | aval_hook_unjudged{why}         // --greentopo-hook asked, no greentopo (or an odd answer)
+        | greentopo_hook_ignored{paths}   // .gitignore drops the session hook. NOT edited.
+        | greentopo_hook_unjudged{why}    // --greentopo-hook asked, no greentopo (or an odd answer)
 ```
 
 Four of these fields deserve a sentence, because each exists to make something
@@ -519,8 +518,7 @@ on purpose — "stale" means our own retired shims, which are removed by default
 and are a different thing entirely. `--binary <path>` chooses what the shims are
 baked to point at, defaulting to `$HOME/.local/bin/amont`.
 
-`--greentopo-hook` (its old name `--aval-hook` is still accepted, with a
-warning, until the next major) keeps
+`--greentopo-hook` keeps
 [greentopo](https://github.com/greenharness/greentopo)'s session hook
 current across every repository that keeps an `.adr.yaml`. `greentopo hook install`
 writes `.claude/hooks/greentopo-heads.sh` and a `SessionStart` entry in
