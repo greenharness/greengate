@@ -129,6 +129,8 @@ No release is part of this plan: a message change only, shipped with the next gr
 ## Implementation review
 - implementation-review: approve-with-changes, then the delta; fixed: ambient `in_snapshot()` read (now `Stage.way_out`), misplaced doc comments, a vacuous test, a flag-argument test wrapper (deleted); candidate `r` fine.
 - backend, lang:rust, unix, tui: approve after the delta; low items kept: one `for_snapshot` arm swap untested, `in_snapshot()` called twice at stage build.
+- Final tree (rebased on origin/main, 6ffa6ed0): implementation-review approve; rust approve (3 low notes); tui approve; unix approve-with-changes, one medium: "skip the queue" is false for a `warn` check under `warnSlotWait`. deliberate: rejected, because `wait_bounded_for_warn` runs only inside a rehearsal snapshot (dispatch.rs `enter`), where the way out is already withheld; no path reaches `BoundedForWarn` outside a snapshot. implementation-review's two lows (no test of `WayOut::for_snapshot`'s arms, no `beat_line` case at a non-3600 ceiling) are recorded deliberate: both are covered by the direct `queued_note` and `WayOut::Withheld` tests, and the wiring is checked at live.rs.
+- backend (final): see the closing commit's review round.
 
 ## Outcome
 Shipped on this branch (not yet released): the queued heartbeat names its
