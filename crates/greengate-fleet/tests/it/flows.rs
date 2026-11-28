@@ -782,7 +782,7 @@ fn the_removed_hook_flag_is_refused_before_any_write() {
     let hooks = root.hooks("repo");
     root.write("repo/.git/hooks/pre-commit", "#!/bin/sh\n# marker\n");
     root.write("repo/.adr.yaml", "x: 1\n");
-    let before: Vec<_> = std::fs::read_dir(&hooks)
+    let before: std::collections::BTreeSet<_> = std::fs::read_dir(&hooks)
         .expect("hooks")
         .map(|e| e.expect("entry").file_name())
         .collect();
@@ -816,7 +816,7 @@ fn the_removed_hook_flag_is_refused_before_any_write() {
         root.read("repo/.git/hooks/pre-commit"),
         "#!/bin/sh\n# marker\n"
     );
-    let after: Vec<_> = std::fs::read_dir(&hooks)
+    let after: std::collections::BTreeSet<_> = std::fs::read_dir(&hooks)
         .expect("hooks")
         .map(|e| e.expect("entry").file_name())
         .collect();

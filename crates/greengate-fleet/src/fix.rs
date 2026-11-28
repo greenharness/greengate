@@ -982,19 +982,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No object key, and no `state` or `warning` tag, in `value` says
+    /// No object key, and no `state` or `warning` tag, in `json` says
     /// `aval`. Paths are left out: a scratch directory may contain anything.
-    fn assert_no_old_name(value: &serde_json::Value) {
-        let found = json_names(value);
+    fn assert_no_old_name(json: &serde_json::Value) {
+        let found = json_names(json);
         let old: Vec<_> = found.iter().filter(|n| n.contains("aval")).collect();
-        assert!(old.is_empty(), "{old:?} in {value}");
-        assert!(found.iter().any(|n| n.contains("greentopo")), "{value}");
+        assert!(old.is_empty(), "{old:?} in {json}");
+        assert!(found.iter().any(|n| n.contains("greentopo")), "{json}");
     }
 
-    /// Every object key in `value`, with the string tag under each `state`
+    /// Every object key in `json`, with the string tag under each `state`
     /// or `warning` key, depth first.
-    fn json_names(value: &serde_json::Value) -> Vec<String> {
-        match value {
+    fn json_names(json: &serde_json::Value) -> Vec<String> {
+        match json {
             serde_json::Value::Object(map) => map
                 .iter()
                 .flat_map(|(key, inner)| {
