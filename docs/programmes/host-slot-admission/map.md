@@ -54,6 +54,7 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 - [Build: one host slot lease for a relais setup](t12-build-relais-setup-lease.md): relais v0.90.0 keeps one host slot across a setup's steps (relabelled per step, held marker exported); the test shows one `slots::take` for 3 steps and one admission-budget spend. The slot is given back before any coordinator wait, so a contended coordinator still re-queues per step.
 - [The queued heartbeat names the ceiling and the way out](t20-queued-heartbeat-names-ceiling.md): `queued 1m00s … defers to CI in at most 59m00s (greengate.timeout); skip the queue: rerun with GREENGATE_ON_BUSY=now`, and the roll-up label carries the resolved length (`up to 1h00m`). Hook waits in the first 22 h of 5.1.1: p95 896 s, max 1104 s, so the line was needed. Not done: each check's own bound (60 s `slotWait`, 600 s `warnSlotWait`).
 - [The journal 24 hours after the 5.1.1 install](t19-count-after-5-1-1-install.md): held. Over 26.3 h under 5.2.0–5.4.0 (5.1.1 alone ran 5 h and rotated out), 0 stalled hook rows, 0 rows without `holders`; hook deferrals 37.5 per 12 h beside 31.8. Hook wait rows halved (113.8 per 12 h beside 227); whether that is Ctrl-C aborts is t08's question. `slot run` ended 37 of 132 waits on a stall (t21).
+- [`slot run` waits to its `--max-wait`](t21-slot-run-waits-past-a-stall.md): no stall window and no `--stall` flag (ADR-0022 amended 2026-11-28). The stall fired only on an explicit `--max-wait` above 300 s; 36 of 37 stalls re-queued at the back, all behind holders of 15 min or more. Ships after 6.0.0.
 
 - [An off switch for `slot promote`](t23-promote-off-switch.md): `greengate.hostPromote 0` (or `GREENGATE_HOST_PROMOTE=0`, off-only) refuses every move with `refused (off)`, a `set by:` line and one `promote_refused` row carrying its `source`; the t13 rollback line points here once 5.6.0 ships.
 
@@ -92,6 +93,7 @@ Accepted gaps:
 
 Lessons:
 
+- Run long tests as `greengate slot run --max-wait 3000 -- <cmd>` with `run_in_background`. On greengate 6.0.0 and earlier, also prefix `GREENHARNESS_SLOT_STALL_S=3000`, or the wait ends after 300 s of a full line (t21). From the release after 6.0.0, `--max-wait` alone is enough.
 - Prefix cargo and commit commands with `PATH=$HOME/.cargo/bin:$PATH`: Homebrew rust 1.100 shadows the pinned 1.94.1 and breaks clippy in the gate.
 - A subagent cannot `gh pr merge` (the publish-without-skill hook), so the driver merges.
 - Another session's unqueued test loop pushed the host to load 370; ask that session to queue it.
