@@ -8,6 +8,15 @@ missing here.
 
 ## Unreleased
 
+`greengate slot run` no longer ends a wait on a stalled line (ADR-0022,
+amended 2026-11-28; programme host-slot-admission t21). It waits in line to
+`--max-wait` and exits 75 there, so `slot run --max-wait 3000 -- <cmd>` in
+the background keeps its place instead of exiting 75 after 300 s and queueing
+again at the back (37 such stalls in 26 h, 36 retried at once, every one
+behind a holder that held 15 minutes or more). `GREENHARNESS_SLOT_STALL_S` is
+ignored by `slot run`, with no warning; relais still reads it. `--help` says
+exit 75 only when `--max-wait` runs out.
+
 ## v6.0.0
 
 greengate 6.0.0 is a major for `greengate-fleet` alone: its old aval flag and five `--json` keys are gone (#543). It also carries the host-slot changes once meant for 5.6.0, which never shipped (#541, #542, #544), the queued heartbeat's ceiling (#547), python audits of marked hashed pins (#549), and a test fix (#546).

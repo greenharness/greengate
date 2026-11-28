@@ -7,8 +7,8 @@
 //! status through and frees the slot when the command exits. The wrapper
 //! alone holds the slot: its descriptors are close-on-exec, so a daemon the
 //! command leaves behind never keeps it. A wait ends, with exit 75 and nothing
-//! run, when the line makes no progress for 300 s or `--max-wait` runs out
-//! (default 90 s, under Claude Code's 120 s Bash timeout) (ADR-0022). `--now`
+//! run, when `--max-wait` runs out (default 90 s, under Claude Code's 120 s
+//! Bash timeout); a wait has no stall window (ADR-0022). `--now`
 //! skips the queue up front: the command runs at once, unqueued, journalled
 //! `now`.
 
@@ -428,12 +428,6 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
     if let Some(line) = crate::host_slots::marker_refused_note(&settings) {
         eprintln!("{line}");
     }
-    // Read at the binary's edge: the crate reads no environment for it.
-    let setting = std::env::var(greenharness_slots::STALL_ENV).ok();
-    let (window, warning) = greenharness_slots::Stall::window_from(setting.as_deref());
-    if let Some(warning) = warning {
-        eprintln!("{BIN}: warning: {warning}");
-    }
     let started = Instant::now();
     let waiter = match greenharness_slots::Waiter::new_in_on(
         &dir,
@@ -448,10 +442,10 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
             return spawn(program, rest, Launch::Unqueued, Some(jobs));
         }
     };
-    // The caller's deadline is hard (the Bash tool's 120 s); the crate does
-    // not apply a stall window as long as it.
+    // `--max-wait` is the only bound (ADR-0022, amended 2026-11-28): a long
+    // wait in a full line keeps its place instead of ending on a stall.
     let bounds = greenharness_slots::WaitBounds {
-        window: Some(window),
+        window: None,
         ceiling: max_wait,
     };
     let mut last_said: Option<Instant> = None;
@@ -481,6 +475,7 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
                     eprintln!("  `{label}` did not run (exit {QUEUE_FAILED_EXIT})");
                     QUEUE_FAILED_EXIT
                 }
+                // `Stalled` cannot happen with no window; it still exits 75.
                 greenharness_slots::LineEnd::Stalled { .. }
                 | greenharness_slots::LineEnd::Ceiling { .. } => {
                     eprintln!("  `{label}` did not run (exit {BUSY_EXIT}); retry later, or pass --now to skip the queue");
@@ -498,6 +493,7 @@ fn run(own: &[OsString], cmd: &[OsString]) -> i32 {
 /// Why a `slot run` wait ended, in one line under 80 columns.
 fn end_message(end: &greenharness_slots::LineEnd, max_wait: Duration) -> String {
     match end {
+        // Cannot happen with no window (ADR-0022); kept so the match stays exhaustive.
         greenharness_slots::LineEnd::Stalled { window, .. } => {
             format!(
                 "no progress in the host slot line for {}s",

@@ -182,12 +182,13 @@ fn a_timed_out_wait_exits_75_without_running_anything() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
 
-/// A line with no progress for the stall window exits 75 before
-/// `--max-wait`, says so, and journals `"end":"stalled"` (ADR-0022).
+/// A full line does not end a wait early (ADR-0022, amended 2026-11-28): with
+/// the stall seam set to 2 s the waiter still waits for its `--max-wait`,
+/// exits 75 there, says so, and journals `"end":"ceiling"`.
 #[test]
-fn a_stalled_line_exits_75_before_the_max_wait() {
-    let slots = slot_dir("stall");
-    let mut holder = spawn(&slots, &["slot", "run", "--", "sleep", "8"]);
+fn a_full_line_ends_a_wait_at_the_max_wait_never_on_a_stall() {
+    let slots = slot_dir("ceiling");
+    let mut holder = spawn(&slots, &["slot", "run", "--", "sleep", "20"]);
     until_held(&slots);
     let marker = slots.join("ran");
     let started = Instant::now();
@@ -197,7 +198,7 @@ fn a_stalled_line_exits_75_before_the_max_wait() {
             "slot",
             "run",
             "--max-wait",
-            "30",
+            "5",
             "--",
             "touch",
             marker.to_str().unwrap(),
@@ -205,59 +206,29 @@ fn a_stalled_line_exits_75_before_the_max_wait() {
     )
     .env("GREENHARNESS_SLOT_STALL_S", "2")
     .output()
-    .expect("stalled");
+    .expect("waited");
     assert_eq!(out.status.code(), Some(75), "{}", text(&out));
     assert!(
-        started.elapsed() < Duration::from_secs(7),
-        "it waited for the holder"
+        started.elapsed() >= Duration::from_secs(5),
+        "it gave up before its --max-wait: {:?}",
+        started.elapsed()
     );
-    assert!(!marker.exists(), "nothing may run on a stall");
+    assert!(!marker.exists(), "nothing may run when a wait ends");
     assert!(
-        text(&out).contains("no progress in the host slot line for 2s"),
+        text(&out).contains("no host slot within --max-wait 5s"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        !text(&out).contains("no progress in the host slot line"),
         "{}",
         text(&out)
     );
     let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
-    assert!(waits.contains("\"end\":\"stalled\""), "{waits}");
+    assert!(waits.contains("\"end\":\"ceiling\""), "{waits}");
+    assert!(!waits.contains("\"end\":\"stalled\""), "{waits}");
     let _ = holder.kill(); // best-effort: the holder is not under test
     let _ = holder.wait(); // best-effort: reap the killed holder
-    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
-}
-
-/// A line that moves never stalls: with three short holders ahead, each
-/// admission comes sooner than the stall window, so the last waiter is
-/// admitted though its whole wait is longer than the window.
-#[test]
-fn a_moving_line_outlasts_the_stall_window() {
-    let slots = slot_dir("moving");
-    let mut ahead = vec![spawn(&slots, &["slot", "run", "--", "sleep", "2"])];
-    until_held(&slots);
-    for _ in 0..2 {
-        let mut cmd = amont(
-            &slots,
-            &["slot", "run", "--max-wait", "60", "--", "sleep", "2"],
-        );
-        cmd.env("GREENHARNESS_SLOT_STALL_S", "4")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        ahead.push(cmd.spawn().expect("a waiter ahead"));
-        // Ticket order: the next waiter joins only once this one is queued.
-        until_waiting(&slots, ahead.len() - 1);
-    }
-    let started = Instant::now();
-    let out = amont(&slots, &["slot", "run", "--max-wait", "60", "--", "true"])
-        .env("GREENHARNESS_SLOT_STALL_S", "4")
-        .output()
-        .expect("the last waiter");
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    assert!(
-        started.elapsed() > Duration::from_secs(4),
-        "the wait did not outlast the window, so it proves nothing: {:?}",
-        started.elapsed()
-    );
-    for child in ahead {
-        let _ = child.wait_with_output(); // best-effort: reap
-    }
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
 
