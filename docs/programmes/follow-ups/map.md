@@ -35,6 +35,8 @@ Work noticed while doing something else in greengate is a ticket here, and each 
 
 2026-11-26: filed f13 (a land refuses `evidence-missing` right after its own pre-stage stamped the tree; seen twice on 5.2.0) and f14 (`cluster_gates::concurrent_gates_each_get_their_own_job` flaked on release PR #534), from decisions topo-spotter-rename t21. Next, in order: f02 (due 2026-12-05), f13, f07, then f09, f08, f10, f14.
 
+2026-11-28: filed f15 (`slot_run::a_session_moves_its_own_waiting_job_to_the_head` failed once on macOS CI on host-slot-admission t15's phase-1 PR #536, then passed on rerun), from host-slot-admission t15. Also from t15: f16 (`rehearsal::stop_cancels_the_worker_and_removes_its_snapshot` failed once in the phase-2 commit gate's suite at load, a 2 s worker likely finished before `--stop`), and f14 seen again on #542. Next, in order: f02 (due 2026-12-05), f13, f07, then f09, f08, f10, f14, f15, f16.
+
 ## Not yet specified
 
 ## Out of scope

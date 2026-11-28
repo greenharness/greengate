@@ -19,6 +19,9 @@ should the slot name carry the run's id?
 ## Look at
 
 - Run 45901494242, job 140188252433 (2026-11-26).
+- Seen again on host-slot-admission t15's phase-2 PR #542: run 46108402881,
+  attempt 1, job 140866369532 (`hooks (ubuntu-latest)`, 2026-11-28), the
+  same assertion at `cluster_gates.rs:790`; the rerun passed.
 - The fake kubectl in the test and how it names `greengate-gate-slot-<n>`.
 
 ## Answer looks like
