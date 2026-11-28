@@ -25,9 +25,9 @@ extern "C" {
     #[link_name = "pipe"]
     fn libc_pipe_raw(fds: *mut i32) -> i32;
     #[link_name = "read"]
-    fn libc_read_raw(fd: i32, buf: *mut u8, count: usize) -> isize;
+    fn libc_read_raw(fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize;
     #[link_name = "write"]
-    fn libc_write_raw(fd: i32, buf: *const u8, count: usize) -> isize;
+    fn libc_write_raw(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
 }
 
 /// `signal(2)`: `handler` is [`SIG_DFL`] or an `extern "C" fn(i32)` cast to
@@ -49,9 +49,9 @@ pub(crate) unsafe fn libc_pipe(fds: *mut i32) -> i32 {
 }
 
 pub(crate) unsafe fn libc_read(fd: i32, buf: *mut u8, count: usize) -> isize {
-    unsafe { libc_read_raw(fd, buf, count) }
+    unsafe { libc_read_raw(fd, buf.cast(), count) }
 }
 
 pub(crate) unsafe fn libc_write(fd: i32, buf: *const u8, count: usize) -> isize {
-    unsafe { libc_write_raw(fd, buf, count) }
+    unsafe { libc_write_raw(fd, buf.cast(), count) }
 }

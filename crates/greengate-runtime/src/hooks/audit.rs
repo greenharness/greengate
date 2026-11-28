@@ -676,6 +676,8 @@ struct Merged {
     /// bare report when the only directory is the root).
     full: String,
     waivable: bool,
+    /// Every directory answered in full.
+    complete: bool,
 }
 
 /// Run one audit in every directory holding `lockfile` and merge the
@@ -697,12 +699,66 @@ fn audit_each_dir(
     lockfile: &str,
     argv_in: impl Fn(&std::path::Path) -> Option<Vec<String>>,
     read: fn(bool, &str) -> Report,
+    refine: impl FnMut(&std::path::Path, Report, &str) -> Report,
+) -> Merged {
+    let answer_in = |path: &std::path::Path| match argv_in(path) {
+        None => DirAnswer::Nothing,
+        Some(argv) => answer_of(settings, &argv, path, read),
+    };
+    audit_each_dir_answered(tool, lockfile, answer_in, refine)
+}
+
+/// One tool run in `dir`, read by `read`.
+fn answer_of(
+    settings: &crate::config::Settings,
+    argv: &[String],
+    dir: &std::path::Path,
+    read: fn(bool, &str) -> Report,
+) -> DirAnswer {
+    match audited_in(settings, argv, dir) {
+        None => DirAnswer::TimedOut,
+        Some((exit_ok, out)) => DirAnswer::Read {
+            report: read(exit_ok, &out),
+            full: out.clone(),
+            out,
+            gap: None,
+        },
+    }
+}
+
+/// What one directory's audit answered.
+enum DirAnswer {
+    /// Nothing to audit there.
+    Nothing,
+    /// The tool ran out of time, said by `audited_in`: not an answer, and
+    /// the directory is named NOT checked.
+    TimedOut,
+    /// The tool's report. `out` is everything the tool printed, which
+    /// `refine` reads; `full` is the part kept as the report when it has
+    /// findings. `gap` names what went unchecked when only part of the
+    /// directory was audited: its findings still count, and the merged
+    /// result is then never clean nor waivable.
+    Read {
+        report: Report,
+        out: String,
+        full: String,
+        gap: Option<String>,
+    },
+}
+
+/// [`audit_each_dir`] with each directory's answer given by `answer_in`,
+/// for an audit that takes more than one tool run in a directory.
+fn audit_each_dir_answered(
+    tool: &str,
+    lockfile: &str,
+    mut answer_in: impl FnMut(&std::path::Path) -> DirAnswer,
     mut refine: impl FnMut(&std::path::Path, Report, &str) -> Report,
-) -> Option<Merged> {
+) -> Merged {
     let root = std::path::PathBuf::from(common::repo_root());
     let dirs = lockfile_dirs(lockfile);
     let only_root = dirs.len() == 1 && dirs[0].is_empty();
     let (mut vulns, mut advisories, mut unchecked) = (Vec::new(), Vec::new(), Vec::new());
+    let mut partial = Vec::new();
     let mut full = String::new();
     for dir in &dirs {
         let path = root.join(dir);
@@ -714,23 +770,39 @@ fn audit_each_dir(
                 ids.into_iter().map(|id| format!("{dir}: {id}")).collect()
             }
         };
-        let Some(argv) = argv_in(&path) else {
-            unchecked.push(format!("{label} (nothing to audit there)"));
-            continue;
+        let (report, out, dir_full, gap) = match answer_in(&path) {
+            DirAnswer::Nothing => {
+                unchecked.push(format!("{label} (nothing to audit there)"));
+                continue;
+            }
+            // A timeout is said by `audited_in` itself. The other
+            // directories still answer: their findings must not be lost.
+            DirAnswer::TimedOut => {
+                unchecked.push(format!("{label} (timed out)"));
+                continue;
+            }
+            DirAnswer::Read {
+                report,
+                out,
+                full,
+                gap,
+            } => (report, out, full, gap),
         };
-        // A timeout is said by `audited_in` itself; it is not an answer.
-        let (exit_ok, out) = audited_in(settings, &argv, &path)?;
-        match refine(&path, read(exit_ok, &out), &out) {
+        let report = refine(&path, report, &out);
+        if gap.is_some() && !matches!(report, Report::CouldNotCheck) {
+            partial.push(label.to_string());
+        }
+        match report {
             Report::Vulnerabilities(ids) => {
                 vulns.extend(label_ids(ids));
                 if only_root {
-                    full.push_str(&out);
+                    full.push_str(&dir_full);
                 } else {
-                    full.push_str(&format!("── {tool} in {label}\n{out}\n"));
+                    full.push_str(&format!("── {tool} in {label}\n{dir_full}\n"));
                 }
             }
             Report::Advisories(ids) => advisories.extend(label_ids(ids)),
-            Report::CouldNotCheck => unchecked.push(match failure_line(&out) {
+            Report::CouldNotCheck => unchecked.push(match gap.or_else(|| failure_line(&out)) {
                 Some(why) => format!("{label} ({why})"),
                 None => label.to_string(),
             }),
@@ -743,20 +815,28 @@ fn audit_each_dir(
             unchecked.join(", ")
         ));
     }
+    // Its own lines said why; this one says the directory is not clean.
+    if !partial.is_empty() {
+        common::warn(&format!(
+            "{tool}: NOT fully checked in {} (part of the audit did not answer)",
+            partial.join(", ")
+        ));
+    }
     let report = if !vulns.is_empty() {
         Report::Vulnerabilities(vulns)
-    } else if !unchecked.is_empty() {
+    } else if !unchecked.is_empty() || !partial.is_empty() {
         Report::CouldNotCheck
     } else if !advisories.is_empty() {
         Report::Advisories(advisories)
     } else {
         Report::Clean
     };
-    Some(Merged {
+    Merged {
         report,
         full,
-        waivable: unchecked.is_empty(),
-    })
+        waivable: unchecked.is_empty() && partial.is_empty(),
+        complete: unchecked.is_empty() && partial.is_empty(),
+    }
 }
 
 fn rust_run(ctx: &crate::registry::Ctx) -> Ran {
@@ -778,7 +858,7 @@ fn rust_run(ctx: &crate::registry::Ctx) -> Ran {
         "never".into(),
     ];
     let release = releasing(refs);
-    let Some(merged) = audit_each_dir(
+    let merged = audit_each_dir(
         settings,
         "audit-rust",
         "Cargo.lock",
@@ -802,14 +882,13 @@ fn rust_run(ctx: &crate::registry::Ctx) -> Ran {
                 cargo_tree_inverse(settings, dir, krate)
             })
         },
-    ) else {
-        return Ran::Unavailable;
-    };
+    );
     Ran::Concluded(Concluded {
         tool: "audit-rust".to_string(),
         report: merged.report,
         full: merged.full,
         waivable: merged.waivable,
+        complete: merged.complete,
     })
 }
 
@@ -1166,6 +1245,7 @@ fn js_run(ctx: &crate::registry::Ctx) -> Ran {
         report,
         full,
         waivable,
+        complete: true,
     })
 }
 
@@ -1185,21 +1265,20 @@ fn go_run(ctx: &crate::registry::Ctx) -> Ran {
         return Ran::Unavailable;
     }
     let argv = vec![common::program("govulncheck"), "./...".into()];
-    let Some(merged) = audit_each_dir(
+    let merged = audit_each_dir(
         settings,
         "audit-go",
         "go.sum",
         |_| Some(argv.clone()),
         read_govulncheck,
         |_, report, _| report,
-    ) else {
-        return Ran::Unavailable;
-    };
+    );
     Ran::Concluded(Concluded {
         tool: "audit-go".to_string(),
         report: merged.report,
         full: merged.full,
         waivable: merged.waivable,
+        complete: merged.complete,
     })
 }
 
@@ -1220,52 +1299,74 @@ fn python_run(ctx: &crate::registry::Ctx) -> Ran {
     // its own directory — wherever the repository keeps one (amont#305).
     if !lockfile_dirs("requirements.txt").is_empty() {
         let root_path = std::path::PathBuf::from(&root);
-        let Some(merged) = audit_each_dir(
-            settings,
+        let rel_of = |dir: &std::path::Path| {
+            dir.strip_prefix(&root_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let answer_in = |dir: &std::path::Path| {
+            let pins = hashed_pins(dir);
+            let names = pins.as_ref().map(HashedPins::names);
+            let answer = match pins {
+                Some(pins) if pins.marked => audit_marked_pins(settings, dir, &rel_of(dir), pins),
+                hashed => {
+                    let mut argv = vec![
+                        common::program("pip-audit"),
+                        "-r".into(),
+                        "requirements.txt".into(),
+                    ];
+                    // A fully hashed file is a closed set: nothing to resolve,
+                    // and resolving it on this host can fail on a pin with no
+                    // wheel here (torch 2.14.0+cpu on Intel macOS, decisions f108).
+                    if hashed.is_some() {
+                        argv.extend(["--no-deps".into(), "--disable-pip".into()]);
+                    }
+                    answer_of(settings, &argv, dir, read_pip_audit)
+                }
+            };
+            let DirAnswer::Read {
+                report,
+                out,
+                full,
+                gap,
+            } = answer
+            else {
+                return answer;
+            };
+            let skipped = pip_skipped_names(&out);
+            if skipped.is_empty() {
+                return DirAnswer::Read {
+                    report,
+                    out,
+                    full,
+                    gap,
+                };
+            }
+            let skipped_names: Vec<&str> = skipped.iter().map(String::as_str).collect();
+            common::warn(&skipped_line(
+                &requirements_prefix(&rel_of(dir)),
+                &skipped_names,
+            ));
+            // Every pin skipped: nothing was audited, which is not clean.
+            let all_skipped = names.is_some_and(|n| skipped.len() >= n);
+            let report = if all_skipped && !matches!(report, Report::Vulnerabilities(_)) {
+                Report::CouldNotCheck
+            } else {
+                report
+            };
+            DirAnswer::Read {
+                report,
+                out,
+                full,
+                gap,
+            }
+        };
+        let merged = audit_each_dir_answered(
             "audit-python",
             "requirements.txt",
-            |dir| {
-                let mut argv = vec![
-                    common::program("pip-audit"),
-                    "-r".into(),
-                    "requirements.txt".into(),
-                ];
-                // A fully hashed file is a closed set: nothing to resolve,
-                // and resolving it on this host can fail on a pin with no
-                // wheel here (torch 2.14.0+cpu on Intel macOS, decisions f108).
-                if hashed_pin_count(dir).is_some() {
-                    argv.extend(["--no-deps".into(), "--disable-pip".into()]);
-                }
-                Some(argv)
-            },
-            read_pip_audit,
-            |dir, report, out| {
-                let skipped = pip_skipped_names(out);
-                if skipped.is_empty() {
-                    return report;
-                }
-                let rel = dir
-                    .strip_prefix(&root_path)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let prefix = if rel.is_empty() {
-                    String::new()
-                } else {
-                    format!("{rel}/requirements.txt: ")
-                };
-                let names: Vec<&str> = skipped.iter().map(String::as_str).collect();
-                common::warn(&skipped_line(&prefix, &names));
-                // Every pin skipped: nothing was audited, which is not clean.
-                let all_skipped = hashed_pin_count(dir).is_some_and(|n| skipped.len() >= n);
-                if all_skipped && !matches!(report, Report::Vulnerabilities(_)) {
-                    Report::CouldNotCheck
-                } else {
-                    report
-                }
-            },
-        ) else {
-            return Ran::Unavailable;
-        };
+            answer_in,
+            |_, report, _| report,
+        );
         // A row whose advisory id is not one a waiver can name makes the
         // whole report unwaivable.
         let waivable = merged.waivable && pip_rows_all_named(&merged.full);
@@ -1274,6 +1375,7 @@ fn python_run(ctx: &crate::registry::Ctx) -> Ran {
             report: merged.report,
             full: merged.full,
             waivable,
+            complete: merged.complete,
         });
     }
     let argv = if let Some(site_packages) = venv_site_packages(&root, ctx.source_worktree) {
@@ -1322,6 +1424,7 @@ fn python_run(ctx: &crate::registry::Ctx) -> Ran {
         report,
         full: out,
         waivable,
+        complete: true,
     })
 }
 
@@ -1490,8 +1593,8 @@ impl Drop for PrivateDir {
     }
 }
 
-/// One time budget for the whole lock route, however many directories and
-/// batches it audits.
+/// One time budget for a run of several pip-audit calls: the whole lock
+/// route, or one marked requirements file's batches.
 struct Budget {
     started: std::time::Instant,
     /// None: `greengate.timeout 0` disables the ceiling.
@@ -1641,36 +1744,210 @@ fn filter_export(raw: &str, pypi: &std::collections::BTreeSet<String>) -> Export
         }
     }
     pins.versions = pairs.len();
-    for (name, version) in pairs {
-        let slot = pins
-            .batches
-            .iter()
-            .position(|batch| !batch.contains_key(&name));
-        if let Some(index) = slot {
-            pins.batches[index].insert(name, version);
-        } else {
-            pins.batches
-                .push(std::collections::BTreeMap::from([(name, version)]));
-        }
-    }
+    pins.batches = batches_of(pairs);
     pins
 }
 
-/// The number of requirements in `dir/requirements.txt` when every one is an
-/// exact `name==version` pin carrying a `--hash`, else None.
+/// `(name, version)` pairs split into pip-audit inputs, one version of a
+/// name in each: pip-audit refuses two pins of one name in one run, even
+/// across several `-r` files ("package jinja2 has duplicate requirements").
+fn batches_of(
+    pairs: std::collections::BTreeSet<(String, String)>,
+) -> Vec<std::collections::BTreeMap<String, String>> {
+    let mut batches: Vec<std::collections::BTreeMap<String, String>> = Vec::new();
+    for (name, version) in pairs {
+        match batches.iter().position(|batch| !batch.contains_key(&name)) {
+            Some(index) => {
+                batches[index].insert(name, version);
+            }
+            None => batches.push(std::collections::BTreeMap::from([(name, version)])),
+        }
+    }
+    batches
+}
+
+/// `requirements.txt` in the repository-relative directory `rel`.
+fn requirements_path(rel: &str) -> String {
+    if rel.is_empty() {
+        "requirements.txt".to_string()
+    } else {
+        format!("{rel}/requirements.txt")
+    }
+}
+
+/// What a warning about `rel`'s requirements.txt starts with: nothing at
+/// the root, so a root file reads as it always has.
+fn requirements_prefix(rel: &str) -> String {
+    if rel.is_empty() {
+        String::new()
+    } else {
+        format!("{}: ", requirements_path(rel))
+    }
+}
+
+/// A hashed requirements.txt whose pins carry environment markers, audited
+/// from its pins with the markers stripped, so every platform's pin is
+/// audited whatever the host (decisions f118). pip-audit evaluates a marker
+/// against the host and drops a pin it does not match without a word:
+/// `jinja2==2.10 ; sys_platform == 'linux'` read clean on a Mac.
+///
+/// Each batch is a separate run (pip-audit refuses two pins of one name in
+/// one run) and is read on its own: a clean batch's sentence would hide the
+/// next one's finding. A gap keeps what the earlier batches found.
+fn audit_marked_pins(
+    settings: &crate::config::Settings,
+    dir: &std::path::Path,
+    rel: &str,
+    pins: HashedPins,
+) -> DirAnswer {
+    let prefix = requirements_prefix(rel);
+    let say = |message: &str| common::warn(&format!("audit-python: {prefix}{message}"));
+    let unchecked = |why: &str| DirAnswer::Read {
+        report: Report::CouldNotCheck,
+        out: String::new(),
+        full: String::new(),
+        gap: Some(why.to_string()),
+    };
+    let budget = Budget::new(settings);
+    let private = match PrivateDir::create() {
+        Ok(private) => private,
+        Err(why) => {
+            say(&format!(
+                "no private directory ({}) — did NOT run\n  {TMPDIR_NEXT}",
+                why.kind()
+            ));
+            return unchecked("no private directory");
+        }
+    };
+    // Whatever pip-audit prints, the temp path stays out of it.
+    let canonical = std::fs::canonicalize(private.path()).ok();
+    let scrub = |text: &str| scrub_private(text, private.path(), canonical.as_deref());
+    let (mut vulnerabilities, mut out, mut full) = (Vec::new(), String::new(), String::new());
+    let mut gap: Option<String> = None;
+    let mut answered: Vec<&str> = Vec::new();
+    let batches = batches_of(pins.pairs);
+    for (index, batch) in batches.iter().enumerate() {
+        if budget.spent() {
+            say(&format!(
+                "out of time; unaudited versions remain — NOT fully checked\n  {TIMEOUT_NEXT}"
+            ));
+            gap.get_or_insert_with(|| "out of time".to_string());
+            break;
+        }
+        let file = private.path().join(format!("batch-{index}.txt"));
+        let body: String = batch.iter().map(|(n, v)| format!("{n}=={v}\n")).collect();
+        if let Err(why) = std::fs::write(&file, body) {
+            say(&format!(
+                "could not write a batch file ({}); unaudited versions remain — NOT fully checked\n  {TMPDIR_NEXT}",
+                why.kind()
+            ));
+            gap.get_or_insert_with(|| "could not write a batch file".to_string());
+            break;
+        }
+        let argv = vec![
+            common::program("pip-audit"),
+            "-r".into(),
+            file.to_string_lossy().into_owned(),
+            "--no-deps".into(),
+            "--disable-pip".into(),
+        ];
+        // A timeout is said by `audited_in` itself.
+        let Some((exit_ok, batch_out)) = audited_in(settings, &argv, dir) else {
+            if answered.is_empty() && gap.is_none() {
+                return DirAnswer::TimedOut;
+            }
+            // `audited_in` named the knob: the run's own or its silence budget.
+            say("timed out; unaudited versions remain — NOT fully checked");
+            gap.get_or_insert_with(|| "timed out".to_string());
+            break;
+        };
+        let batch_out = scrub(&batch_out);
+        match read_pip_audit(exit_ok, &batch_out) {
+            Report::Vulnerabilities(found) => {
+                vulnerabilities.extend(found);
+                full.push_str(&batch_out);
+                answered.extend(batch.keys().map(String::as_str));
+            }
+            // pip-audit has no advisory class: read_pip_audit never says it.
+            Report::Clean | Report::Advisories(_) => {
+                answered.extend(batch.keys().map(String::as_str));
+            }
+            Report::CouldNotCheck => {
+                let why = failure_line(&batch_out).unwrap_or_else(|| "(no output)".to_string());
+                say(&format!(
+                    "pip-audit could not answer — NOT fully checked\n  {}\n  {}",
+                    clip(&why, WARNING_COLUMNS - 2),
+                    pip_audit_next(&why)
+                ));
+                gap.get_or_insert_with(|| "pip-audit could not answer".to_string());
+            }
+        }
+        out.push_str(&batch_out);
+    }
+    let skipped = pip_skipped_names(&out);
+    let audited = answered
+        .iter()
+        .filter(|name| !skipped.iter().any(|s| s == *name))
+        .count();
+    if audited > 0 {
+        common::ok(
+            settings,
+            &format!(
+                "audit-python: audited {} ({}, {} skipped)",
+                requirements_path(rel),
+                plural(audited, "package version"),
+                answered.len() - audited
+            ),
+        );
+    }
+    let report = if !vulnerabilities.is_empty() {
+        Report::Vulnerabilities(vulnerabilities)
+    } else if gap.is_some() {
+        Report::CouldNotCheck
+    } else {
+        Report::Clean
+    };
+    DirAnswer::Read {
+        report,
+        out,
+        full,
+        gap,
+    }
+}
+
+/// The pins of a fully hashed requirements.txt.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HashedPins {
+    /// Distinct `(name, version)` pairs, markers and extras stripped.
+    pairs: std::collections::BTreeSet<(String, String)>,
+    /// Some pin carries an environment marker.
+    marked: bool,
+}
+
+impl HashedPins {
+    /// How many distinct names the pins carry.
+    fn names(&self) -> usize {
+        let names: std::collections::BTreeSet<&str> =
+            self.pairs.iter().map(|(name, _)| name.as_str()).collect();
+        names.len()
+    }
+}
+
+/// The pins of `dir/requirements.txt` when every requirement is an exact
+/// `name==version` pin carrying a `--hash`, else None.
 ///
 /// Hashes are pip-compile's signal (and pip's `--require-hashes` mode): every
 /// dependency is listed, so there is nothing to resolve. A file of `==` pins
 /// without hashes lists its top-level packages only (homelab's rag-api,
 /// websearch) and must still resolve; so must any option line (`-r`, `-c`,
-/// `-e`, an index URL), a URL or path requirement, a pin with an environment
-/// marker, and an empty file.
-fn hashed_pin_count(dir: &std::path::Path) -> Option<usize> {
+/// `-e`, an index URL), a URL or path requirement, and an empty file. A pin
+/// may carry an environment marker (a universal compile writes them).
+fn hashed_pins(dir: &std::path::Path) -> Option<HashedPins> {
     let text = std::fs::read_to_string(dir.join("requirements.txt")).ok()?;
     hashed_pins_in(&text)
 }
 
-fn hashed_pins_in(text: &str) -> Option<usize> {
+fn hashed_pins_in(text: &str) -> Option<HashedPins> {
     let mut logical = Vec::new();
     let mut current = String::new();
     for line in text.lines() {
@@ -1686,7 +1963,7 @@ fn hashed_pins_in(text: &str) -> Option<usize> {
         }
     }
     logical.push(current);
-    let mut count = 0;
+    let mut pins = HashedPins::default();
     for line in &logical {
         // pip reads `#` as a comment only at the start or after whitespace.
         let line = match line.find(" #") {
@@ -1704,15 +1981,13 @@ fn hashed_pins_in(text: &str) -> Option<usize> {
         let hashed = options
             .split_whitespace()
             .any(|option| option.starts_with("--hash"));
-        // pip-audit evaluates a marker against this host and drops a pin it
-        // does not match, silently: `jinja2==2.10 ; sys_platform == 'linux'`
-        // vanished from a Mac's report. A file with markers resolves.
-        if !hashed || spec.contains(';') || exact_pin(spec).is_none() {
+        if !hashed {
             return None;
         }
-        count += 1;
+        pins.pairs.insert(exact_pin(spec)?);
+        pins.marked |= spec.contains(';');
     }
-    (count > 0).then_some(count)
+    (!pins.pairs.is_empty()).then_some(pins)
 }
 
 /// The names in pip-audit's `Name  Skip Reason` table: packages it could not
@@ -2074,6 +2349,7 @@ fn python_lock_run(ctx: &crate::registry::Ctx) -> Ran {
         report,
         full,
         waivable: waivable && complete,
+        complete,
     })
 }
 
@@ -2244,6 +2520,10 @@ struct Concluded {
     report: Report,
     full: String,
     waivable: bool,
+    /// False when part of the audit did not answer (a timeout, a batch that
+    /// never ran): such a result is never recorded, so the next push audits
+    /// again instead of replaying a gap for a day.
+    complete: bool,
 }
 
 /// How one ecosystem's audit ended: with a report to judge, or before it had
@@ -2439,6 +2719,7 @@ fn parse(body: &str) -> Option<(i64, Option<String>, Concluded)> {
             report,
             full,
             waivable,
+            complete: true,
         },
     ))
 }
@@ -2573,10 +2854,15 @@ fn recorded(
                 report: Report::CouldNotCheck,
                 full: String::new(),
                 waivable: false,
+                complete: true,
             }),
         ),
         Ran::Inert => (Outcome::Inert, None),
     };
+    // A result with a gap is not recorded; an unchecked one is, for an hour.
+    let concluded = concluded.filter(|concluded| {
+        concluded.complete || matches!(concluded.report, Report::CouldNotCheck)
+    });
     if let (Some(concluded), true) = (concluded, crate::gate_stamp::push_stamps_enabled(settings)) {
         let body = render(&concluded, now_secs());
         let records: Vec<Pending> = ctx
@@ -3163,7 +3449,8 @@ torch==2.14.0+cpu \\
 
     #[test]
     fn only_a_fully_hashed_file_skips_the_resolve() {
-        assert_eq!(hashed_pins_in(HASHED), Some(3));
+        let pins = hashed_pins_in(HASHED).expect("hashed");
+        assert_eq!((pins.pairs.len(), pins.names(), pins.marked), (3, 3, false));
         // Top-level `==` pins without hashes: their dependencies are unlisted.
         assert_eq!(hashed_pins_in("requests==2.0.0\nidna==3.7\n"), None);
         let one_unhashed = format!("{HASHED}idna==3.7\n");
@@ -3174,12 +3461,35 @@ torch==2.14.0+cpu \\
         assert_eq!(hashed_pins_in(&included), None);
         let indexed = format!("--extra-index-url https://example.com\n{HASHED}");
         assert_eq!(hashed_pins_in(&indexed), None);
-        // A marker pin off this host would be dropped without a word.
+        // A marked pin is still a closed set: it takes the batch route.
         let marked =
             format!("{HASHED}pywin32==306 ; sys_platform == 'win32' \\\n    --hash=sha256:dddd\n");
-        assert_eq!(hashed_pins_in(&marked), None);
+        assert!(hashed_pins_in(&marked).is_some_and(|pins| pins.marked));
+        assert_eq!(
+            hashed_pins_in("idna==3.7 ; sys_platform == 'linux'\n"),
+            None
+        );
         assert_eq!(hashed_pins_in("# fixture\n"), None);
         assert_eq!(hashed_pins_in(""), None);
+    }
+
+    #[test]
+    fn marked_pins_are_stripped_and_their_versions_batched_apart() {
+        let text = "\
+six==1.16.0 \\
+    --hash=sha256:aaaa
+numpy==1.26.4 ; python_version == '3.9' \\
+    --hash=sha256:bbbb
+numpy==2.1.0 ; python_version == '3.12' \\
+    --hash=sha256:cccc
+";
+        let pins = hashed_pins_in(text).expect("hashed");
+        assert_eq!((pins.pairs.len(), pins.names(), pins.marked), (3, 2, true));
+        let batches = batches_of(pins.pairs);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].get("numpy").map(String::as_str), Some("1.26.4"));
+        assert_eq!(batches[1].get("numpy").map(String::as_str), Some("2.1.0"));
+        assert_eq!(batches[0].get("six").map(String::as_str), Some("1.16.0"));
     }
 
     /// pip-audit 2.10.1's output on laya-decisions with `--no-deps

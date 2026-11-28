@@ -908,6 +908,54 @@ fn an_unchecked_record_from_an_older_greengate_is_not_replayed() {
     }
 }
 
+/// A result that answered only in part (one directory found something,
+/// another timed out) is not recorded: the next push audits again instead
+/// of replaying the gap for a day (decisions f118).
+#[test]
+fn a_partly_answered_audit_is_not_recorded() {
+    let (fx, bin, log) = audit_fixture();
+    fx.r.git(&["config", "greengate.pushGates", "inline"]);
+    fx.r.git(&["config", "greengate.timeout", "2"]);
+    let tool = bin.join("govulncheck");
+    let slow = fx.r.path(".git/SLOW");
+    let body = std::fs::read_to_string(&tool).expect("read").replacen(
+        "#!/bin/sh\n",
+        &format!(
+            "#!/bin/sh\nif [ -e {slow:?} ] && [ \"${{PWD##*/}}\" = sub ]; then sleep 4; fi\n",
+            slow = slow.to_str().expect("utf8")
+        ),
+        1,
+    );
+    std::fs::write(&tool, &body).expect("write tool");
+    common::fixture_exec(&tool, &body);
+    fx.r.stage("sub/go.sum", "example.com/m v1.0.0 h1:abc=\n");
+    fx.r.stage("sub/go.mod", "module example.com/sub\n");
+    fx.r.commit("chore: a second go module");
+    std::fs::write(fx.r.path(".git/VULN"), "").expect("mark");
+    std::fs::write(&slow, "").expect("mark");
+    let tip = crate::land::head(&fx);
+    let first = runs(&log);
+    let (code, out, err) = hook_in(&fx.r, &push_line(&tip, &tip), &bin, &[]);
+    assert_eq!(code, 0, "a branch push only warns: {out}{err}");
+    assert_eq!(
+        runs(&log),
+        first + 1,
+        "the root answered, sub timed out: {err}"
+    );
+    assert!(
+        audit_records(&fx.r).is_empty(),
+        "a gap is not recorded: {err}"
+    );
+
+    // Every directory answers: recorded, as before.
+    std::fs::remove_file(&slow).expect("unmark");
+    let before = runs(&log);
+    let (code, _o, err) = hook_in(&fx.r, &push_line(&tip, &tip), &bin, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(runs(&log), before + 2, "audited again, both modules: {err}");
+    assert!(!audit_records(&fx.r).is_empty(), "{err}");
+}
+
 #[test]
 fn an_unchecked_record_of_this_greengate_is_replayed_within_the_hour() {
     let (code, out, before, after) =

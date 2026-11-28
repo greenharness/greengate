@@ -338,6 +338,193 @@ exit 0"#;
     assert!(out.contains("resolved: -r requirements.txt"), "{out}");
 }
 
+/// A universal compile (`uv pip compile --universal`): hashed, with markers,
+/// and two versions of one name. jinja2 is pinned for Linux only, off this
+/// host on a Mac; numpy's 2.1.0 lands in the second batch.
+const MARKED: &str = "\
+jinja2==2.10 ; sys_platform == 'linux' \\
+    --hash=sha256:aaaa
+numpy==1.26.4 ; python_version == '3.9' \\
+    --hash=sha256:bbbb
+numpy==2.1.0 ; python_version == '3.12' \\
+    --hash=sha256:cccc
+";
+
+/// A fake pip-audit as 2.10.1 behaves: it refuses a resolve and a name pinned
+/// twice, drops every pin of an input holding a marker (as the real one
+/// drops an off-host pin), sleeps on an input holding `sleep_on`, and reports
+/// jinja2 2.10's rows (captured from pip-audit 2.10.1) and any `vulnerable`
+/// pin. Every input it reads goes to `.git/recorded`.
+fn marked_pip_audit(r: &Repo, sleep_on: &str, vulnerable: &str) {
+    let record = r.path(".git/recorded");
+    let _ = std::fs::remove_file(&record); // best effort: no record yet is the usual case
+    shim(
+        r,
+        "pip-audit",
+        &format!(
+            r#"nd=0; di=0; rf=; prev=
+for a in "$@"; do
+  case "$a" in --no-deps) nd=1;; --disable-pip) di=1;; esac
+  [ "$prev" = -r ] && rf=$a
+  prev=$a
+done
+if [ $nd = 1 ] && [ $di = 1 ] && [ -n "$rf" ]; then :; else echo "ERROR: resolved: $*" >&2; [ -n '{sleep_on}' ] && sleep 4; exit 1; fi
+cat "$rf" >> {record}
+dup=$(sed 's/[=;].*//' "$rf" | sort | uniq -d)
+if [ -n "$dup" ]; then echo "ERROR:pip_audit._cli:package $dup has duplicate requirements" >&2; exit 1; fi
+if grep -q ';' "$rf"; then echo 'No known vulnerabilities found'; exit 0; fi
+if [ -n '{sleep_on}' ] && grep -q '^{sleep_on}$' "$rf"; then sleep 4; fi
+found=0
+grep -q '^jinja2==2.10$' "$rf" && found=1
+[ -n '{vulnerable}' ] && grep -q '^{vulnerable}$' "$rf" && found=2
+if [ $found = 0 ]; then echo 'No known vulnerabilities found'; exit 0; fi
+echo 'Found 2 known vulnerabilities in 1 package' >&2
+echo 'Name   Version ID              Fix Versions'
+echo '------ ------- --------------- ------------'
+if [ $found = 1 ]; then
+  echo 'jinja2 2.10    PYSEC-2019-217  2.10.1'
+  echo 'jinja2 2.10    PYSEC-2021-66   2.11.3'
+else
+  echo 'numpy  2.1.0   PYSEC-2099-1    2.1.1'
+  echo 'numpy  2.1.0   PYSEC-2099-2    2.1.2'
+fi
+exit 1"#,
+            record = record.display()
+        ),
+    );
+}
+
+/// A hashed file with markers is audited without a resolve, every
+/// platform's pin included: under `--no-deps` pip-audit drops a pin whose
+/// marker this host does not match, so `jinja2==2.10 ; sys_platform ==
+/// 'linux'` read clean on a Mac (decisions f118).
+#[test]
+fn a_hashed_file_with_markers_audits_every_platforms_pin() {
+    let r = repo();
+    std::fs::write(r.path("requirements.txt"), MARKED).expect("write");
+    marked_pip_audit(&r, "", "");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(
+        code, 0,
+        "an off-host vulnerable pin must refuse the tag: {out}"
+    );
+    assert!(out.contains("PYSEC-2019-217"), "{out}");
+    assert!(!out.contains("resolved:"), "{out}");
+    assert!(
+        out.contains("audit-python: audited requirements.txt (3 package versions, 0 skipped)"),
+        "{out}"
+    );
+    let sent = recorded(&r);
+    let mut pins: Vec<&str> = sent.lines().collect();
+    pins.sort_unstable();
+    assert_eq!(
+        pins,
+        ["jinja2==2.10", "numpy==1.26.4", "numpy==2.1.0"],
+        "every pin once, markers and hashes stripped: {sent}"
+    );
+
+    // The only finding is in the last batch, after a clean one.
+    std::fs::write(
+        r.path("requirements.txt"),
+        MARKED.replace("jinja2==2.10", "jinja2==3.1.6"),
+    )
+    .expect("write");
+    marked_pip_audit(&r, "", "numpy==2.1.0");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("PYSEC-2099-1"), "{out}");
+}
+
+/// A batch that times out keeps what the earlier batches found: the tag is
+/// still refused, the directory is named NOT fully checked, and no waiver
+/// passes a release whose every pin was not audited.
+#[test]
+fn a_marked_batch_that_times_out_keeps_the_findings_and_is_never_waived() {
+    let r = repo();
+    r.git(&["config", "greengate.timeout", "2"]);
+    std::fs::write(r.path("requirements.txt"), MARKED).expect("write");
+    marked_pip_audit(&r, "numpy==2.1.0", "");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("PYSEC-2019-217"), "{out}");
+    assert!(
+        out.contains("timed out; unaudited versions remain — NOT fully checked"),
+        "{out}"
+    );
+
+    let until = date_in(30);
+    r.write(
+        ".greengate-audit-waivers",
+        &format!(
+            "PYSEC-2019-217 {until} jinja2 linux only\nPYSEC-2021-66 {until} jinja2 linux only\n"
+        ),
+    );
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(code, 0, "a waiver never covers an unaudited batch: {out}");
+
+    // The same waiver passes once every batch answers: the refusal above
+    // is the gap's, not the waiver's.
+    marked_pip_audit(&r, "", "");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "{out}");
+}
+
+/// A directory whose audit times out is named NOT checked, and the
+/// findings of the other directories still refuse the tag.
+#[test]
+fn a_timed_out_directory_does_not_drop_another_directorys_findings() {
+    let r = repo();
+    r.stage("sub/requirements.txt", "six==1.16.0\n");
+    r.commit("chore: a second requirements file");
+    r.git(&["config", "greengate.timeout", "2"]);
+    std::fs::write(r.path("requirements.txt"), MARKED).expect("write");
+    // `sub` resolves, and the shim sleeps on any resolve.
+    marked_pip_audit(&r, "resolve", "");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("PYSEC-2019-217"), "{out}");
+    assert!(out.contains("sub (timed out)"), "{out}");
+    assert!(out.contains("NOT checked there"), "{out}");
+
+    let until = date_in(30);
+    r.write(
+        ".greengate-audit-waivers",
+        &format!("PYSEC-2019-217 {until} linux only\nPYSEC-2021-66 {until} linux only\n"),
+    );
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_ne!(
+        code, 0,
+        "a waiver never covers a directory that timed out: {out}"
+    );
+}
+
+/// A temp directory that cannot be written leaves the marked file
+/// unaudited, and says why and what to do.
+#[test]
+fn a_marked_file_with_no_private_directory_says_why() {
+    let r = repo();
+    std::fs::write(r.path("requirements.txt"), MARKED).expect("write");
+    marked_pip_audit(&r, "", "");
+    let scratch_dir = scratch_tmp(&r);
+    std::fs::set_permissions(&scratch_dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+    let (code, out) = push_check_in(
+        &r,
+        "pre-push-audit-python",
+        "refs/heads/feat/x",
+        Some(&scratch_dir),
+    );
+    std::fs::set_permissions(&scratch_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("chmod back");
+    assert_eq!(code, 0, "a branch push never blocks: {out}");
+    assert!(out.contains("no private directory"), "{out}");
+    assert!(
+        out.contains("Next: check that $TMPDIR is writable"),
+        "{out}"
+    );
+    assert!(out.contains("NOT checked"), "{out}");
+    assert!(!out.contains("audited requirements.txt"), "{out}");
+}
+
 /// A uv project has no `requirements.txt` — it has a venv. Before this, the
 /// check looked only for the file, found none, and reported "the audit did
 /// NOT run" on every push forever; a whole fleet of Python repositories was

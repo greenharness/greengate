@@ -36,6 +36,20 @@ counted before the next release refuses it. Readers older than greengate
 5.4.0 and relais 0.94.0 refuse `held:<lease>` and queue behind their own
 parent, so install those before this release.
 
+A fully hashed `requirements.txt` whose pins carry environment markers (what
+`uv pip compile --universal` writes) is now audited without a resolve, every
+platform's pin included (decisions f118). pip-audit under `--no-deps` drops a
+pin whose marker this host does not match, without a word, so
+`jinja2==2.10 ; sys_platform == 'linux'` read clean on a Mac; the pins are
+now audited with their markers stripped, one version of a name per run, and
+the file ends with `audit-python: audited requirements.txt (N package
+versions, K skipped)`. A run that stops part-way keeps what it found, says
+why, and leaves the result neither clean nor waivable. In every audit that
+runs per directory (rust, go, python's requirements files), a directory
+whose run times out is now named NOT checked and the other directories'
+findings still count; before, the timeout dropped them. A result with such
+a gap is not recorded, so the next push audits again instead of replaying it.
+
 ## v5.5.0
 
 `greenharness-slots` gains `wait_in_line_paced`, with `Pause` and `Ended`:
