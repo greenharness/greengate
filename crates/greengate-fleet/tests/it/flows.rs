@@ -771,3 +771,54 @@ fn the_install_journey() {
         "{out}"
     );
 }
+
+/// greengate 6.0.0 removed `--aval-hook`: through the real binary it is an
+/// unknown argument in every mode, refused before anything is read or
+/// written. Exit 2, nothing on stdout, the error and then the usage on
+/// stderr, and the repository's hooks left exactly as they were.
+#[test]
+fn the_removed_hook_flag_is_refused_before_any_write() {
+    let root = Root::new("removed-hook-flag");
+    let hooks = root.hooks("repo");
+    root.write("repo/.git/hooks/pre-commit", "#!/bin/sh\n# marker\n");
+    root.write("repo/.adr.yaml", "x: 1\n");
+    let before: std::collections::BTreeSet<_> = std::fs::read_dir(&hooks)
+        .expect("hooks")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    for (args, unknown) in [
+        (vec!["fix", "--aval-hook", "--json"], "--aval-hook"),
+        (vec!["fix", "--apply", "--aval-hook"], "--aval-hook"),
+        (vec!["install", "--aval-hook"], "--aval-hook"),
+        (vec!["fix", "--bogus"], "--bogus"),
+    ] {
+        let (code, out, err) = root.fleet(&args);
+        step_eq!("exit 2", code, 2, "{args:?}: {err}");
+        step!("no stdout", out.is_empty(), "{args:?}: {out}");
+        step!(
+            "the error first",
+            err.starts_with(&format!("greengate-fleet: unknown argument {unknown:?}\n")),
+            "{args:?}: {err}"
+        );
+        step!(
+            "then the usage",
+            err.contains("\nusage: greengate-fleet"),
+            "{args:?}: {err}"
+        );
+        step!(
+            "usage names the new flag",
+            err.contains("--greentopo-hook"),
+            "{err}"
+        );
+    }
+    step_eq!(
+        "hooks untouched",
+        root.read("repo/.git/hooks/pre-commit"),
+        "#!/bin/sh\n# marker\n"
+    );
+    let after: std::collections::BTreeSet<_> = std::fs::read_dir(&hooks)
+        .expect("hooks")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    step_eq!("no file written", after, before);
+}

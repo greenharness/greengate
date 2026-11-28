@@ -298,18 +298,12 @@ pub enum Warning {
     /// repository seen so far, and "every so far" is not a rule this tool
     /// gets to write into somebody's ignore file. Only raised under
     /// `--greentopo-hook`, since without it the hook is not this run's business.
-    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
-    // renaming it is a major, after a minor that warns.
-    #[serde(rename = "aval_hook_ignored")]
     GreentopoHookIgnored { paths: Vec<String> },
     /// `--greentopo-hook` was asked for and this repository has a corpus, but its
     /// hook could not be judged — no `greentopo` on `PATH`, or an answer greentopo did
     /// not promise. Absence of evidence, reported as such rather than as
     /// "current" (a missing binary is exactly how "up to date" would be faked
     /// by silence) or as "stale" (which would plan a write on a guess).
-    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
-    // renaming it is a major, after a minor that warns.
-    #[serde(rename = "aval_hook_unjudged")]
     GreentopoHookUnjudged { why: String },
 }
 
@@ -331,9 +325,6 @@ pub struct FixPlan {
     pub remove: Vec<Removal>,
     pub write: Vec<WriteShim>,
     pub write_agents_md: Option<WriteAgentsMd>,
-    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
-    // renaming it is a major, after a minor that warns.
-    #[serde(rename = "install_aval_hook")]
     pub install_greentopo_hook: Option<InstallGreentopoHook>,
 }
 
@@ -991,33 +982,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The Rust names moved to greentopo; the `--json` keys did not, because
-    /// they are public interface (cli.compat.interface-is-public) and a
-    /// rename there is a major release.
+    /// No object key, and no `state` or `warning` tag, in `json` says
+    /// `aval`. Paths are left out: a scratch directory may contain anything.
+    fn assert_no_old_name(json: &serde_json::Value) {
+        let found = json_names(json);
+        let old: Vec<_> = found.iter().filter(|n| n.contains("aval")).collect();
+        assert!(old.is_empty(), "{old:?} in {json}");
+        assert!(found.iter().any(|n| n.contains("greentopo")), "{json}");
+    }
+
+    /// Every object key in `json`, with the string tag under each `state`
+    /// or `warning` key, depth first.
+    fn json_names(json: &serde_json::Value) -> Vec<String> {
+        match json {
+            serde_json::Value::Object(map) => map
+                .iter()
+                .flat_map(|(key, inner)| {
+                    let tag = (key == "state" || key == "warning")
+                        .then(|| inner.as_str().map(str::to_string))
+                        .flatten();
+                    std::iter::once(key.clone())
+                        .chain(tag)
+                        .chain(json_names(inner))
+                })
+                .collect(),
+            serde_json::Value::Array(items) => items.iter().flat_map(json_names).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The `--json` keys follow greentopo's name (greengate 6.0.0): no key,
+    /// state or warning kind says `aval` any more.
     #[test]
-    fn the_json_keys_keep_the_old_hook_names() {
+    fn the_json_keys_name_the_greentopo_hook() {
         let dir = healthy_repo_dir("greentopo-hook-json");
         let mut r = repo(true);
         r.greentopo_hook.state = GreentopoHookState::NoGreentopo;
         r.greentopo_hook.ignored = vec![crate::greentopo_hook::SCRIPT_PATH.to_string()];
         let scan = serde_json::to_value(&r).unwrap();
-        assert_eq!(scan["aval_hook"]["state"]["state"], "no_aval", "{scan}");
+        assert_eq!(
+            scan["greentopo_hook"]["state"]["state"], "no_greentopo",
+            "{scan}"
+        );
+        assert_no_old_name(&scan);
         let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
         let json = serde_json::to_value(&p).unwrap();
-        assert!(json.get("install_aval_hook").is_some(), "{json}");
+        assert!(json.get("install_greentopo_hook").is_some(), "{json}");
+        assert_no_old_name(&json);
         let kinds: Vec<_> = json["warn"]
             .as_array()
             .unwrap()
             .iter()
             .map(|w| w["warning"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(kinds, ["aval_hook_unjudged", "aval_hook_ignored"]);
+        assert_eq!(kinds, ["greentopo_hook_unjudged", "greentopo_hook_ignored"]);
 
         // Stale plans an install, and the key carries the plan's repository.
         r.greentopo_hook.state = GreentopoHookState::Stale;
         let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
         let json = serde_json::to_value(&p).unwrap();
-        assert!(json["install_aval_hook"]["repo"].is_string(), "{json}");
+        assert!(json["install_greentopo_hook"]["repo"].is_string(), "{json}");
+        assert_no_old_name(&json);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

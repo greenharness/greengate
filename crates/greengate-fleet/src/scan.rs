@@ -155,9 +155,6 @@ pub struct Repo {
     /// Whether greentopo's session hook is current here, for a repository that
     /// keeps an `.adr.yaml` — and what git would do with its files. `NoCorpus`
     /// for the many repositories that decide nothing, without a spawn.
-    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
-    // renaming it is a major, after a minor that warns.
-    #[serde(rename = "aval_hook")]
     pub greentopo_hook: crate::greentopo_hook::GreentopoHook,
     /// Where this repo's hooks resolve to, and whether that is inside it.
     pub hooks_dir: HooksDir,

@@ -46,9 +46,6 @@ pub enum GreentopoHookState {
     NoCorpus,
     /// A corpus, and no `greentopo` on `PATH` to judge its hook with. Absence of
     /// evidence: reported, never read as "current".
-    // Wire name kept: `--json` fields are public (cli.compat.interface-is-public);
-    // renaming it is a major, after a minor that warns.
-    #[serde(rename = "no_aval")]
     NoGreentopo,
     /// `greentopo hook install --check` exited 0.
     Current,
