@@ -71,5 +71,6 @@ Closed on `fix/hsa-t23` (plan `docs/plans/2026-11-27-promote-off-switch.md`).
   config --global greengate.hostPromote 0`, and wrote a row with
   `"source":"global"`.
 - Gap: relais pins crate 5.5, so the switch does not stop moves made through
-  relais until relais bumps to `greenharness-slots` 6. A follow-up ticket
-  covers it.
+  relais until relais bumps to `greenharness-slots` 6:
+  [t25](t25-relais-honours-promote-switch.md), due with t22's count on
+  2026-12-03.
