@@ -170,10 +170,11 @@ commit. greengate is released first in each phase; the relais PR waits for
 the crate on crates.io.
 
 ## Decision log
-- 2026-11-28 — phase 2 ships as 5.7.0 and phase 3 as 5.8.0: main released
-  5.5.0 for the paced wait (#538, relais-modularise t05) before phase 2
-  branched, and t23 (the promote off switch) cuts 5.6.0 first.
-  `LEASE_WRITER_SINCE` moves to `5.7`.
+- 2026-11-28 — phase 2 ships in greengate 5.6.0, beside t23's promote off
+  switch (that release was rebased to carry #542); main released 5.5.0 for
+  the paced wait (#538) before phase 2 branched. `LEASE_WRITER_SINCE` is
+  `5.6`. Phase 3 takes the next release whose number is read from main at
+  its release PR.
 - 2026-11-27 — phase 2 also touches `greenharness-slots/src/marker.rs`
   (`MarkerLog::record` writes the `marker_bare` row the Behaviour promises
   from phase 2, with its unit test) and `docs/host-slots.md`; neither was in
@@ -320,7 +321,7 @@ Phase 2, amont half (this PR; the greengate release, relais's half and both inst
 - A `slot run` nested in a `slot run` printed the outer's marker (`nested:held:54708-0`, `outer:held:54708-0`) and the journal had one `admitted` row for the pair, not two.
 - `GREENHARNESS_HOST_SLOT=held` (bare), two processes: no stderr line, exit 0, one `marker_bare` row each (no `waited_ms`, no `reason`, `ppid` present).
 - `cargo clippy --workspace --all-targets -D warnings` clean; `greenharness-slots` marker tests 18 passed, `greengate-runtime` `host_slots` tests 12 passed, `it` `slot_run::` plus the hook fixture 17 passed. The whole suite runs at the land.
-- Release order: greengate 5.4.0 and relais 0.94.0 (phase 1, release PR open) are installed before this release; the version this ships as is read from main at its release PR (5.6.0 is t23's; 6.0.0 may follow), and `LEASE_WRITER_SINCE`, `docs/host-slots.md` and this log follow it then.
+- Release order: greengate 5.4.0 and relais 0.94.0 (phase 1) are installed before this release. Phase 2 ships in greengate 5.6.0 beside t23's promote off switch, and `LEASE_WRITER_SINCE` and `docs/host-slots.md` read `5.6` (fix/hsa-t15-writer-5-6). Carried to phase 3: the bare-marker hint names a greengate version only; it should name both writers (greengate 5.6, relais's phase-2 release) or point to `<bin> slots` (backend).
 
 ## Implementation review
 - phase 2, implementation-review: approve (delta) after approve-with-changes; fixed: exhaustive `Marker` match, Decision log names the it tests. 102k.
