@@ -679,6 +679,40 @@ fn a_heavy_hook_check_is_bounded_held_or_unqueued() {
     let _ = std::fs::remove_dir_all(&busy); // best-effort: a scratch dir
 }
 
+/// A heavy hook check's tool sees the marker of the lease its check holds,
+/// `held:<lease>`, and that lease's holder record is live while it runs
+/// (t15 phase 2), so a `greengate slot run` it starts does not queue again.
+#[test]
+fn a_heavy_hook_checks_child_sees_its_own_lease() {
+    let repo = Repo::new();
+    repo.stage(
+        "gate.sh",
+        "printf %s \"$GREENHARNESS_HOST_SLOT\" > marker.txt\n\
+         cat \"$GREENHARNESS_SLOT_DIR\"/holders/*.who > who.txt\n",
+    );
+    repo.stage(
+        "amont.conf",
+        "set onBusy wait\nset timeout 30\n\
+         pre-commit  gate  *.txt  block  heavy sh gate.sh\n",
+    );
+    repo.commit("chore: base");
+    trust(&repo);
+    let slots = slot_dir("child-lease");
+    repo.stage("a.txt", "one\n");
+    let (code, out) = hook(&repo, "pre-commit", &[], &slots, "", &[]);
+    assert_eq!(code, 0, "{out}");
+    let marker = std::fs::read_to_string(repo.dir.join("marker.txt")).unwrap_or_default();
+    let lease = marker
+        .strip_prefix("held:")
+        .unwrap_or_else(|| panic!("not a held:<lease> marker: {marker:?}: {out}"));
+    let who = std::fs::read_to_string(repo.dir.join("who.txt")).unwrap_or_default();
+    assert!(
+        who.contains(lease),
+        "{marker} not in the holder record {who}"
+    );
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: a scratch dir
+}
+
 /// A `warn` gate cannot stop a push, so it never queues for a slot: on a
 /// busy host it defers at once, even under `onBusy wait`, instead of holding
 /// the push and its open connection to the remote for a verdict that blocks

@@ -356,6 +356,13 @@ fn a_nested_wrapper_runs_at_once_and_flags_after_dashes_pass_through() {
         assert!(Instant::now() < deadline, "the holder exported no marker");
         std::thread::sleep(Duration::from_millis(20));
     };
+    // The holder exports its own lease (t15 phase 2), the one its record names.
+    let lease = marker.strip_prefix("held:").expect("a held:<lease> marker");
+    let records: String = std::fs::read_dir(slots.join("holders"))
+        .expect("holders")
+        .filter_map(|e| std::fs::read_to_string(e.ok()?.path()).ok())
+        .collect();
+    assert!(records.contains(lease), "{marker} not in {records}");
     let started = Instant::now();
     let out = amont(
         &slots,
@@ -365,7 +372,7 @@ fn a_nested_wrapper_runs_at_once_and_flags_after_dashes_pass_through() {
             "--",
             "sh",
             "-c",
-            "echo got:\"$1\"",
+            "echo got:\"$1\" m:\"$GREENHARNESS_HOST_SLOT\"",
             "x",
             "--help",
         ],
@@ -375,11 +382,42 @@ fn a_nested_wrapper_runs_at_once_and_flags_after_dashes_pass_through() {
     .expect("nested");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     assert!(text(&out).contains("got:--help"), "{}", text(&out));
+    // A nested wrapper passes the inherited marker through untouched.
+    assert!(
+        text(&out).contains(&format!("m:{marker}")),
+        "{}",
+        text(&out)
+    );
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "a nested wrapper queued"
     );
     let _ = holder.wait(); // best-effort: reap the holder
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}
+
+/// An accepted bare `held` (an older holder) runs at once, says nothing,
+/// and leaves one `marker_bare` row with no `waited_ms` and no `reason`, so
+/// the phase-3 gate of t15 can count the writers still bare.
+#[test]
+fn a_bare_marker_runs_at_once_and_is_counted_once() {
+    let slots = slot_dir("bare");
+    let out = amont(&slots, &["slot", "run", "--", "true"])
+        .env("GREENHARNESS_HOST_SLOT", "held")
+        .output()
+        .expect("bare");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        !text(&out).contains("GREENHARNESS_HOST_SLOT"),
+        "{}",
+        text(&out)
+    );
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    let rows: Vec<&str> = waits.lines().collect();
+    assert_eq!(rows.len(), 1, "{waits}");
+    assert!(rows[0].ends_with("\"outcome\":\"marker_bare\"}"), "{waits}");
+    assert!(!rows[0].contains("waited_ms"), "{waits}");
+    assert!(!rows[0].contains("\"reason\""), "{waits}");
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
 

@@ -591,9 +591,20 @@ fn marker(settings: &crate::config::Settings) -> &greenharness_slots::Marker {
 }
 
 /// Whether an ancestor holds a slot for this run: its `GREENHARNESS_HOST_SLOT`
-/// names a live lease (`greenharness_slots::held_marker`).
+/// names a live lease (`greenharness_slots::held_marker`). An accepted bare
+/// `held` leaves one `marker_bare` row, once per run, whether or not slots
+/// are on here: the phase-3 gate of t15 counts the holders still writing it,
+/// and its writer is the ancestor, whatever this run's sizing.
 pub(crate) fn nested(settings: &crate::config::Settings) -> bool {
-    marker(settings).is_held()
+    let marker = marker(settings);
+    if matches!(marker, greenharness_slots::Marker::Held { bare: true }) {
+        settings.marker_log.record(
+            &greenharness_slots::dir(),
+            crate::names::SLOT_HOLDER,
+            marker,
+        );
+    }
+    marker.is_held()
 }
 
 /// For a command about to queue: when its marker was refused, the journal's
@@ -623,10 +634,13 @@ fn say_refusal(line: &str) {
 }
 
 /// Called before a tool is spawned. For the first tool of a heavy check,
-/// waits for a slot, showing the wait in the check's row. Returns whether
-/// this thread holds a slot, so the caller exports [`HELD_ENV`]; an `Err`
-/// when the busy policy deferred the check, so the caller does not spawn.
-pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool> {
+/// waits for a slot, showing the wait in the check's row. Returns the
+/// [`HELD_ENV`] value the tool exports when this thread runs under a slot:
+/// `held:<lease>` of the lease this check holds, else of the slot parked
+/// between two heavy gates, read under the same lock that found it (t15
+/// phase 2); `None` when no slot is held. An `Err` when the busy policy
+/// deferred the check, so the caller does not spawn.
+pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<Option<String>> {
     let (pending, deferred, name, slot_wait) = CURRENT.with(|current| {
         let current = current.borrow();
         (
@@ -643,7 +657,7 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
     }
     if pending {
         if let Some(handed) = parking().then(|| parked().take()).flatten() {
-            return Ok(take_handed(handed, &name));
+            return Ok(Some(take_handed(handed, &name)));
         }
         // Nested first: a nested amont must not pay the host-key scan for a
         // slot count it is about to ignore. Neither answer queues, so neither
@@ -655,11 +669,11 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
         };
         let Some(sizing) = sizing else {
             CURRENT.with(|c| c.borrow_mut().settled = true);
-            return Ok(false);
+            return Ok(None);
         };
         if !greenharness_slots::SUPPORTED {
             CURRENT.with(|c| c.borrow_mut().settled = true);
-            return Ok(false);
+            return Ok(None);
         }
         let policy = match slot_wait {
             SlotWait::NeverWaits => BusyPolicy::Defer {
@@ -706,7 +720,7 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
                     c.jobs = Some(jobs);
                     c.sized = Some((slot_cap, machine.cores));
                 });
-                return Ok(false);
+                return Ok(None);
             }
         };
         // A marker that names no live lease queues like none, said once.
@@ -806,12 +820,25 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<bool>
     // A light check run while a slot is parked between two heavy gates: its
     // tools run under that slot (a child `amont slot run` must not queue for
     // its parent's slot).
-    Ok(CURRENT.with(|c| c.borrow().held.is_some()) || (parking() && parked().is_some()))
+    let own = CURRENT.with(|c| {
+        c.borrow()
+            .held
+            .as_ref()
+            .map(greenharness_slots::Lease::marker)
+    });
+    Ok(own.or_else(|| {
+        if parking() {
+            parked().as_ref().map(|p| p.lease.marker())
+        } else {
+            None
+        }
+    }))
 }
 
 /// The next heavy check takes the slot the previous one parked: renamed to
 /// itself, recorded as a wait of nothing, its width applied as a grant's is.
-fn take_handed(handed: Parked, name: &str) -> bool {
+/// Its marker, which a hand-over does not change.
+fn take_handed(handed: Parked, name: &str) -> String {
     let Parked { lease, jobs, sized } = handed;
     if let Err(error) = lease.rename(&holder_for(name)) {
         crate::hooks::common::say(&format!(
@@ -819,6 +846,7 @@ fn take_handed(handed: Parked, name: &str) -> bool {
         ));
     }
     record_acquisition(name, jobs, sized, Duration::ZERO, "handed", None);
+    let marker = lease.marker();
     CURRENT.with(|current| {
         let mut current = current.borrow_mut();
         current.held = Some(lease);
@@ -826,7 +854,7 @@ fn take_handed(handed: Parked, name: &str) -> bool {
         current.jobs = jobs;
         current.sized = sized;
     });
-    true
+    marker
 }
 
 /// One line of `waits.jsonl` for the check `name`, with where it ran.
@@ -1199,7 +1227,7 @@ mod tests {
     fn a_light_check_never_takes_a_slot() {
         let settings = crate::config::Settings::default();
         let _g = enter_check("pre-commit-cargo-fmt", weight_of("pre-commit-cargo-fmt"));
-        assert!(!before_spawn(&settings).unwrap());
+        assert!(before_spawn(&settings).unwrap().is_none());
     }
 
     #[test]
@@ -1207,7 +1235,7 @@ mod tests {
         let settings = crate::config::Settings::default();
         let _g = enter_check("pre-commit-clippy", weight_of("pre-commit-clippy"));
         assert_eq!(current_check().as_deref(), Some("clippy"));
-        assert!(!before_spawn(&settings).unwrap());
+        assert!(before_spawn(&settings).unwrap().is_none());
         assert!(CURRENT.with(|c| c.borrow().settled));
         // No slot: no width is set here.
         let mut cmd = std::process::Command::new("true");
