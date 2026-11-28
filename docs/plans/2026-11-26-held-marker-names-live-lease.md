@@ -170,10 +170,11 @@ commit. greengate is released first in each phase; the relais PR waits for
 the crate on crates.io.
 
 ## Decision log
-- 2026-11-28 — phase 2 ships as 5.7.0 and phase 3 as 5.8.0: main released
-  5.5.0 for the paced wait (#538, relais-modularise t05) before phase 2
-  branched, and t23 (the promote off switch) cuts 5.6.0 first.
-  `LEASE_WRITER_SINCE` moves to `5.7`.
+- 2026-11-28 — phase 2 ships in greengate 5.6.0, beside t23's promote off
+  switch (that release was rebased to carry #542); main released 5.5.0 for
+  the paced wait (#538) before phase 2 branched. `LEASE_WRITER_SINCE` is
+  `5.6`. Phase 3 takes the next release whose number is read from main at
+  its release PR.
 - 2026-11-27 — phase 2 also touches `greenharness-slots/src/marker.rs`
   (`MarkerLog::record` writes the `marker_bare` row the Behaviour promises
   from phase 2, with its unit test) and `docs/host-slots.md`; neither was in

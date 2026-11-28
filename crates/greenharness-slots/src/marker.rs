@@ -31,7 +31,7 @@ const BARE: &str = "held";
 /// The first greengate and relais release whose writers export
 /// `held:<lease>`. Before it, a holder exports bare `held`, which the reader
 /// accepts until [`ACCEPT_BARE`] is switched off.
-pub(crate) const LEASE_WRITER_SINCE: &str = "5.7";
+pub(crate) const LEASE_WRITER_SINCE: &str = "5.6";
 
 /// Whether a bare `held` is still accepted: `Accept` for the rollout's first
 /// two steps (every reader accepts both forms, then every writer emits the
@@ -281,7 +281,7 @@ impl MarkerLog {
     /// Append the row `marker` leaves in `dir`'s `waits.jsonl`, the first
     /// time only; `true` when this call wrote it, so the caller prints its
     /// line then. A refused marker writes `marker_refused` with its `reason`;
-    /// an accepted bare `held` writes `marker_bare` with none (from 5.7: the
+    /// an accepted bare `held` writes `marker_bare` with none (from 5.6: the
     /// phase-3 gate of t15 counts the writers still bare, and
     /// [`refused_line`] has no line for it); any other marker writes
     /// nothing. Best-effort, as every journal row.
