@@ -2,7 +2,8 @@
 //! command, and who holds them.
 //!
 //! `amont slot run [--weight N] [--max-wait S | --now] -- <cmd…>` waits for a
-//! slot, runs the command with `GREENHARNESS_HOST_SLOT=held`, passes its exit
+//! slot, runs the command with `GREENHARNESS_HOST_SLOT=held:<lease>` (a nested
+//! one passes the inherited marker through), passes its exit
 //! status through and frees the slot when the command exits. The wrapper
 //! alone holds the slot: its descriptors are close-on-exec, so a daemon the
 //! command leaves behind never keeps it. A wait ends, with exit 75 and nothing

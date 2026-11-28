@@ -1399,10 +1399,8 @@ pub fn status_within(
 ) -> std::io::Result<Ran> {
     // The same host-slot wait as the observed runners: a check run without
     // a live stage (one check by name, `greengate.progress false`) still queues.
-    if crate::host_slots::before_spawn(settings)? {
-        if let Some(marker) = crate::host_slots::held_env() {
-            cmd.env(crate::host_slots::HELD_ENV, marker);
-        }
+    if let Some(marker) = crate::host_slots::before_spawn(settings)? {
+        cmd.env(crate::host_slots::HELD_ENV, marker);
     }
     crate::host_slots::bound(cmd);
     status_within_secs(cmd, check_timeout(settings))
@@ -1452,10 +1450,8 @@ fn run_observed_split(
 ) -> std::io::Result<Ran> {
     // A heavy check's first tool waits here for a host slot (ADR-0009);
     // its clocks start at the spawn below, after the wait.
-    if crate::host_slots::before_spawn(settings)? {
-        if let Some(marker) = crate::host_slots::held_env() {
-            cmd.env(crate::host_slots::HELD_ENV, marker);
-        }
+    if let Some(marker) = crate::host_slots::before_spawn(settings)? {
+        cmd.env(crate::host_slots::HELD_ENV, marker);
     }
     crate::host_slots::bound(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());

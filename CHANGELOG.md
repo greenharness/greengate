@@ -16,7 +16,9 @@ one parked between two heavy gates. A `slot run` nested under a live lease
 passes the inherited marker through untouched. The bare `held` is still
 accepted, and now leaves one `marker_bare` row in `waits.jsonl` per process
 (no `waited_ms`, no `reason`), so the holders still writing it can be
-counted before the next release refuses it.
+counted before the next release refuses it. Readers older than greengate
+5.4.0 and relais 0.94.0 refuse `held:<lease>` and queue behind their own
+parent, so install those before this release.
 
 ## v5.5.0
 

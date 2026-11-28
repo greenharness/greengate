@@ -396,6 +396,31 @@ fn a_nested_wrapper_runs_at_once_and_flags_after_dashes_pass_through() {
     let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
 }
 
+/// An accepted bare `held` (an older holder) runs at once, says nothing,
+/// and leaves one `marker_bare` row with no `waited_ms` and no `reason`, so
+/// the phase-3 gate of t15 can count the writers still bare.
+#[test]
+fn a_bare_marker_runs_at_once_and_is_counted_once() {
+    let slots = slot_dir("bare");
+    let out = amont(&slots, &["slot", "run", "--", "true"])
+        .env("GREENHARNESS_HOST_SLOT", "held")
+        .output()
+        .expect("bare");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        !text(&out).contains("GREENHARNESS_HOST_SLOT"),
+        "{}",
+        text(&out)
+    );
+    let waits = std::fs::read_to_string(slots.join("waits.jsonl")).unwrap_or_default();
+    let rows: Vec<&str> = waits.lines().collect();
+    assert_eq!(rows.len(), 1, "{waits}");
+    assert!(rows[0].ends_with("\"outcome\":\"marker_bare\"}"), "{waits}");
+    assert!(!rows[0].contains("waited_ms"), "{waits}");
+    assert!(!rows[0].contains("\"reason\""), "{waits}");
+    let _ = std::fs::remove_dir_all(&slots); // best-effort: scratch
+}
+
 /// A marker that names no live lease (`=1`, set by hand) queues like none:
 /// one refusal line, one `marker_refused` row, then a grant, and the exit
 /// status stays the command's. With slots off, nothing is said or written.
