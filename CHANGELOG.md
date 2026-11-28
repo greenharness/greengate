@@ -8,6 +8,10 @@ missing here.
 
 ## Unreleased
 
+## v6.0.0
+
+greengate 6.0.0 is a major for `greengate-fleet` alone: its old aval flag and five `--json` keys are gone (#543). It also carries the host-slot changes once meant for 5.6.0, which never shipped (#541, #542, #544), the queued heartbeat's ceiling (#547), python audits of marked hashed pins (#549), and a test fix (#546).
+
 **Breaking, `greengate-fleet` only** (programme topo-spotter-rename t28): the
 names greengate 5.3.0 kept for the session hook of aval, which became
 greentopo, are gone, with no alias.
@@ -24,6 +28,10 @@ greentopo, are gone, with no alias.
   reader of the old keys, and greengate-fleet keeps no scan cache to read
   back.
 
+Install greengate 5.4.0 or later and relais 0.94.0 or later on every machine
+before this release: older readers refuse the new `held:<lease>` marker below
+and queue behind their own parent.
+
 Holders now export `GREENHARNESS_HOST_SLOT=held:<lease>`, their own lease
 id, instead of the bare `held` (ADR-0022, amended; programme
 host-slot-admission t15, phase 2): `greengate slot run` for the command it
@@ -32,13 +40,36 @@ one parked between two heavy gates. A `slot run` nested under a live lease
 passes the inherited marker through untouched. The bare `held` is still
 accepted, and now leaves one `marker_bare` row in `waits.jsonl` per process
 (no `waited_ms`, no `reason`), so the holders still writing it can be
-counted before the next release refuses it. Readers older than greengate
-5.4.0 and relais 0.94.0 refuse `held:<lease>` and queue behind their own
-parent, so install those before this release.
+counted before a later release refuses it.
+
+`greengate slot promote` has an off switch. If promotion misbehaves on a
+machine, `git config --global greengate.hostPromote 0` (or `--system`) turns
+it off without a reinstall, and `git config --global --unset
+greengate.hostPromote` turns it back on (see `docs/host-slots.md`).
+`GREENGATE_HOST_PROMOTE=0` turns it off for one process. The environment can
+only turn promotion off: a `1` there never undoes a host `0`. Between the two
+git scopes the usual order holds, so a `--global` value beats a `--system`
+one. A refused promote says `refused (off)` with a `set by:` line, exits 1,
+and journals one `promote_refused` row with `"limit":"off"` and a `source`
+(`env`, `global` or `system`). The queue, `slot run` and `slots` are
+untouched. A promote refused before it reaches the queue no longer creates
+the slot directory, and a `no-room` refusal now has hints (programme
+host-slot-admission t23).
+
+New API in `greenharness-slots`: `Refused::Off`, `host::OffBy` (a closed set
+of three sources, so a fourth would be a breaking change), `host::resolve_promote`,
+`host::promote_from_host`, `promote_off`, `PromoteAnswer`,
+`PromoteError::one_line` and `SESSION_ENVS`. `PromoteError`'s `Display` no
+longer repeats its I/O cause, which is its `source()`: print `one_line()` for
+both on one line.
+
+A hook queued for a host slot now says where its wait ends and how to skip it (#547; programme host-slot-admission t20): `queued 1m00s for a host slot (greengate.hostSlots 2), defers to CI in at most 59m00s (greengate.timeout); skip the queue: rerun with GREENGATE_ON_BUSY=now`. The end is what is left of `greengate.timeout` (3600 s when it is 0), an upper bound; a land's rehearsal leaves the clause out, since it always waits. The deferral roll-up reads `wait for a slot, up to 1h00m (greengate.timeout):`.
+
+Fixes: the test `slot_run::a_session_moves_its_own_waiting_job_to_the_head` no longer races (#546). It holds the promote holder until the waiting client has printed its id line, where it used to release the holder first and fail on a loaded machine.
 
 A fully hashed `requirements.txt` whose pins carry environment markers (what
 `uv pip compile --universal` writes) is now audited without a resolve, every
-platform's pin included (decisions f118). pip-audit under `--no-deps` drops a
+platform's pin included (#549, decisions f118). pip-audit under `--no-deps` drops a
 pin whose marker this host does not match, without a word, so
 `jinja2==2.10 ; sys_platform == 'linux'` read clean on a Mac; the pins are
 now audited with their markers stripped, one version of a name per run, and

@@ -119,7 +119,8 @@ Rollback: reinstall 5.1.1, and note it here.
 Plan: [`docs/plans/2026-11-26-held-marker-names-live-lease.md`](../docs/plans/2026-11-26-held-marker-names-live-lease.md).
 Programme `docs/programmes/host-slot-admission`, tickets t10 (research) and
 t15 (build). It takes effect in three releases of greengate and relais each:
-5.4.0 reads both forms, 5.5.0 writes the new one, 5.6.0 refuses the bare one.
+5.4.0 reads both forms, 6.0.0 writes the new one (5.5.0 shipped the paced wait
+between them, and 5.6.0 never shipped), and a later release refuses the bare one.
 
 Before, greengate treated any non-empty `GREENHARNESS_HOST_SLOT` as "my
 parent holds a slot", and relais exactly `held`, so an inline
