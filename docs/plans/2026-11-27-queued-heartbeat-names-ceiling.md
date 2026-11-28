@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: prog/host-slot-admission/t20-queued-heartbeat-names-ceiling
 repos: [amont]
 adrs: [ADR-0022]
@@ -79,7 +79,9 @@ The added text is plain, with no
 - The skip names the variable only. `on_push` is false for a pre-push check
   in a land rehearsal (live.rs:985) and true under `greengate run --raw`, and
   stage names carry `pre-push-` either way, so no field names the command that
-  was run; the variable is true on every path. Rerunning is the only way, as
+  was run; the variable is true on every path but a land rehearsal, which forces
+  `onBusy wait` on its snapshot: there the clause is left out (the reviews'
+  sidecar). Rerunning is the only way, as
   the choice is made up front (ADR-0022). The roll-up already prints the whole
   command for the deferred checks.
 - The roll-up label reads `wait for a slot, up to 1h00m (greengate.timeout):`
@@ -87,7 +89,7 @@ The added text is plain, with no
 
 ## Phases
 
-- [ ] Phase 1 — heartbeat and roll-up: `crates/greengate-runtime/src/live.rs`
+- [x] Phase 1 — heartbeat and roll-up: `crates/greengate-runtime/src/live.rs`
   (`beat_line` queued branch, test `a_queued_check_says_it_waits_for_a_host_slot`
   rewritten to the new exact line, extra cases with `Budgets { ceiling: …, ..B }`),
   `crates/greengate-runtime/src/host_slots.rs` (`wait_ceiling_secs`),
@@ -101,17 +103,36 @@ No release is part of this plan: a message change only, shipped with the next gr
   asks for it and the ceiling is already resolved at both call sites.
 
 ## Verification
-- Phase 1: unit test on `beat_line` with ceiling 3600 and 60 s queued → the
-  exact line above; with ceiling 0 → 3600 used; 3590 s queued → `10s`; ceiling
-  spent → `0s`, never negative; the same text for `on_push` true and false; no `\x1b` in
-  the line, and the line's prefix is unchanged → pass.
+- Phase 1, `beat_line`: a queued row at 60 s with ceiling 3600 prints the exact
+  line (`… defers to CI in at most 59m00s (greengate.timeout); skip the queue:
+  rerun with GREENGATE_ON_BUSY=now`); 3590 s queued → `10s`, 7200 s → `0s`,
+  ceiling 0 → `59m00s`; on a first beat the clause ends the line after the kill
+  rule and before the push note; inside a rehearsal snapshot it is absent and
+  "defers to CI" stays; no `\x1b` → observed: 889 lib tests pass.
 - Roll-up: `deferral_advice` tests assert the exact label
-  `  wait for a slot, up to 1h00m (greengate.timeout):` (replacing the
-  `contains("up to greengate.timeout")` at dispatch.rs:3063), one case with
-  timeout 0 through `wait_ceiling_secs`; the `busy_defers` integration test
-  sees it on its own line, under 80 columns.
-- Live pilot: a hook check queued behind a held slot for over 60 s (as
-  `busy_defers` does) → its stderr heartbeat shows the line → pasted in Outcome.
-- fmt, `clippy -D warnings`, `cargo test -p greengate-runtime -p greengate`.
+  `  wait for a slot, up to 1h00m (greengate.timeout):`, timeout 0 gives the
+  same, all lines at most 80 columns; `busy_defers` (its repo sets timeout 600)
+  sees `up to 10m00s (greengate.timeout):` on its own line → observed: 26
+  `busy_defers` tests pass.
+- Live pilot: not run. The host was jammed all session (load 300+, a three-
+  slot line of other sessions' suites), and the heartbeat needs a hook check
+  that runs 60 s behind a held slot. The exact-line tests stand in; the first
+  real queued hook will show the line on stderr.
+- Toolchain 1.94.1 (`~/.cargo/bin`): `cargo fmt --check`, `cargo clippy
+  --workspace --all-targets -- -D warnings` clean. The Homebrew rustc 1.100
+  fails clippy on two untouched lines in `posix_signal.rs`, so the pin matters.
+
+## Implementation review
+- implementation-review: approve-with-changes, then the delta; fixed: ambient `in_snapshot()` read (now `Stage.way_out`), misplaced doc comments, a vacuous test, a flag-argument test wrapper (deleted); candidate `r` fine.
+- backend, lang:rust, unix, tui: approve after the delta; low items kept: one `for_snapshot` arm swap untested, `in_snapshot()` called twice at stage build.
+
+## Outcome
+Shipped on this branch (not yet released): the queued heartbeat names its
+ceiling and the way out, and the roll-up label carries the resolved length.
+Not done: each check's own bound in the live row (11 of 35 hook waits were
+60 s ones), and a live pilot. Surprises: the first beat appends a kill rule
+that would have followed the way out, so the clause moves to the line's end;
+`on_push` cannot name the command run, so the clause names the variable only;
+a land rehearsal forces `onBusy wait`, so there the clause is left out.
 
 <!-- panel: repos=amont reviewers=backend,lang:rust,tui,unix body-sha=8ef6f3170ea2 -->
