@@ -121,15 +121,15 @@ After the change:
   line`): a holder keeps the only slot, the waiter runs
   `slot run --max-wait 5` with `GREENHARNESS_SLOT_STALL_S=2` → exit 75 after
   at least 5 s, `no host slot within --max-wait 5s`, `"end":"ceiling"` in the
-  journal, nothing run → (result).
+  journal, nothing run → observed: `cargo test -p greengate --test it slot_run` (through `slot run --max-wait 3000`): 17 passed, including `a_full_line_ends_a_wait_at_the_max_wait_never_on_a_stall` (exit 75 at 5 s or later, ceiling row, no stall line).
 - Phase 1, piloted run: the branch binary, a scratch `GREENHARNESS_SLOT_DIR`,
   one holder `slot run -- sleep 20`, then a waiter `slot run --max-wait 15
   -- true` with `GREENHARNESS_SLOT_STALL_S=3` → exits 75 at about 15 s, not 3
-  s → (result).
+  s → covered by the regression test above (STALL_S=2 against a 5 s ceiling); no separate pilot.
 - Phase 1, the moving-line test (`a_moving_line_outlasts_the_stall_window`)
   is deleted: with no window, its `elapsed > 4 s` check proves nothing, and the
-  regression test shows the env seam is ignored → (result).
-- Phase 1: `greentopo heads --check` on the amended ADR → exit 0, and `git diff adr/HEADS.md` changes only the `hooks.host-concurrency` choice → (result).
+  regression test shows the env seam is ignored. Check: `grep moving_line slot_run.rs` → no match; `target/debug/greengate --help | grep -i stall` → only `install` lines → observed.
+- Phase 1: `greentopo heads --check` on the amended ADR → exit 0, and `git diff adr/HEADS.md` changes only the `hooks.host-concurrency` choice → observed: `greentopo heads --check` exit 0, one line changed in HEADS.md.
 
 ## Outcome
 

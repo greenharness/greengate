@@ -234,13 +234,14 @@ A plain push and a commit release their slot after each check.
 ## When a wait ends
 
 A hook check's wait ends, from 5.1.1, at its ceiling and nowhere before: it has no
-stall window (ADR-0022, amended). `greengate slot run` and relais keep the
-stall rule. A line has **stalled** when no
+stall window (ADR-0022, amended). `greengate slot run` has none either, from the
+release after 6.0.0 (amended 2026-11-28): it waits to `--max-wait`. Only relais
+keeps the stall rule. A line has **stalled** when no
 admission anywhere (the `admitted-at` stamp) and no change of the waiter's
 place for 300 s. The waiter's own marks run on a monotonic clock, so a
 laptop's sleep cannot stall a moving line; a stamp ahead of now counts as just
 now. `GREENHARNESS_SLOT_STALL_S` overrides the window. It is a test seam beside
-`GREENHARNESS_SLOT_DIR`, read by each binary at its edge. A wait also ends at
+`GREENHARNESS_SLOT_DIR`, read at its edge by relais only; `slot run` ignores it. A wait also ends at
 its caller's hard **ceiling**, or when three polls in a row fail after the
 queue was joined. One loop in the crate, `wait_in_line`, applies the rule for
 every caller; `wait_in_line_paced` is the same loop with the pause between
@@ -253,7 +254,7 @@ it:
 | hook check, `onBusy wait` (and every rehearsal) | none | `greengate.timeout` (3600 s when 0) | defers to CI |
 | heavy `warn` check of land's pre-stage | none | `greengate.warnSlotWait` (600 s, never above the timeout) | defers |
 | hook check, `onBusy defer` | none | `slotWait` (60 s) | defers |
-| `greengate slot run` | 300 s, never above `--max-wait` | `--max-wait` (90 s) | exits 75 (74 when the queue failed) |
+| `greengate slot run` | none | `--max-wait` (90 s) | exits 75 (74 when the queue failed) |
 | relais verification command | 300 s | the run's total budget | blocks `admission_wait_exhausted` |
 
 A gate that defers inside a rehearsal or land's pre-stage (only there) writes a
@@ -313,9 +314,10 @@ holder record.
 
 - `greengate slot run [--weight N] [--max-wait S | --now] -- <cmd…>` waits for a
   slot, then runs the command with the held marker set and passes its
-  exit status through. When the line stalls for 300 s, or `--max-wait` runs out
-  (default 90 s, under Claude Code's 120 s Bash timeout), it exits 75 and runs
-  nothing, saying which. `--now` runs it at once, unqueued and width-bound. From
+  exit status through. When `--max-wait` runs out (default 90 s, under Claude
+  Code's 120 s Bash timeout), it exits 75 and runs nothing. A long wait in a
+  full line keeps its place: pass `--max-wait 3000` and run it in the
+  background (the Bash tool kills a foreground command at 120 s). `--now` runs it at once, unqueued and width-bound. From
   5.0 `--on-timeout run` exits 2, and `--on-timeout exit` warns that it is
   deprecated.
 - `greengate slot promote <id> --reason <text> [--to N]` moves one of the
