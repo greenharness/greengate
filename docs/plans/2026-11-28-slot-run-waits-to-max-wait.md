@@ -95,13 +95,13 @@ After the change:
 
 ## Phases
 
-- [ ] Phase 1 — `slot run` has no stall window:
+- [x] Phase 1 — `slot run` has no stall window:
   `crates/greengate-runtime/src/slot_cmd.rs`,
   `crates/greengate/tests/it/slot_run.rs`,
   `crates/greengate/src/main.rs` (help: exit 75 only when --max-wait runs out),
   `adr/0022-waits-end-on-a-stalled-line.md`, `adr/HEADS.md`,
   `docs/host-slots.md`, `CHANGELOG.md`
-- [ ] Phase 2 — the ticket closes: `docs/programmes/host-slot-admission/t21-slot-run-waits-past-a-stall.md`,
+- [x] Phase 2 — the ticket closes: `docs/programmes/host-slot-admission/t21-slot-run-waits-past-a-stall.md`,
   `docs/programmes/host-slot-admission/map.md` (Decisions line, and the
   Lessons line on long `slot run` waits)
 
