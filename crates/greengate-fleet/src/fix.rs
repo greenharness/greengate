@@ -982,6 +982,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// No object key, and no `state` or `warning` tag, in `value` says
+    /// `aval`. Paths are left out: a scratch directory may contain anything.
+    fn assert_no_old_name(value: &serde_json::Value) {
+        fn names(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, inner) in map {
+                        out.push(key.clone());
+                        if key == "state" || key == "warning" {
+                            if let Some(tag) = inner.as_str() {
+                                out.push(tag.to_string());
+                            }
+                        }
+                        names(inner, out);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|i| names(i, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        names(value, &mut found);
+        let old: Vec<_> = found.iter().filter(|n| n.contains("aval")).collect();
+        assert!(old.is_empty(), "{old:?} in {value}");
+        assert!(found.iter().any(|n| n.contains("greentopo")), "{value}");
+    }
+
     /// The `--json` keys follow greentopo's name (greengate 6.0.0): no key,
     /// state or warning kind says `aval` any more.
     #[test]
@@ -995,11 +1022,11 @@ mod tests {
             scan["greentopo_hook"]["state"]["state"], "no_greentopo",
             "{scan}"
         );
-        assert!(!scan.to_string().contains("aval"), "{scan}");
+        assert_no_old_name(&scan);
         let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
         let json = serde_json::to_value(&p).unwrap();
         assert!(json.get("install_greentopo_hook").is_some(), "{json}");
-        assert!(!json.to_string().contains("aval"), "{json}");
+        assert_no_old_name(&json);
         let kinds: Vec<_> = json["warn"]
             .as_array()
             .unwrap()
@@ -1013,7 +1040,7 @@ mod tests {
         let p = plan(&r, &dir, "/bin/gh", Intent::Repair, false, true, false);
         let json = serde_json::to_value(&p).unwrap();
         assert!(json["install_greentopo_hook"]["repo"].is_string(), "{json}");
-        assert!(!json.to_string().contains("aval"), "{json}");
+        assert_no_old_name(&json);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
