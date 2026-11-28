@@ -42,7 +42,8 @@ Closed on `fix/hsa-t23` (plan `docs/plans/2026-11-27-promote-off-switch.md`).
   turning it off for one process. The environment can only turn promotion off:
   a `1` never undoes a host `0`. Shape chosen by the ticket agent; reasons are in
   the plan's Decision log.
-- A refused promote prints `refused (off): promotion is off on this machine` with
+- A refused promote prints `refused (off): promotion is off on this machine`
+  (git config key) or `… for this process` (`GREENGATE_HOST_PROMOTE=0`), with
   a `set by:` line naming the source, exits 1, and journals one `promote_refused`
   row with `"limit":"off"` and `"source"` (`env`, `global` or `system`). It creates
   no slot directory and writes no row into a directory that is not private.
@@ -65,11 +66,15 @@ Closed on `fix/hsa-t23` (plan `docs/plans/2026-11-27-promote-off-switch.md`).
   The same call without the variable was refused `not-queued`. The t13 plan's
   Outcome now names the switch as the rollback
   (`docs/plans/2026-11-26-agent-moves-own-job-ahead.md`).
-- When the environment set it, the refusal reads "for this process". The key
-  was checked too, with a scratch `GIT_CONFIG_GLOBAL` holding `hostPromote = 0`:
+- The key was checked too, with a scratch `GIT_CONFIG_GLOBAL` holding `hostPromote = 0`:
   it printed `refused (off): promotion is off on this machine`, then `set by: git
   config --global greengate.hostPromote 0`, and wrote a row with
   `"source":"global"`.
+- The live checks wrote three rows into the real
+  `/tmp/greenharness-slots-501/waits.jsonl`, all `promote_refused` for the
+  made-up id `"999999"` on 2026-11-28 (`off`/`env`, `not-queued`,
+  `off`/`global`), and no `promoted` row. t22's count leaves them out:
+  `select(.id != "999999")`.
 - relais has no promote path of its own, and t24 does not add one: it makes a
   relais job movable through `greengate slot promote`, which checks the switch.
   So the switch covers every move today, relais's crate 5.5 pin
