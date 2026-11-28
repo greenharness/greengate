@@ -58,6 +58,7 @@ ahead, with a reason that is journalled. All of this is shown on one workday of
 
 - [An off switch for `slot promote`](t23-promote-off-switch.md): `greengate.hostPromote 0` (or `GREENGATE_HOST_PROMOTE=0`, off-only) refuses every move with `refused (off)`, a `set by:` line and one `promote_refused` row carrying its `source`; shipped in greengate 6.0.0 and live-checked 2026-11-28; the t13 plan names it as the rollback.
 
+- [Can an agent move its own relais job ahead?](t24-relais-jobs-can-be-moved.md): yes; a relais host-slot job belongs to the Claude session that dispatched its run (not the run id), so that session alone can `slot promote` it; relais already links crate 5.5. Unattributed runs keep the run id and stay unmovable.
 - [Build: the held marker names a live lease](t15-build-held-marker-lease.md) (in progress): readers accept `held:<lease>` and bare `held` (greengate 5.4.0, relais v0.94.0); writers emit `held:<lease>` (relais v0.96.0 installed 2026-11-28, greengate 6.0.0, installed 2026-11-28). Phase 3, bare `held` refused, runs 24 h after the later of those two installs and 20 accepted markers; not before 2026-11-29.
 
 ## Handoff
