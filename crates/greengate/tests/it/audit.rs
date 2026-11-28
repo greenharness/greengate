@@ -368,12 +368,12 @@ for a in "$@"; do
   [ "$prev" = -r ] && rf=$a
   prev=$a
 done
-if [ $nd = 1 ] && [ $di = 1 ] && [ -n "$rf" ]; then :; else echo "ERROR: resolved: $*" >&2; [ -n '{sleep_on}' ] && sleep 5; exit 1; fi
+if [ $nd = 1 ] && [ $di = 1 ] && [ -n "$rf" ]; then :; else echo "ERROR: resolved: $*" >&2; [ -n '{sleep_on}' ] && sleep 4; exit 1; fi
 cat "$rf" >> {record}
 dup=$(sed 's/[=;].*//' "$rf" | sort | uniq -d)
 if [ -n "$dup" ]; then echo "ERROR:pip_audit._cli:package $dup has duplicate requirements" >&2; exit 1; fi
 if grep -q ';' "$rf"; then echo 'No known vulnerabilities found'; exit 0; fi
-if [ -n '{sleep_on}' ] && grep -q '^{sleep_on}$' "$rf"; then sleep 5; fi
+if [ -n '{sleep_on}' ] && grep -q '^{sleep_on}$' "$rf"; then sleep 4; fi
 found=0
 grep -q '^jinja2==2.10$' "$rf" && found=1
 [ -n '{vulnerable}' ] && grep -q '^{vulnerable}$' "$rf" && found=2
@@ -447,8 +447,10 @@ fn a_marked_batch_that_times_out_keeps_the_findings_and_is_never_waived() {
     let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
     assert_ne!(code, 0, "{out}");
     assert!(out.contains("PYSEC-2019-217"), "{out}");
-    assert!(out.contains("NOT fully checked"), "{out}");
-    assert!(out.contains("Next: `git config greengate.timeout"), "{out}");
+    assert!(
+        out.contains("timed out; unaudited versions remain — NOT fully checked"),
+        "{out}"
+    );
 
     let until = date_in(30);
     r.write(
@@ -459,6 +461,12 @@ fn a_marked_batch_that_times_out_keeps_the_findings_and_is_never_waived() {
     );
     let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
     assert_ne!(code, 0, "a waiver never covers an unaudited batch: {out}");
+
+    // The same waiver passes once every batch answers: the refusal above
+    // is the gap's, not the waiver's.
+    marked_pip_audit(&r, "", "");
+    let (code, out) = push_check(&r, "pre-push-audit-python", "refs/tags/v1.0.0");
+    assert_eq!(code, 0, "{out}");
 }
 
 /// A directory whose audit times out is named NOT checked, and the

@@ -47,7 +47,8 @@ versions, K skipped)`. A run that stops part-way keeps what it found, says
 why, and leaves the result neither clean nor waivable. In every audit that
 runs per directory (rust, go, python's requirements files), a directory
 whose run times out is now named NOT checked and the other directories'
-findings still count; before, the timeout dropped them.
+findings still count; before, the timeout dropped them. A result with such
+a gap is not recorded, so the next push audits again instead of replaying it.
 
 ## v5.5.0
 
