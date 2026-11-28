@@ -909,7 +909,7 @@ fn announce(settings: &crate::config::Settings, report: &Report) {
         );
     }
     if !report.deferred.is_empty() {
-        announce_deferred(&report.deferred);
+        announce_deferred(settings, &report.deferred);
     }
     if !report.downgraded.is_empty() {
         println!(
@@ -1890,11 +1890,14 @@ pub fn pre_push(ctx: &Ctx) -> Verdict {
                         crate::gate_stamp::Completion::Deferred,
                     ));
                 }
-                announce_deferred(&[(
-                    check.name(),
-                    severity_read
-                        .unwrap_or_else(|| crate::registry::severity_of(ctx.settings, *check)),
-                )])
+                announce_deferred(
+                    ctx.settings,
+                    &[(
+                        check.name(),
+                        severity_read
+                            .unwrap_or_else(|| crate::registry::severity_of(ctx.settings, *check)),
+                    )],
+                )
             }
             // Nothing to judge: not passed (nothing to stamp or attest), not
             // a gap (nothing is missing). The dispatcher asked the registry's
@@ -2115,8 +2118,10 @@ fn announce_skipped(names: &[&str], blocked_by: &[&str]) {
 /// advised the command that waits for its slot; the `onBusy wait` hint is
 /// offered only for `block` checks, since a `warn` check never waits on a
 /// commit or a push and the hint cannot stop it deferring there.
-fn announce_deferred(deferred: &[(&str, Severity)]) {
-    for line in deferral_advice(deferred, crate::host_slots::deferred_by()) {
+fn announce_deferred(settings: &crate::config::Settings, deferred: &[(&str, Severity)]) {
+    let ceiling =
+        crate::host_slots::wait_ceiling_secs(crate::hooks::common::check_timeout(settings));
+    for line in deferral_advice(deferred, crate::host_slots::deferred_by(), ceiling) {
         println!("{line}");
     }
 }
@@ -2129,6 +2134,7 @@ fn announce_deferred(deferred: &[(&str, Severity)]) {
 fn deferral_advice(
     deferred: &[(&str, Severity)],
     deferred_by: crate::host_slots::DeferredBy,
+    ceiling: u64,
 ) -> Vec<String> {
     let names: Vec<&str> = deferred.iter().map(|(name, _)| *name).collect();
     let mut lines = vec![format!(
@@ -2139,7 +2145,10 @@ fn deferral_advice(
     )];
     let mut any_block = false;
     if !deferred.is_empty() {
-        lines.push("  wait for a slot, up to greengate.timeout:".to_string());
+        lines.push(format!(
+            "  wait for a slot, up to {} (greengate.timeout):",
+            crate::hooks::common::human_secs(ceiling)
+        ));
     }
     for (name, severity) in deferred {
         match severity {
@@ -3006,6 +3015,7 @@ mod tests {
                 ("pre-push-lint", Severity::Warn),
             ],
             crate::host_slots::DeferredBy::SlotWait,
+            3600,
         );
         let said = lines.join("\n");
         assert!(said.contains("2 check(s) deferred to CI"), "{said}");
@@ -3028,6 +3038,7 @@ mod tests {
                 ("pre-push-cargo-test", Severity::Block),
             ],
             crate::host_slots::DeferredBy::SlotWait,
+            3600,
         );
         let said = lines.join("\n");
         for gate in ["pre-push-probe", "pre-push-cargo-test"] {
@@ -3057,10 +3068,22 @@ mod tests {
         let lines = deferral_advice(
             &[("pre-push-cargo-test", Severity::Block)],
             crate::host_slots::DeferredBy::LineEnded,
+            3600,
         );
         let said = lines.join("\n");
         assert!(!said.contains("set onBusy wait"), "{said}");
-        assert!(lines[1].contains("up to greengate.timeout"), "{said}");
+        assert_eq!(
+            lines[1], "  wait for a slot, up to 1h00m (greengate.timeout):",
+            "{said}"
+        );
+        // A disabled `greengate.timeout` waits to the queue's own 3600 s.
+        let off = deferral_advice(
+            &[("pre-push-cargo-test", Severity::Block)],
+            crate::host_slots::DeferredBy::LineEnded,
+            crate::host_slots::wait_ceiling_secs(0),
+        );
+        assert_eq!(off[1], lines[1], "{off:?}");
+        assert!(lines.iter().all(|l| l.chars().count() <= 80), "{said}");
         assert!(lines[2].contains("GREENGATE_ON_BUSY=wait"), "{said}");
         assert!(lines[3].contains("skip the queue"), "{said}");
         assert!(lines[4].contains("GREENGATE_ON_BUSY=now"), "{said}");

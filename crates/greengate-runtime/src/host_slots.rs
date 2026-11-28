@@ -456,6 +456,16 @@ enum WaitPlan {
     Queue(greenharness_slots::WaitBounds),
 }
 
+/// The longest a wait in line lasts: `greengate.timeout`, or 3600 s when that
+/// is 0 (off). The queue, the heartbeat and the deferral advice read it here,
+/// so none of them can disagree about it.
+pub(crate) fn wait_ceiling_secs(timeout: u64) -> u64 {
+    match timeout {
+        0 => 3600,
+        secs => secs,
+    }
+}
+
 /// The [`WaitPlan`] for a check: one row of the plan's table per arm.
 /// `ceiling` is `greengate.timeout` (3600 s when 0), `seen` whether this run
 /// already deferred on a busy host. A hook check has no stall window: it waits
@@ -682,10 +692,9 @@ pub fn before_spawn(settings: &crate::config::Settings) -> std::io::Result<Optio
             SlotWait::BoundedForWarn => BusyPolicy::Wait,
             SlotWait::Policy => busy_policy(settings),
         };
-        let ceiling = Duration::from_secs(match crate::hooks::common::check_timeout(settings) {
-            0 => 3600,
-            s => s,
-        });
+        let ceiling = Duration::from_secs(wait_ceiling_secs(crate::hooks::common::check_timeout(
+            settings,
+        )));
         let seen = if BUSY_SEEN.load(Ordering::SeqCst) {
             HostSeen::Busy
         } else {

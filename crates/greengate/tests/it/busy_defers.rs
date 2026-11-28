@@ -881,7 +881,7 @@ fn the_run_now_advice_for_a_deferred_warn_gate_waits() {
     // it copies whole and no line outgrows an 80-column terminal.
     let label = out
         .lines()
-        .position(|text| text.trim() == "wait for a slot, up to greengate.timeout:")
+        .position(|text| text.trim() == "wait for a slot, up to 10m00s (greengate.timeout):")
         .unwrap_or_else(|| panic!("no wait-for-a-slot label: {out}"));
     assert!(!out.contains("run now:"), "{out}");
     let advice_lines: Vec<&str> = out.lines().skip(label).take(4).collect();
