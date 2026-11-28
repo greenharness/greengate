@@ -885,9 +885,11 @@ fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String 
         human_secs(row.quiet as u64)
     );
     if let Some((secs, n)) = row.queued {
-        line.push_str(&format!(
-            ", queued {} for a host slot (greengate.hostSlots {n})",
-            human_secs(secs as u64)
+        line.push_str(&queued_note(
+            secs,
+            n,
+            budgets.ceiling,
+            crate::rehearsal::in_snapshot(),
         ));
     } else if let Some((kind, waited)) = row.wait {
         line.push_str(&format!(
@@ -977,6 +979,31 @@ fn beat_line(row: &Row, first: bool, budgets: Budgets, on_push: bool) -> String 
     line.push('\n');
     line
 }
+
+/// What the heartbeat says of a check waiting in line for a host slot: how
+/// long, what the wait ends at, and the way out. The end is at most what is
+/// left of `greengate.timeout` (an `onBusy defer` or `warn` check ends
+/// sooner); a hook check defers to CI there. The way out is the variable only:
+/// `on_push` cannot name the command that was run. A land rehearsal sets
+/// `GREENGATE_ON_BUSY=wait` for its snapshot, so there the variable is no way
+/// out and the clause is left out. Plain text: this is a log line.
+fn queued_note(secs: f64, slots: u64, timeout: u64, in_snapshot: bool) -> String {
+    use crate::hooks::common::human_secs;
+    let left = crate::host_slots::wait_ceiling_secs(timeout).saturating_sub(secs as u64);
+    let mut note = format!(
+        ", queued {} for a host slot (greengate.hostSlots {slots}), defers to CI \
+         in at most {} (greengate.timeout)",
+        human_secs(secs as u64),
+        human_secs(left)
+    );
+    if !in_snapshot {
+        note.push_str(&format!("; skip the queue: rerun with {SKIP_QUEUE}"));
+    }
+    note
+}
+
+/// The variable that skips the queue for one run (ADR-0022).
+const SKIP_QUEUE: &str = "GREENGATE_ON_BUSY=now";
 
 /// Whether a stage of these checks runs while git holds a connection to the
 /// remote open: a push stage, unless it runs inside a rehearsal snapshot
@@ -1301,8 +1328,36 @@ mod tests {
         assert_eq!(
             beat,
             "  … pre-push-run-tests-js still running: 1m00s, last output 1m00s ago, \
-             queued 1m00s for a host slot (greengate.hostSlots 2)\n"
+             queued 1m00s for a host slot (greengate.hostSlots 2), defers to CI in \
+             at most 59m00s (greengate.timeout); \
+             skip the queue: rerun with GREENGATE_ON_BUSY=now\n"
         );
+    }
+
+    /// What is left of the ceiling is counted down from the time in line, is
+    /// never negative, and a disabled `greengate.timeout` (0) still ends at
+    /// the queue's own 3600 s. A land rehearsal sets `onBusy wait` itself, so
+    /// there the way out is left out. The text is plain: no escape bytes.
+    #[test]
+    fn a_queued_note_counts_down_to_the_ceiling() {
+        let at = |secs, timeout, snapshot| queued_note(secs, 2, timeout, snapshot);
+        assert!(at(3590.0, 3600, false).contains("in at most 10s (greengate.timeout)"));
+        assert!(at(7200.0, 3600, false).contains("in at most 0s (greengate.timeout)"));
+        assert!(at(60.0, 0, false).contains("in at most 59m00s (greengate.timeout)"));
+        let snap = at(60.0, 3600, true);
+        assert!(snap.contains("defers to CI in at most 59m00s"), "{snap}");
+        assert!(!snap.contains("GREENGATE_ON_BUSY"), "{snap}");
+        for note in [at(60.0, 3600, false), snap] {
+            assert!(!note.contains('\x1b'), "{note:?}");
+        }
+        // The same words whatever `on_push` says: it cannot name the command.
+        let mut r = row("pre-push-run-tests-js", 60.0);
+        r.queued = Some((60.0, 2));
+        let (push, commit) = (
+            beat_line(&r, false, B, true),
+            beat_line(&r, false, B, false),
+        );
+        assert_eq!(push, commit);
     }
 
     /// Under load the region counts toward the stretched budget and says
