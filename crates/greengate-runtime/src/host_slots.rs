@@ -164,6 +164,21 @@ pub fn sizing_and_machine(
     )
 }
 
+/// What turned `slot promote` off, or `None` when it is on: the environment
+/// and `greengate.hostPromote`, resolved by the slots crate from the same
+/// cached rows as the sizing keys. Its warnings print once per process.
+pub fn promote_switch(
+    settings: &crate::config::Settings,
+) -> Option<greenharness_slots::host::OffBy> {
+    let rows = crate::config::host_rows(settings);
+    let (off, warnings) =
+        greenharness_slots::host::resolve_promote(|name| std::env::var(name).ok(), rows);
+    for warning in &warnings {
+        say_once(warning);
+    }
+    off
+}
+
 /// `greengate.hostSlots`: unset sizes the slots from the machine
 /// (`Sizing::Auto`), N fixes them, `0` turns them off (`None`).
 pub fn sizing(settings: &crate::config::Settings) -> Option<greenharness_slots::Sizing> {
@@ -1169,6 +1184,10 @@ mod tests {
         );
         assert_eq!(
             std::env::var("GREENGATE_IDLE_LOAD_SCALE").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(
+            std::env::var(greenharness_slots::host::PROMOTE_ENV).as_deref(),
             Ok("1")
         );
     }

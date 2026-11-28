@@ -32,6 +32,7 @@ XDG_CONFIG_HOME = { value = "target/test-sandbox/config", relative = true, force
 GIT_CONFIG_GLOBAL = { value = "target/test-sandbox/gitconfig", relative = true, force = true }
 GREENHARNESS_HOST_SLOT = { value = "", force = true }
 GREENGATE_HOST_SLOTS = { value = "0", force = true }
+GREENGATE_HOST_PROMOTE = { value = "1", force = true }
 GREENGATE_IDLE_LOAD_SCALE = { value = "1", force = true }
 # Shortens greengate's own fixed waits by this factor in the test build only
 # (crates/greengate-runtime/src/clock.rs), and the fixtures' sleeps with them

@@ -221,12 +221,15 @@ pub enum Refused {
     },
     /// No name sorts between the neighbours of the place asked for.
     NoRoom { id: String, to: usize },
+    /// Promotion is turned off here ([`super::host::PROMOTE_KEY`] or
+    /// `GREENGATE_HOST_PROMOTE`); `by` is what turned it off.
+    Off { by: super::host::OffBy },
 }
 
 impl Refused {
     /// The limit's token: `no-reason`, `no-session`, `not-queued`,
     /// `ambiguous`, `old-client`, `own-session`, `already-ahead`, `budget`,
-    /// `age-floor`, `no-room`.
+    /// `age-floor`, `no-room`, `off`.
     pub fn limit(&self) -> &'static str {
         match self {
             Refused::NoReason => "no-reason",
@@ -239,6 +242,7 @@ impl Refused {
             Refused::Budget { .. } => "budget",
             Refused::AgeFloor { .. } => "age-floor",
             Refused::NoRoom { .. } => "no-room",
+            Refused::Off { .. } => "off",
         }
     }
 
@@ -286,6 +290,12 @@ impl Refused {
                 AGE_FLOOR.as_secs() / 60
             ),
             Refused::NoRoom { id, to } => format!("no name sorts {id} at {to}"),
+            Refused::Off { by } => match by {
+                super::host::OffBy::Env => "promotion is off for this process".to_string(),
+                super::host::OffBy::Global | super::host::OffBy::System => {
+                    "promotion is off on this machine".to_string()
+                }
+            },
         }
     }
 }
@@ -326,9 +336,19 @@ impl std::fmt::Display for PromoteError {
                 "the admission lock stayed held for {}s; nothing moved",
                 waited.as_secs()
             ),
-            PromoteError::Io { step, path, source } => {
-                write!(f, "{step} {}: {source}", path.display())
-            }
+            // The cause is the `source()`, printed once by whoever walks the
+            // chain ([`PromoteError::cause`] for a one-line report).
+            PromoteError::Io { step, path, .. } => write!(f, "{step} {}", path.display()),
+        }
+    }
+}
+
+impl PromoteError {
+    /// The error and its cause on one line: `<what>: <cause>`, each once.
+    pub fn one_line(&self) -> String {
+        match std::error::Error::source(self) {
+            Some(cause) => format!("{self}: {cause}"),
+            None => self.to_string(),
         }
     }
 }
@@ -349,6 +369,9 @@ pub fn promote_in(
 ) -> Result<Result<Moved, Refused>, PromoteError> {
     promote_with(dir, request, super::now_ms, || {})
 }
+
+/// What a promotion answers: a move or a refusal, or a failure.
+pub type PromoteAnswer = Result<Result<Moved, Refused>, PromoteError>;
 
 /// Move one job ahead, under t06's rules. `Ok(Ok(_))` is a move made;
 /// `Ok(Err(_))` a refusal naming its limit, journalled best-effort as
@@ -371,17 +394,19 @@ fn promote_with(
     clock: impl FnOnce() -> u128,
     on_lock_wait: impl FnOnce(),
 ) -> Result<Result<Moved, Refused>, PromoteError> {
-    super::safe_dir(dir).map_err(|e| PromoteError::Io {
-        step: "preparing the slot directory",
-        path: dir.to_path_buf(),
-        source: io::Error::other(e),
-    })?;
+    // A refusal that needs no queue comes first and creates nothing: the
+    // slot directory is prepared only for a request that reaches it.
     if request.reason.trim().is_empty() {
         return refused_now(dir, request, clock(), Refused::NoReason);
     }
     if request.session.is_empty() {
         return refused_now(dir, request, clock(), Refused::NoSession);
     }
+    super::safe_dir(dir).map_err(|e| PromoteError::Io {
+        step: "preparing the slot directory",
+        path: dir.to_path_buf(),
+        source: io::Error::other(e),
+    })?;
     let _admission = take_admission(&dir.join("admission"), on_lock_wait)?;
     let now = clock();
     let tickets: Vec<Ticket> = read_queue(dir)
@@ -423,6 +448,20 @@ fn promote_with(
     }))
 }
 
+/// Refuse a move because promotion is off ([`super::host::resolve_promote`]
+/// said so, read by the caller: this crate reads no environment). It comes
+/// before every other check and creates nothing; the `promote_refused` row
+/// (`"limit":"off"`, with the `source`) is written when the slot directory
+/// already exists and is private. A caller checks the switch before
+/// [`promote_in_waiting`]; this is how it refuses.
+pub fn promote_off(
+    dir: &Path,
+    request: &Promote<'_>,
+    by: super::host::OffBy,
+) -> Result<Result<Moved, Refused>, PromoteError> {
+    refused_now(dir, request, super::now_ms(), Refused::Off { by })
+}
+
 /// A refusal decided before the lock is taken: journalled with the clock as
 /// read now.
 fn refused_now(
@@ -438,20 +477,28 @@ fn refused_now(
 /// Take the admission lock: at once, or after a wait the caller is told of
 /// once. [`PROMOTE_LOCK_WAIT`] in all.
 fn take_admission(lock: &Path, on_lock_wait: impl FnOnce()) -> Result<File, PromoteError> {
+    take_admission_for(lock, LOCK_FIRST_WAIT, PROMOTE_LOCK_WAIT, on_lock_wait)
+}
+
+/// [`take_admission`] with its two waits given: the seam the tests shorten.
+fn take_admission_for(
+    lock: &Path,
+    first: Duration,
+    total: Duration,
+    on_lock_wait: impl FnOnce(),
+) -> Result<File, PromoteError> {
     let io = |source| PromoteError::Io {
         step: "taking the admission lock at",
         path: lock.to_path_buf(),
         source,
     };
-    if let Some(file) = super::lock_within(lock, LOCK_FIRST_WAIT).map_err(io)? {
+    if let Some(file) = super::lock_within(lock, first).map_err(io)? {
         return Ok(file);
     }
     on_lock_wait();
-    super::lock_within(lock, PROMOTE_LOCK_WAIT - LOCK_FIRST_WAIT)
+    super::lock_within(lock, total.saturating_sub(first))
         .map_err(io)?
-        .ok_or(PromoteError::LockBusy {
-            waited: PROMOTE_LOCK_WAIT,
-        })
+        .ok_or(PromoteError::LockBusy { waited: total })
 }
 
 /// What a granted move will do: the ticket to rename, its new name and the
@@ -612,15 +659,25 @@ fn promoted_row(request: &Promote<'_>, now: u128, mv: &Move) -> String {
 /// A refusal's row, best-effort: it never counts toward the budget, and a
 /// lost one costs one sample.
 fn record_refusal(dir: &Path, request: &Promote<'_>, now: u128, refused: &Refused) {
+    // Only an off refusal names its source; every other line has no field.
+    let source = if let Refused::Off { by } = refused {
+        format!(",\"source\":\"{}\"", by.token())
+    } else {
+        String::new()
+    };
     let line = format!(
-        "{{\"at_ms\":{now},\"tool\":\"{}\",\"pid\":{},\"session\":\"{}\",\"outcome\":\"promote_refused\",\"id\":\"{}\",\"limit\":\"{}\"}}\n",
+        "{{\"at_ms\":{now},\"tool\":\"{}\",\"pid\":{},\"session\":\"{}\",\"outcome\":\"promote_refused\",\"id\":\"{}\",\"limit\":\"{}\"{source}}}\n",
         escape(request.tool),
         std::process::id(),
         escape(request.session),
         escape(request.id),
         refused.limit(),
     );
-    append_journal(dir, &line);
+    // Only into a slot directory that exists and is private: a refusal before
+    // the queue is touched creates no state.
+    if dir.is_dir() && platform::check_private(dir).is_ok() {
+        append_journal(dir, &line);
+    }
 }
 
 /// Append one line to `waits.jsonl` in a single write, reporting failure:
@@ -1097,5 +1154,132 @@ mod tests {
         eprintln!("budget scan over 14k lines: {took:?}");
         assert!(moves.is_empty());
         assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+
+    /// Off refuses first, by name, with its source; it moves nothing and
+    /// journals one `promote_refused` row carrying the source.
+    #[test]
+    fn off_refuses_by_name_and_journals_its_source() {
+        use super::super::host::OffBy;
+        let slots_dir = scratch("off");
+        let _lease = held(&slots_dir);
+        let _a = waiter(&slots_dir, OTHER, "a");
+        let mine = waiter(&slots_dir, ME, "mine");
+        let before = ids(&slots_dir);
+        for by in [OffBy::Env, OffBy::Global, OffBy::System] {
+            let answer = promote_off(&slots_dir, &ask(mine.id(), ME, 0), by).unwrap();
+            assert_eq!(answer, Err(Refused::Off { by }));
+        }
+        let off = Refused::Off { by: OffBy::Global };
+        assert_eq!(off.limit(), "off");
+        assert_eq!(off.describe(), "promotion is off on this machine");
+        assert_eq!(
+            Refused::Off { by: OffBy::System }.describe(),
+            "promotion is off on this machine"
+        );
+        assert_eq!(
+            Refused::Off { by: OffBy::Env }.describe(),
+            "promotion is off for this process"
+        );
+        assert_eq!(ids(&slots_dir), before);
+        assert_eq!(rows(&slots_dir, "promote_refused"), 3);
+        let journal = fs::read_to_string(slots_dir.join("waits.jsonl")).unwrap();
+        for token in ["env", "global", "system"] {
+            assert!(
+                journal.contains(&format!("\"limit\":\"off\",\"source\":\"{token}\"")),
+                "{journal}"
+            );
+        }
+        assert_eq!(rows(&slots_dir, "promoted"), 0);
+    }
+
+    /// A refusal before the queue is touched creates no slot directory, and
+    /// a directory that is not private takes no row.
+    #[test]
+    fn a_refusal_before_the_queue_creates_nothing() {
+        use super::super::host::OffBy;
+        let missing =
+            std::env::temp_dir().join(format!("greengate-reorder-{}-missing", std::process::id()));
+        let _ = fs::remove_dir_all(&missing); // best-effort: start absent
+        let no_reason = Promote {
+            reason: " ",
+            ..ask("1-0", ME, 0)
+        };
+        assert_eq!(refused(&missing, &no_reason).limit(), "no-reason");
+        assert_eq!(refused(&missing, &ask("1-0", "", 0)).limit(), "no-session");
+        let off = promote_off(&missing, &ask("1-0", ME, 0), OffBy::Env).unwrap();
+        assert_eq!(off.unwrap_err().limit(), "off");
+        assert!(!missing.exists(), "no slot directory may appear");
+
+        use std::os::unix::fs::PermissionsExt;
+        let open = scratch("open-dir");
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        promote_off(&open, &ask("1-0", ME, 0), OffBy::Env)
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            !open.join("waits.jsonl").exists(),
+            "no row into a shared dir"
+        );
+    }
+
+    /// The lock held past the first wait: the caller is told once, and the
+    /// move goes through when the holder lets go.
+    #[test]
+    fn a_lock_held_past_the_first_wait_is_said_once_and_then_taken() {
+        let slots_dir = scratch("lockwait");
+        let lock = slots_dir.join("admission");
+        let held = super::super::lock_within(&lock, Duration::from_millis(50))
+            .unwrap()
+            .unwrap();
+        let said = AtomicUsize::new(0);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let got = take_admission_for(
+            &lock,
+            Duration::from_millis(100),
+            Duration::from_secs(2),
+            || {
+                said.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        release.join().unwrap();
+        assert!(got.is_ok(), "{got:?}");
+        assert_eq!(said.load(Ordering::SeqCst), 1);
+    }
+
+    /// A lock that is never let go ends in `LockBusy` naming the wait.
+    #[test]
+    fn a_lock_that_stays_held_is_busy() {
+        let slots_dir = scratch("lockbusy");
+        let lock = slots_dir.join("admission");
+        let _held = super::super::lock_within(&lock, Duration::from_millis(50))
+            .unwrap()
+            .unwrap();
+        let said = AtomicUsize::new(0);
+        let total = Duration::from_millis(300);
+        let got = take_admission_for(&lock, Duration::from_millis(100), total, || {
+            said.fetch_add(1, Ordering::SeqCst);
+        });
+        match got {
+            Err(PromoteError::LockBusy { waited }) => assert_eq!(waited, total),
+            other => panic!("expected LockBusy, got {other:?}"),
+        }
+        assert_eq!(said.load(Ordering::SeqCst), 1);
+    }
+
+    /// The I/O cause is in `source()` and in the one-line report, once.
+    #[test]
+    fn an_io_error_names_its_cause_once() {
+        let error = PromoteError::Io {
+            step: "reading the queue in",
+            path: PathBuf::from("/x/queue"),
+            source: io::Error::other("disk gone"),
+        };
+        assert_eq!(error.to_string(), "reading the queue in /x/queue");
+        assert_eq!(error.one_line(), "reading the queue in /x/queue: disk gone");
+        assert_eq!(error.one_line().matches("disk gone").count(), 1);
     }
 }

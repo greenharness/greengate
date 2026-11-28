@@ -77,62 +77,91 @@ fn promote(own: &[OsString], operands: &[OsString]) -> i32 {
         tool: BIN,
     };
     let dir = greenharness_slots::dir();
-    let answer = greenharness_slots::promote_in_waiting(&dir, &request, || {
-        eprintln!("{BIN}: waiting for the admission lock…");
-    });
+    let answer = match crate::host_slots::promote_switch(&settings) {
+        Some(by) => greenharness_slots::promote_off(&dir, &request, by),
+        None => greenharness_slots::promote_in_waiting(&dir, &request, || {
+            eprintln!("{BIN}: waiting for the admission lock…");
+        }),
+    };
+    let (lines, code) = promote_report(answer, &id, to);
+    for line in lines {
+        eprintln!("{line}");
+    }
+    code
+}
+
+/// What `slot promote` says and exits with for one answer: the stderr lines
+/// and the status (0 moved, 1 refused, 74 an I/O failure, 75 the lock stayed
+/// held). Pure, so every branch is tested.
+fn promote_report(
+    answer: greenharness_slots::PromoteAnswer,
+    id: &str,
+    to: usize,
+) -> (Vec<String>, i32) {
     match answer {
         Ok(Ok(moved)) => {
             let jobs = if moved.passed == 1 { "job" } else { "jobs" };
-            eprintln!(
-                "moved {} from {} to {}, past {} {jobs}; {} of {} moves left in 24 h",
-                moved.id,
-                moved.from,
-                moved.to,
-                moved.passed,
-                moved.budget.saturating_sub(moved.used),
-                moved.budget
-            );
-            0
+            (
+                vec![format!(
+                    "moved {} from {} to {}, past {} {jobs}; {} of {} moves left in 24 h",
+                    moved.id,
+                    moved.from,
+                    moved.to,
+                    moved.passed,
+                    moved.budget.saturating_sub(moved.used),
+                    moved.budget
+                )],
+                0,
+            )
         }
         Ok(Err(refused)) => {
-            eprintln!(
+            let mut lines = vec![format!(
                 "{BIN}: slot promote refused ({}): {}",
                 refused.limit(),
                 refused.describe()
+            )];
+            lines.extend(
+                refusal_hints(&refused, id)
+                    .into_iter()
+                    .map(|h| format!("  {h}")),
             );
-            for hint in refusal_hints(&refused, &id) {
-                eprintln!("  {hint}");
-            }
-            1
+            (lines, 1)
         }
         Err(greenharness_slots::PromoteError::LockBusy { waited }) => {
-            eprintln!(
-                "{BIN}: slot promote: the admission lock stayed held for {}s; nothing moved",
-                waited.as_secs()
-            );
             let to_flag = if to > 0 {
                 format!(" --to {to}")
             } else {
                 String::new()
             };
-            eprintln!("  retry: {BIN} slot promote {id}{to_flag} --reason <text>");
-            BUSY_EXIT
+            (
+                vec![
+                    format!(
+                        "{BIN}: slot promote: the admission lock stayed held for {}s; nothing moved",
+                        waited.as_secs()
+                    ),
+                    format!("  retry: {BIN} slot promote {id}{to_flag} --reason <text>"),
+                ],
+                BUSY_EXIT,
+            )
         }
-        Err(error) => {
-            eprintln!("{BIN}: slot promote: {error}");
-            QUEUE_FAILED_EXIT
-        }
+        Err(error) => (
+            vec![format!("{BIN}: slot promote: {}", error.one_line())],
+            QUEUE_FAILED_EXIT,
+        ),
     }
 }
 
 /// What to do next after a refusal, beside its one line.
 fn refusal_hints(refused: &greenharness_slots::Refused, id: &str) -> Vec<String> {
+    use greenharness_slots::host::OffBy;
     use greenharness_slots::Refused;
     match refused {
-        Refused::NoSession => vec![
-            "the session comes from CLAUDE_CODE_SESSION_ID, RELAIS_SESSION_ID or CLAUDE_SESSION_ID"
-                .to_string(),
-        ],
+        Refused::NoSession => vec![format!(
+            "the session comes from {}",
+            match greenharness_slots::SESSION_ENVS {
+                [first @ .., last] => format!("{} or {last}", first.join(", ")),
+            }
+        )],
         Refused::NoReason => vec![format!("{BIN} slot promote {id} --reason <text>")],
         Refused::NotQueued { .. } | Refused::Ambiguous { .. } => {
             vec![format!("see: {BIN} slots")]
@@ -142,6 +171,32 @@ fn refusal_hints(refused: &greenharness_slots::Refused, id: &str) -> Vec<String>
         } => vec![format!(
             "try: {BIN} slot promote {id} --to {n} --reason <text>"
         )],
+        Refused::NoRoom { to, .. } => vec![
+            format!("see: {BIN} slots"),
+            format!(
+                "try: {BIN} slot promote {id} --to {} --reason <text>",
+                to + 1
+            ),
+        ],
+        // The way back on is in docs/host-slots.md, not here: the switch is
+        // a rollback set on a measurement.
+        Refused::Off { by } => vec![
+            match by {
+                OffBy::Env => format!(
+                    "set by: {}=0 in the environment",
+                    greenharness_slots::host::PROMOTE_ENV
+                ),
+                OffBy::System => format!(
+                    "set by: git config --system {} 0",
+                    greenharness_slots::host::PROMOTE_KEY
+                ),
+                OffBy::Global => format!(
+                    "set by: git config --global {} 0",
+                    greenharness_slots::host::PROMOTE_KEY
+                ),
+            },
+            format!("the job keeps its place; see: {BIN} slots"),
+        ],
         _ => Vec::new(),
     }
 }
@@ -823,6 +878,117 @@ mod tests {
         assert!(parse_promote(&os(&["9-0", "--why", "r"]), &[])
             .unwrap_err()
             .contains("unknown"));
+    }
+
+    /// The words after `--` are the job's id only: a flag-looking one is an
+    /// id, not a flag, and a second job is refused.
+    #[test]
+    fn the_operand_after_dashes_is_the_job_and_only_the_job() {
+        let (id, reason, _) = parse_promote(&os(&["--reason", "r"]), &os(&["9-0"])).unwrap();
+        assert_eq!((id.as_str(), reason.as_str()), ("9-0", "r"));
+        let (id, _, to) = parse_promote(&os(&["--reason", "r"]), &os(&["--to"])).unwrap();
+        assert_eq!((id.as_str(), to), ("--to", 0), "a flag after -- is an id");
+        assert!(parse_promote(&os(&["9-0", "--reason", "r"]), &os(&["8-0"]))
+            .unwrap_err()
+            .contains("one job"));
+        assert!(parse_promote(&os(&["--reason", "r"]), &os(&["9-0", "8-0"]))
+            .unwrap_err()
+            .contains("one job"));
+    }
+
+    fn said(answer: greenharness_slots::PromoteAnswer, to: usize) -> (String, i32) {
+        let (lines, code) = promote_report(answer, "42-1", to);
+        // The off refusal is the one this switch adds: it fits 80 columns.
+        // The older refusals keep their wording.
+        if lines.iter().any(|l| l.contains("refused (off)")) {
+            assert!(
+                lines.iter().all(|l| l.chars().count() <= 80),
+                "a line is over 80 columns: {lines:?}"
+            );
+        }
+        (lines.join("\n"), code)
+    }
+
+    #[test]
+    fn a_lock_that_stayed_held_exits_75_with_the_retry_command() {
+        let busy = greenharness_slots::PromoteError::LockBusy {
+            waited: std::time::Duration::from_secs(10),
+        };
+        let (text, code) = said(Err(busy), 2);
+        assert_eq!(code, BUSY_EXIT);
+        assert!(
+            text.contains("stayed held for 10s; nothing moved"),
+            "{text}"
+        );
+        assert!(
+            text.contains("retry: greengate slot promote 42-1 --to 2 --reason <text>"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_io_error_exits_74_and_names_its_cause_once() {
+        let error = greenharness_slots::PromoteError::Io {
+            step: "reading the queue in",
+            path: std::path::PathBuf::from("/x/queue"),
+            source: std::io::Error::other("disk gone"),
+        };
+        let (text, code) = said(Err(error), 0);
+        assert_eq!(code, QUEUE_FAILED_EXIT);
+        assert_eq!(text.matches("disk gone").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn each_refusal_says_its_limit_and_what_to_do_next() {
+        use greenharness_slots::host::OffBy;
+        use greenharness_slots::Refused;
+        let cases = [
+            (
+                Refused::NoRoom {
+                    id: "42-1".into(),
+                    to: 2,
+                },
+                "try: greengate slot promote 42-1 --to 3 --reason <text>",
+            ),
+            (
+                Refused::NoRoom {
+                    id: "42-1".into(),
+                    to: 2,
+                },
+                "see: greengate slots",
+            ),
+            (
+                Refused::NoSession,
+                "CLAUDE_CODE_SESSION_ID, RELAIS_SESSION_ID or CLAUDE_SESSION_ID",
+            ),
+            (
+                Refused::NoReason,
+                "greengate slot promote 42-1 --reason <text>",
+            ),
+            (
+                Refused::NotQueued { id: "42-1".into() },
+                "see: greengate slots",
+            ),
+            (
+                Refused::Off { by: OffBy::Global },
+                "set by: git config --global greengate.hostPromote 0",
+            ),
+            (
+                Refused::Off { by: OffBy::System },
+                "set by: git config --system greengate.hostPromote 0",
+            ),
+            (
+                Refused::Off { by: OffBy::Env },
+                "set by: GREENGATE_HOST_PROMOTE=0 in the environment",
+            ),
+        ];
+        for (refused, hint) in cases {
+            let limit = refused.limit();
+            let (text, code) = said(Ok(Err(refused)), 0);
+            assert_eq!(code, 1);
+            assert!(text.contains(&format!("refused ({limit})")), "{text}");
+            assert!(text.contains(hint), "{hint:?} missing from {text}");
+        }
     }
 
     #[test]

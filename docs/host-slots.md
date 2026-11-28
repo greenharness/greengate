@@ -64,7 +64,7 @@ the slot is freed, so a successor's line can come before it: order by
 **Promotion lines**, from 5.2, one per [move](#moving-a-job-ahead): `at_ms`,
 `tool`, `pid`, `session`, `"outcome":"promoted"`, `id`, `from`, `to`,
 `passed`, `command`, `reason`. A refused move writes one
-`"outcome":"promote_refused"` line with `id`, `session` and `limit`. Neither
+`"outcome":"promote_refused"` line with `id`, `session` and `limit` (and `source` for `off`). Neither
 has `waited_ms`. A rotation of the journal must keep the last 24 h of
 `promoted` lines: the move budget is counted from them.
 
@@ -141,6 +141,7 @@ name, when:
 | `budget` | the session made 3 moves in the last 24 h (rolling); the refusal says when the next frees |
 | `age-floor` | the move would pass a job that has waited 20 min or more; the refusal names it and the furthest `--to` that passes none |
 | `no-room` | no name sorts between the place's neighbours |
+| `off` | promotion is turned off on this machine (`greengate.hostPromote 0`, or `GREENGATE_HOST_PROMOTE=0`); checked first, before the other limits, and it creates no slot directory |
 
 Otherwise the `promoted` line is appended first, then the ticket is renamed
 to sort just before the job at `--to` (1 s before the head, or the midpoint
@@ -152,6 +153,11 @@ Exit status: 0 moved (stderr: `moved <id> from 3 to 0, past 3 jobs; 2 of 3
 moves left in 24 h`), 1 refused or slots off, 2 a usage error, 74 an I/O
 failure (queue or journal), 75 the admission lock stayed held for 10 s.
 Every message goes to stderr; the queue view (`slots`) is the stdout a script reads.
+
+**Turning it off.** `git config --global greengate.hostPromote 0` refuses every
+move with `refused (off)` (see
+[`greengate.hostPromote`](configuration.md#greengatehostpromote--the-off-switch-for-slot-promote));
+`git config --global --unset greengate.hostPromote` turns it back on.
 
 ## Cores
 
