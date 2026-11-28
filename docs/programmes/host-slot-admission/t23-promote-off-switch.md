@@ -54,4 +54,16 @@ Closed on `fix/hsa-t23` (plan `docs/plans/2026-11-27-promote-off-switch.md`).
   passed, including the two new ones). `cargo clippy -D warnings` passes except
   for `suspicious-runtime-symbol-definitions` in `posix_signal.rs`, which is
   pre-existing on `origin/main` and not touched here (rustc 1.100 lint).
-- Release and the t13 rollback line are still to do (Phase 2 of the plan).
+- Phase 2 done on 2026-11-28. #541 shipped in greengate 6.0.0 (tag v6.0.0 on
+  1eb9b1c3, release PR #551, cut by the topo-spotter-rename t28 session) and is
+  installed here (`greengate --version` prints 6.0.0). Live check on the
+  installed binary: `GREENGATE_HOST_PROMOTE=0 greengate slot promote 999999
+  --reason …` printed `refused (off): promotion is off for this process`, then
+  `set by: GREENGATE_HOST_PROMOTE=0 in the environment`, and exited 1. It
+  journalled one `promote_refused` row with `"limit":"off","source":"env"`.
+  The same call without the variable was refused `not-queued`. The t13 plan's
+  Outcome now names the switch as the rollback
+  (`docs/plans/2026-11-26-agent-moves-own-job-ahead.md`).
+- When the environment set it, the refusal reads "for this process". The first
+  bullet's "on this machine" wording is the config-key case, which was not live
+  checked.

@@ -254,8 +254,10 @@ the rules.
 Shipped on `fix/hsa-t13`: `greengate slot promote`, the `slots` queue view,
 and the crate's find-by-inode waiter, under t06's rules, with ADR-0022
 amended. Release needed: greengate and `greenharness-slots` 5.2.0 (the
-driver cuts it). Not shipped: the off switch the Measure names (rollback is a
-5.1.1 reinstall), and relais's side, which waits on its lock moving to crate
+driver cuts it). The off switch the Measure names shipped later in greengate
+6.0.0 (t23): rollback is `git config --global greengate.hostPromote 0`
+(`GREENGATE_HOST_PROMOTE=0` for one process), not a reinstall. Not shipped
+here: relais's side, which waits on its lock moving to crate
 5.2. Surprise: `greengate`'s top-level flag allowlist rejected `--reason`
 before the subcommand saw it, caught only by the end-to-end test.
 
